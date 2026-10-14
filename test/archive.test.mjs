@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   ARCHIVE_BYTES,
+  ARCHIVE_SECTIONS,
   BACKUP_DIR,
   HISTORY_MAX_BYTES,
   HISTORY_SUFFIX,
@@ -391,4 +392,82 @@ test('第二层：落盘后的归档文件确实不超上限（抬头开销已�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── 无限接力：真实库里跑出来的死循环 ────────────────────────────────
+// 症状：一份 90956 字节的 `-history-3.md` 因为 22 个章节 > ARCHIVE_SECTIONS 被判超标，
+// 执行后生成 91006 字节的 `-history-7.md` —— **比原来还大**（新文件要带自己的抬头和指针）。
+// 而 91006 又是 22 个章节，于是 history-8、history-9… 每点一次「执行」就换个名字，
+// 还每次悄悄长几个字节，永远停不下来。用户看到的是「有一个计划待执行」，于是会一直点。
+
+test('history 文件：章节多不是缺陷，只要没超上限就不出计划（这是接力的根因）', () => {
+  // 22 个批次 → 23 个「##」章节，远超 ARCHIVE_SECTIONS；但体积压在 HISTORY_MAX_BYTES 以下。
+  const dir = makeStore({ 'MEMORY.md': '# 索引\n', 'project-demo-history.md': bigNote({ name: 'project-demo-history', batches: 22, pad: 1250 }) });
+  const text = readFileSync(join(dir, 'project-demo-history.md'), 'utf8');
+  const size = Buffer.byteLength(text);
+  const sections = (text.match(/^## /gm) || []).length;
+  // 前提得成立，否则这条测试什么都没测：
+  assert.ok(sections > 20, `章节数应超过 ${20}，实际 ${sections}`);
+  assert.ok(size < HISTORY_MAX_BYTES, `体积应低于上限 ${HISTORY_MAX_BYTES}，实际 ${size}`);
+  assert.ok(size > ARCHIVE_BYTES, `体积应高于主文件的归档线 ${ARCHIVE_BYTES}，实际 ${size}`);
+
+  const { plans } = planArchive(dir);
+  assert.equal(plans.filter((p) => p.file === 'project-demo-history.md').length, 0,
+    'history 文件没超上限就不该出计划 —— 拆一份日志只是把它改个名字');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('接力回归：反复执行直到无计划，必须有限轮内停下，且产物都不超上限', () => {
+  // 造一份**远超上限**的 history 文件：60 个小批次（pad 600 ≈ 1.8KB/批）≈ 108KB，61 个章节。
+  // 批要小、要多，是为了让**产物本身也落在陷阱里**：分组上限约 91KB，于是第一组会装下
+  // 约 50 个批次 —— 50 个章节 > ARCHIVE_SECTIONS，体积却压在上限以下。那正是接力的一环。
+  const dir = makeStore({
+    'MEMORY.md': '# 索引\n',
+    'project-demo.md': bigNote({ name: 'project-demo', batches: 2, pad: 300 }),
+    'project-demo-history.md': bigNote({ name: 'project-demo-history', batches: 60, pad: 600 }),
+  });
+
+  const rounds = [];
+  for (let round = 0; round < 8; round += 1) {
+    const { plans } = planArchive(dir);
+    if (!plans.length) break;
+    for (const p of plans) {
+      const res = applyArchive(dir, p);
+      assert.equal(res.ok, true, `第 ${round + 1} 轮执行失败：${res.reason}`);
+      rounds.push(`${p.file} → ${res.historyFiles.join(', ')}`);
+    }
+  }
+
+  const left = planArchive(dir).plans;
+  assert.deepEqual(left, [], `接力没有终止，还剩 ${left.length} 个计划：${left.map((p) => p.file).join(', ')}`);
+  assert.ok(rounds.length <= 3, `归档轮次应当很少，实际 ${rounds.length} 轮：\n${rounds.join('\n')}`);
+
+  // 逐个产物核对「它自己会不会再被计划」—— 这才是接力的那一环。上面那个循环只是
+  // 外围保险；真正要断言的是：**任何 ≤ 上限的 history 文件都不该再出计划**，
+  // 哪怕它的章节数远超 ARCHIVE_SECTIONS。
+  const replay = [];
+  let maxSections = 0;
+  const all = planArchive(dir).plans;
+  for (const f of readdirSync(dir)) {
+    if (!/-history(?:-\d+)?\.md$/.test(f)) continue;
+    const secs = (readFileSync(join(dir, f), 'utf8').match(/^## /gm) || []).length;
+    maxSections = Math.max(maxSections, secs);
+    if (all.some((p) => p.file === f)) replay.push(`${f}(${secs} 章节)`);
+  }
+  // 前提核对：**至少有一个**产物落在陷阱里（章节多、体积却在上限以下）。
+  // 尾部那份零头分组章节自然少，所以这里看的是最大值而不是每一份。
+  assert.ok(maxSections > ARCHIVE_SECTIONS,
+    `最大的产物只有 ${maxSections} 个章节，够不到陷阱条件（> ${ARCHIVE_SECTIONS}），这条测试失去意义`);
+  assert.deepEqual(replay, [], `这些产物自己又被计划了一遍 —— 接力会从这里继续：${replay.join(', ')}`);
+
+  // 不变量：所有 history 产物都在上限内 —— 这正是终止性的来源
+  // （history 只在超上限时才拆，分组上限又扣掉了抬头开销，所以产物必然 ≤ 上限 < 源）。
+  const over = [];
+  for (const f of readdirSync(dir)) {
+    if (!/-history(?:-\d+)?\.md$/.test(f)) continue;
+    const n = Buffer.byteLength(readFileSync(join(dir, f), 'utf8'));
+    if (n > HISTORY_MAX_BYTES) over.push(`${f}=${n}`);
+  }
+  assert.deepEqual(over, [], `这些产物超过了 HISTORY_MAX_BYTES，接力会从这里继续：${over.join(', ')}`);
+  rmSync(dir, { recursive: true, force: true });
 });

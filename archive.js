@@ -222,10 +222,20 @@ export function planArchive(storePath, options = {}) {
     }
     const bytes = bytesOf(text);
     const sections = (text.match(/^## /gm) || []).length;
-    // 两条判据是**或**的关系：足够大，或者章节多到已经不像一篇笔记（追加式日志的形态）。
-    // 别把它改成「体积硬门槛」—— 那会让一份 22 个批次、体积却只 1KB 的日志永远不算数，
-    // 而它恰恰是最该被拆的那种：正文被日志淹没，召回时又长又散。
-    if (bytes <= bar && sections <= minSections) continue;
+    // 主文件：两条判据是**或**的关系：足够大，或者章节多到已经不像一篇笔记（追加式日志的
+    // 形态）。别把它改成「体积硬门槛」—— 那会让一份 22 个批次、体积却只 1KB 的日志永远
+    // 不算数，而它恰恰是最该被拆的那种：正文被日志淹没，召回时又长又散。
+    //
+    // ★ 但 `-history*.md` 不能套「章节多」这条判据：**它按定义就是日志**，章节多是它的
+    // 正常形态而不是缺陷。拆一份日志除了把它改个名字，什么都不会变好。
+    //
+    // 这条不是理论推演，是真实库里跑出来的死循环：一份 90956 字节的 history-3.md 因为
+    // 22 个章节 > 20 被判超标，执行后生成 91006 字节的 history-7.md —— **比原来还大**
+    // （新文件要带自己的抬头和指针）。而 91006 又是 22 个章节，于是 history-8、history-9…
+    // 每点一次「执行」就换个名字，还每次悄悄长几个字节，永远停不下来。
+    if (HISTORY_FILE_RE.test(file)) {
+      if (bytes <= bar) continue;
+    } else if (bytes <= bar && sections <= minSections) continue;
 
     const { fields, body } = parseFrontmatter(text);
     const { head, tail, batches } = splitBatches(body);
@@ -272,6 +282,17 @@ export function planArchive(storePath, options = {}) {
       batchCount: g.items.length,
       bytes: g.bytes,
     }));
+    // 关于「无限接力」：这里**故意没有**再加一道「产物必须比源文件小」的断言。
+    //
+    // 试过，但它会连带打掉一个正当场景：一份 2KB、却被 22 个日志段淹没的笔记是**该拆**的
+    // —— 收益在召回质量（正文不再被日志稀释），不在字节数。而「产物不比源小」在这类笔记上
+    // 恰恰成立，于是好笔记被误拦。
+    //
+    // 真正把接力堵死的是上面那条：**history 文件只在超过 HISTORY_MAX_BYTES 时才拆**，
+    // 而分组上限用的又是 `HISTORY_MAX_BYTES - 抬头开销`，所以产物必然 ≤ 上限 < 源文件。
+    // 这是可证的终止条件，不需要额外断言；`archive.test.mjs` 里有一条真的循环执行的
+    // 回归测试守着它（反复 apply 直到无计划，要求有限轮内停下且文件数有界）。
+
     const pointer = historyPointer(historyFiles, batches.length);
     const keptBody = [head, tail, pointer].filter(Boolean).join('\n\n');
     const newMainBytes = bytesOf(renderWithFields(text, fields, keptBody));
