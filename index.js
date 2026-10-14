@@ -25,6 +25,7 @@ import { checkMemoryWrite } from './guard.js';
 import { appendAudit, readAudit, GUARD_EPOCH } from './audit.js';
 import { readDocs } from './store.js';
 import { auditStore } from './doctor.js';
+import { planArchive, applyArchive } from './archive.js';
 
 export const name = 'engramory-recall';
 
@@ -529,6 +530,25 @@ export function apply(ctx, config = {}) {
   // 体检要把整个库读一遍，而面板每 3 秒轮询一次 —— 按 30 秒 TTL 缓存，别每轮重算。
   const AUDIT_TTL_MS = 30_000;
   let auditCache = { key: '', at: 0, value: null };
+  let archiveCache = { key: '', at: 0, value: null };
+
+  /**
+   * 归档计划（纯读，不写任何文件）。
+   * 面板点「执行」时才真的动库，且每次都要重新出具计划 —— 计划是有时效的：
+   * 中间若有人改了文件，旧的计划必须作废（applyArchive 自己还会再核一遍批次标题）。
+   */
+  const archivePlans = (storePath) => {
+    const fresh = archiveCache.key === storePath && Date.now() - archiveCache.at < AUDIT_TTL_MS;
+    if (fresh) return archiveCache.value;
+    let value;
+    try {
+      value = planArchive(storePath);
+    } catch (err) {
+      value = { plans: [], skipped: [], crashed: String(err?.message ?? err) };
+    }
+    archiveCache = { key: storePath, at: Date.now(), value };
+    return value;
+  };
 
   const storeSnapshot = () => {
     const storePath = String(settings.storePath || '').trim();
@@ -588,6 +608,8 @@ export function apply(ctx, config = {}) {
       audit,
       // 写入审计（落盘、可回放）。体检回答「库现在什么样」，审计回答「谁把它改成这样的」。
       writeAudit: storePath ? { epoch: GUARD_EPOCH, entries: readAudit(storePath, 40) } : { epoch: GUARD_EPOCH, entries: [] },
+      // 归档计划：只出计划不动手。真正的执行在 POST /api/engramory-recall/archive。
+      archive: storePath ? archivePlans(storePath) : { plans: [], skipped: [] },
       config: {
         enabled: settings.enabled !== false,
         maxPointers: Number(settings.maxPointers) || 4,
@@ -612,25 +634,146 @@ export function apply(ctx, config = {}) {
     };
   };
 
-  ctx.inject(['webServer'], (webCtx) => {
-    const dispose = webCtx.webServer.register({
-      kind: 'exact',
-      path: '/api/engramory-recall/state',
-      handler: async (req, res) => {
-        if ((req.method ?? 'GET') !== 'GET') {
-          res.writeHead(405, { allow: 'GET' });
-          res.end();
+  // 读 JSON 请求体。限 8KB —— 归档请求就一个文件名，没有理由收大包。
+  const readBody = (req, limit = 8 * 1024) =>
+    new Promise((resolve, reject) => {
+      let size = 0;
+      const chunks = [];
+      req.on('data', (chunk) => {
+        size += chunk.length;
+        if (size > limit) {
+          reject(new Error('body too large'));
+          req.destroy();
           return;
         }
-        const body = JSON.stringify({ ...storeSnapshot(), log: recallLog, generatedAt: Date.now() });
-        res.writeHead(200, {
-          'content-type': 'application/json; charset=utf-8',
-          'content-length': Buffer.byteLength(body),
-          'cache-control': 'no-store',
-        });
-        res.end(body);
-      },
+        chunks.push(chunk);
+      });
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', reject);
     });
-    return () => dispose();
+
+  const sendJson = (res, status, payload, extraHeaders = {}) => {
+    const body = JSON.stringify(payload);
+    res.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-length': Buffer.byteLength(body),
+      'cache-control': 'no-store',
+      ...extraHeaders,
+    });
+    res.end(body);
+  };
+
+  ctx.inject(['webServer'], (webCtx) => {
+    const disposers = [];
+
+    disposers.push(
+      webCtx.webServer.register({
+        kind: 'exact',
+        path: '/api/engramory-recall/state',
+        handler: async (req, res) => {
+          if ((req.method ?? 'GET') !== 'GET') {
+            res.writeHead(405, { allow: 'GET' });
+            res.end();
+            return;
+          }
+          sendJson(res, 200, { ...storeSnapshot(), log: recallLog, generatedAt: Date.now() });
+        },
+      }),
+    );
+
+    // 归档执行口。这是本插件唯一会「动记忆库」的 HTTP 接口，所以刻意做得笨：
+    // 必须 POST、必须带 confirm:true、文件名必须原样命中当前计划 —— 不做模糊匹配、
+    // 不接受「归档所有超标的」。原因：面板给的是「人看一眼再点」的两段式，
+    // 接口就不该留一个能批量动手的后门。
+    disposers.push(
+      webCtx.webServer.register({
+        kind: 'exact',
+        path: '/api/engramory-recall/archive',
+        handler: async (req, res) => {
+          if ((req.method ?? 'GET') !== 'POST') {
+            res.writeHead(405, { allow: 'POST' });
+            res.end();
+            return;
+          }
+          const storePath = String(settings.storePath || '').trim();
+          if (!storePath) {
+            sendJson(res, 400, { ok: false, reason: 'storePath 没配' });
+            return;
+          }
+
+          let payload;
+          try {
+            payload = JSON.parse((await readBody(req)) || '{}');
+          } catch (err) {
+            sendJson(res, 400, { ok: false, reason: `请求体不是 JSON：${err?.message ?? err}` });
+            return;
+          }
+          if (payload?.confirm !== true) {
+            sendJson(res, 400, { ok: false, reason: '缺 confirm:true —— 归档会改真实文件，必须显式确认' });
+            return;
+          }
+          const file = String(payload?.file ?? '').trim();
+          if (!file) {
+            sendJson(res, 400, { ok: false, reason: '缺 file' });
+            return;
+          }
+
+          // 计划是 30 秒 TTL 的缓存，但执行前必须现算一遍：中间有人改过文件的话，
+          // 旧计划里的字节数与批次个数就已经不是事实了。
+          let plan = null;
+          let scanned;
+          try {
+            scanned = planArchive(storePath);
+          } catch (err) {
+            sendJson(res, 500, { ok: false, reason: `重算计划失败：${err?.message ?? err}` });
+            return;
+          }
+          archiveCache = { key: storePath, at: Date.now(), value: scanned };
+          plan = scanned.plans.find((p) => p.file === file) ?? null;
+          if (!plan) {
+            const why = scanned.skipped.find((s) => s.file === file);
+            sendJson(res, 404, {
+              ok: false,
+              reason: why ? `这篇现在不该归档：${why.reason}` : `没找到可归档计划：${file}`,
+            });
+            return;
+          }
+
+          let result;
+          try {
+            result = applyArchive(storePath, plan);
+          } catch (err) {
+            result = { ok: false, reason: `归档抛异常：${err?.message ?? err}` };
+          }
+          // 不管成没成，刚算的那份计划都不能再当缓存用：成功后它已过期，
+          // 失败后重算一次也正好让人看见「为什么还没成」。
+          archiveCache = { key: '', at: 0, value: null };
+
+          // 归档也是「落在记忆库里的写」，一样要留痕 —— 审计要回答的是
+          // 「谁把它改成这样的」，而拆文件恰恰是最容易让人事后看不懂的一种改法。
+          appendAudit(storePath, {
+            tool: 'archive',
+            file,
+            bytes: plan.bytes,
+            verdict: result.ok ? 'allow' : 'deny',
+            reason: result.ok
+              ? `搬走 ${result.moved} 个批次 → ${(result.historyFiles ?? []).join(', ') || '-'}；备份 ${result.backupDir ?? '-'}`
+              : String(result.reason ?? '未知原因'),
+          });
+          record({
+            kind: result.ok ? 'archive' : 'deny',
+            query: brief(file),
+            hits: [],
+            reason: result.ok
+              ? `${Math.round(plan.bytes / 1024)}KB → ${Math.round((result.keptBytes ?? plan.keptBytes) / 1024)}KB`
+              : String(result.reason ?? '归档失败'),
+          });
+
+          sendJson(res, result.ok ? 200 : 400, { ...result, file });
+        },
+      }),
+    );
+
+    return () => disposers.forEach((d) => d());
   });
 }

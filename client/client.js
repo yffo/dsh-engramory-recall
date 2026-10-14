@@ -19,6 +19,7 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
 
     const STATE_URL = '/api/engramory-recall/state';
+    const ARCHIVE_URL = '/api/engramory-recall/archive';
     const POLL_MS = 3000;
 
     /** 深浅色都成立的克制配色：底子用 currentColor 的透明度，不假设主题变量存在。 */
@@ -61,6 +62,7 @@ window.__ModuleLoader__.load({
       const [state, setState] = React.useState(null);
       const [error, setError] = React.useState(null);
       const [at, setAt] = React.useState(0);
+      const loadRef = React.useRef(() => {});
 
       React.useEffect(() => {
         let alive = true;
@@ -70,12 +72,14 @@ window.__ModuleLoader__.load({
             .then((data) => { if (alive) { setState(data); setError(null); setAt(Date.now()); } })
             .catch((err) => { if (alive) setError(String(err && err.message ? err.message : err)); });
         };
+        loadRef.current = load;
         load();
         const timer = setInterval(load, POLL_MS);
         return () => { alive = false; clearInterval(timer); };
       }, []);
 
-      return { state, error, at };
+      // reload 给「归档」页签用：动完库要立刻看到新状态，不想干等下一次轮询。
+      return { state, error, at, reload: () => loadRef.current() };
     }
 
     function Stat({ label, value, hint }) {
@@ -113,10 +117,12 @@ window.__ModuleLoader__.load({
     }
 
     function MemoryView() {
-      const { state, error, at } = useRecallState();
+      const { state, error, at, reload } = useRecallState();
       const [tab, setTab] = React.useState('log');
       const [expanded, setExpanded] = React.useState(-1);
       const [filter, setFilter] = React.useState('');
+      const [busy, setBusy] = React.useState('');
+      const [results, setResults] = React.useState({});
 
       if (!state) {
         return h('div', { style: S.root },
@@ -137,6 +143,9 @@ window.__ModuleLoader__.load({
       const writeAudit = state.writeAudit || { epoch: '', entries: [] };
       const auditEntries = Array.isArray(writeAudit.entries) ? writeAudit.entries : [];
       const denied = auditEntries.filter((e) => e.verdict === 'deny').length;
+      const archive = state.archive || { plans: [], skipped: [] };
+      const plans = Array.isArray(archive.plans) ? archive.plans : [];
+      const archSkipped = Array.isArray(archive.skipped) ? archive.skipped : [];
       const stats = log.reduce((acc, item) => {
         acc[item.kind] = (acc[item.kind] || 0) + 1;
         if (item.kind === 'hit') acc.chars += Number(item.chars) || 0;
@@ -152,6 +161,37 @@ window.__ModuleLoader__.load({
         style: { ...S.btn, borderColor: tab === id ? dim(45) : dim(18), fontWeight: tab === id ? 600 : 400 },
         onClick: () => setTab(id),
       }, text);
+
+      // 两段式的第二段：计划是刚看的那个，执行前宿主还会现算一遍再核一次。
+      // confirm:true 不是走过场 —— 宿主路由会拒掉没有它的请求。
+      const runArchive = (file) => {
+        setBusy(file);
+        fetch(ARCHIVE_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ file, confirm: true }),
+        })
+          .then(async (res) => {
+            let data;
+            try {
+              data = await res.json();
+            } catch {
+              data = { ok: false, reason: `HTTP ${res.status}（响应不是 JSON）` };
+            }
+            const good = res.ok && data.ok !== false;
+            setResults((prev) => ({
+              ...prev,
+              [file]: good
+                ? { ok: true, text: `已归档 → ${(data.historyFiles || []).join('、')}；原件备份在 ${data.backupDir}` }
+                : { ok: false, text: String(data.reason || `HTTP ${res.status}`) },
+            }));
+            reload();
+          })
+          .catch((err) => {
+            setResults((prev) => ({ ...prev, [file]: { ok: false, text: String((err && err.message) || err) } }));
+          })
+          .finally(() => setBusy(''));
+      };
 
       return h('div', { style: S.root },
         h('div', { style: { ...S.row, justifyContent: 'space-between' } },
@@ -177,6 +217,7 @@ window.__ModuleLoader__.load({
             return n > 0 ? `体检（${n}）` : '体检';
           })()),
           tabBtn('index', '索引原文'),
+          tabBtn('archive', plans.length ? `归档（${plans.length}）` : '归档'),
           tabBtn('writes', `写入审计（${auditEntries.length}）`)),
 
         tab === 'log' ? h('div', { style: S.card },
@@ -252,6 +293,54 @@ window.__ModuleLoader__.load({
           index.missing
             ? h('div', { style: S.muted }, `没找到索引文件：${index.path}`)
             : h('pre', { style: { ...S.pre, ...S.mono, fontSize: '11.5px', maxHeight: '62vh' } }, index.text || '（空）'))
+          : null,
+
+        tab === 'archive' ? h('div', { style: S.card },
+          h('div', { style: { ...S.muted, fontSize: '11.5px', marginBottom: '8px' } },
+            '归档不删内容、也不截断：把追加式的「## 第 N 批」章节整段搬到 ',
+            h('span', { style: S.mono }, '<名字>-history.md'),
+            '，主文件只留结论和一行指针。搬运前先备份到 ',
+            h('span', { style: S.mono }, '.archive-backup/<时间戳>/'),
+            '；归档文件仍在同一个目录、仍会被索引和召回。',
+            h('span', { style: { ...S.mono } }, ' MEMORY.md 不动'),
+            '——索引由另一套守卫管，且归档是机械派生、不是新事实。'),
+          archive.crashed
+            ? h('div', { style: { color: '#c25a4a', marginBottom: '8px' } }, `归档规划崩了：${archive.crashed}`)
+            : null,
+
+          plans.length
+            ? plans.map((plan, i) => {
+                const res = results[plan.file];
+                return h('div', {
+                  key: plan.file,
+                  style: { padding: '9px 0', borderTop: i ? `1px solid ${dim(10)}` : 'none' },
+                },
+                  h('div', { style: { ...S.row, gap: '8px' } },
+                    h('span', { style: { ...S.mono, fontSize: '11.5px' } }, plan.file),
+                    h('span', { style: { ...S.muted, ...S.mono, fontSize: '11px' } },
+                      `${fmtBytes(plan.bytes)} → ${fmtBytes(plan.keptBytes)}`),
+                    h('span', { style: S.chip('hit') }, `省 ${fmtBytes(plan.savedBytes)}`),
+                    h('button', {
+                      style: { ...S.btn, opacity: busy === plan.file ? 0.5 : 1 },
+                      disabled: busy === plan.file,
+                      onClick: () => runArchive(plan.file),
+                    }, busy === plan.file ? '搬运中…' : '执行归档')),
+                  h('div', { style: { ...S.muted, fontSize: '11.5px', marginTop: '3px' } },
+                    `${plan.batchCount} 个批次章节，搬走 ${plan.freshCount} 个 → `,
+                    (plan.historyFiles || []).map((hf) => `${hf.file}（${hf.batchCount} 批 / ${fmtBytes(hf.bytes)}）`).join('、'),
+                    plan.existingCount ? `（已有 ${plan.existingCount} 份归档文件，续写）` : ''),
+                  res ? h('div', {
+                    style: { color: res.ok ? '#2e9e63' : '#d24b4b', fontSize: '11.5px', marginTop: '3px' },
+                  }, res.text) : null);
+              })
+            : h('div', { style: S.muted },
+                '没有超标的笔记。触发线：单篇 >64KB 或 >20 个章节，且至少 3 个可搬的批次章节。'),
+
+          archSkipped.length
+            ? h('div', { style: { ...S.muted, fontSize: '11px', marginTop: '10px', paddingTop: '8px', borderTop: `1px solid ${dim(10)}` } },
+                `${archSkipped.length} 篇扫过但没到线：`,
+                archSkipped.map((s) => `${s.file}（${s.reason}）`).join('；'))
+            : null)
           : null,
 
         // 配置回显：面板要能回答「现在到底按哪套参数在召回」。

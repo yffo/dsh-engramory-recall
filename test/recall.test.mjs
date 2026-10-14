@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, readdirSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -261,11 +261,12 @@ test('宿主路由：状态接口返回记忆库快照，且每次召回都留�
   try {
     const { handler, routes } = captureHandler({ storePath: dir });
 
-    assert.equal(routes.length, 1, 'apply() 应当注册一条宿主路由');
-    const route = routes[0];
+    assert.equal(routes.length, 2, 'apply() 应当注册两条宿主路由：state 与 archive');
+    const route = routes.find((r) => r.path === '/api/engramory-recall/state');
+    assert.ok(route, '应当注册状态接口');
     assert.equal(route.kind, 'exact');
-    assert.equal(route.path, '/api/engramory-recall/state');
     assert.equal(typeof route.handler, 'function');
+    assert.ok(routes.some((r) => r.path === '/api/engramory-recall/archive'), '应当注册归档执行接口');
 
     // 首次取状态：有库快照、暂无召回日志
     const first = captureResponse();
@@ -717,10 +718,155 @@ test('配置：storePath 支持 ~ 展开（别人装插件时不会恰好也叫�
   const home = homedir();
   const { routes } = captureHandler({ storePath: '~/memory/engramory', minScore: 0 });
   const res = captureResponse();
-  await routes[0].handler({ method: 'GET', url: '/api/engramory-recall/state' }, res);
+  await routes.find((r) => r.path === '/api/engramory-recall/state').handler({ method: 'GET', url: '/api/engramory-recall/state' }, res);
   const body = JSON.parse(res.body);
   // 断言的是「展开成了真实家目录」而不是硬编码用户名
   assert.equal(body.store, join(home, 'memory', 'engramory'));
   assert.ok(!body.store.includes('~'), '不该把 ~ 原样传给 fs');
   rmSync(dir, { recursive: true, force: true });
+});
+
+// ── 归档执行接口 ────────────────────────────────────────────────────
+
+/** 造一个够大、够多批次的笔记，专门用来触发归档计划。 */
+function archivableStore() {
+  const dir = fixtureStore();
+  writeFileSync(join(dir, 'MEMORY.md'), [
+    '# Memory Index',
+    '',
+    '- [代理节点](reference-proxy.md) — Hy2 双端口',
+    '- [流水线](project-cicd.md) — Jenkins',
+    '- [大日志](project-big.md) — 追加式批次',
+  ].join('\n'));
+  const batches = [];
+  for (let n = 1; n <= 5; n += 1) {
+    batches.push(`## 第 ${n} 批：第${n}次迭代`, '', `记录${n}：${'填'.repeat(5000)}`);
+  }
+  writeFileSync(join(dir, 'project-big.md'), [
+    '---',
+    'name: project-big',
+    'description: 追加式批次日志，用来验证物理分层归档',
+    'type: project',
+    '---',
+    '',
+    '# 大日志',
+    '',
+    '这里只放结论与现状。',
+    '',
+    ...batches,
+  ].join('\n\n'));
+  return dir;
+}
+
+/** 伪造一个可读的 POST 请求体：先注册监听，再在微任务里灌数据。 */
+function postReq(payload) {
+  const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  const listeners = {};
+  const req = {
+    method: 'POST',
+    on(event, fn) { (listeners[event] = listeners[event] || []).push(fn); return req; },
+    destroy() {},
+  };
+  queueMicrotask(() => {
+    for (const fn of listeners.data || []) fn(Buffer.from(text, 'utf8'));
+    for (const fn of listeners.end || []) fn();
+  });
+  return req;
+}
+
+test('归档接口：非 POST 拒绝，缺 confirm 拒绝，未知文件拒绝', async () => {
+  const dir = archivableStore();
+  try {
+    const { routes } = captureHandler({ storePath: dir });
+    const route = routes.find((r) => r.path === '/api/engramory-recall/archive');
+    assert.ok(route, '应当注册归档接口');
+
+    const wrongMethod = captureResponse();
+    await route.handler({ method: 'GET' }, wrongMethod);
+    assert.equal(wrongMethod.status, 405);
+    assert.equal(wrongMethod.headers.allow, 'POST');
+
+    // confirm 不是走过场：归档会改真实文件，没有它一律拒
+    const noConfirm = captureResponse();
+    await route.handler(postReq({ file: 'project-big.md' }), noConfirm);
+    assert.equal(noConfirm.status, 400);
+    assert.match(JSON.parse(noConfirm.body).reason, /confirm/);
+    assert.ok(existsSync(join(dir, 'project-big.md')), '被拒的请求绝不能动文件');
+
+    const unknown = captureResponse();
+    await route.handler(postReq({ file: '不存在的.md', confirm: true }), unknown);
+    assert.equal(unknown.status, 404);
+
+    const notYet = captureResponse();
+    await route.handler(postReq({ file: 'reference-proxy.md', confirm: true }), notYet);
+    assert.equal(notYet.status, 404, '小笔记没到线，不该有可执行计划');
+
+    const badJson = captureResponse();
+    await route.handler(postReq('{不是 json'), badJson);
+    assert.equal(badJson.status, 400);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('归档接口：确认后真的分层，且备份、审计、计划刷新都跟上', async () => {
+  const dir = archivableStore();
+  try {
+    const { routes } = captureHandler({ storePath: dir });
+    const stateRoute = routes.find((r) => r.path === '/api/engramory-recall/state');
+    const archiveRoute = routes.find((r) => r.path === '/api/engramory-recall/archive');
+
+    const before = captureResponse();
+    await stateRoute.handler({ method: 'GET' }, before);
+    const plans = JSON.parse(before.body).archive.plans;
+    assert.equal(plans.length, 1, '应当只有大日志一篇可归档');
+    assert.equal(plans[0].file, 'project-big.md');
+    assert.ok(plans[0].freshCount >= 3);
+
+    const res = captureResponse();
+    await archiveRoute.handler(postReq({ file: 'project-big.md', confirm: true }), res);
+    assert.equal(res.status, 200);
+    const outcome = JSON.parse(res.body);
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.moved, 5);
+    assert.ok(outcome.savedBytes > 0, '主文件应当变小');
+
+    // ① 归档文件真的落盘，且批次原文一字不少
+    const history = join(dir, outcome.historyFiles[0]);
+    assert.ok(existsSync(history), '应当写出归档文件');
+    const historyText = readFileSync(history, 'utf8');
+    for (let n = 1; n <= 5; n += 1) assert.ok(historyText.includes(`## 第 ${n} 批：第${n}次迭代`));
+
+    // ② 主文件只剩结论 + 指针，批次章节已搬走
+    const mainText = readFileSync(join(dir, 'project-big.md'), 'utf8');
+    assert.ok(mainText.includes('这里只放结论与现状。'), '结论必须留在主文件');
+    assert.ok(!mainText.includes('## 第 5 批'), '批次章节不该还在主文件');
+    assert.ok(mainText.includes(outcome.historyFiles[0]), '主文件要留下指向归档的指针');
+
+    // ③ 搬之前备份过原件
+    assert.ok(outcome.backupDir && existsSync(outcome.backupDir), '应当有备份目录');
+    assert.ok(readFileSync(join(outcome.backupDir, 'project-big.md'), 'utf8').includes('## 第 5 批'),
+      '备份里必须是搬走之前的完整原件');
+
+    // ④ 归档是「落在记忆库里的写」，写入审计必须留痕
+    const audit = readAudit(dir, 10);
+    const entry = audit.find((e) => e.tool === 'archive');
+    assert.ok(entry, '归档应当进写入审计');
+    assert.equal(entry.verdict, 'allow');
+    assert.equal(entry.file, 'project-big.md');
+    assert.match(entry.reason, /搬走 5 个批次/);
+
+    // ⑤ 缓存要失效：再取一次状态，计划应当已经没了
+    const after = captureResponse();
+    await stateRoute.handler({ method: 'GET' }, after);
+    assert.equal(JSON.parse(after.body).archive.plans.length, 0, '归档完就不该再出计划');
+
+    // ⑥ 幂等：同一篇再来一次应当被拒，而不是把归档文件再归档一遍
+    const again = captureResponse();
+    await archiveRoute.handler(postReq({ file: 'project-big.md', confirm: true }), again);
+    assert.equal(again.status, 404, '重复归档必须被拒');
+    assert.equal(readdirSync(dir).filter((f) => f.includes('-history')).length, outcome.historyFiles.length);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

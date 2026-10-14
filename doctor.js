@@ -7,6 +7,10 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { tokenize } from './bm25.js';
+// 「什么叫一批追加日志」只能有一处定义。这里曾经自己抄了一份 `^##\s*第…批`，
+// 于是归档器已经认加粗行与 ### 深度了、体检还在报 32 批（真值是 46）——
+// 同一个概念两套判据，迟早对不上。
+import { splitBatches } from './archive.js';
 
 export const NOTE_KINDS = ['user', 'feedback', 'project', 'reference'];
 export const INDEX_FILE = 'MEMORY.md';
@@ -93,8 +97,32 @@ export function auditStore(storePath, options = {}) {
   for (const p of uniquePointers) {
     if (!mdFiles.includes(p)) add('error', 'index-missing-file', `索引指向的笔记不存在：${p}`, [p]);
   }
+  const unreferenced = [];
   for (const n of notes) {
-    if (!uniquePointers.has(n.file)) add('warn', 'orphan-note', `笔记没进索引（召回时看不到它）：${n.file}`, [n.file]);
+    // 「孤儿」原来的判据是「没出现在 MEMORY.md 里」，太严了：归档产生的
+    // `xxx-history.md` 按设计**不写进索引**（索引由另一套守卫管，且归档是机械派生），
+    // 但主笔记末尾的「## 历史批次」有链接指向它 —— 那就是**可达**的。
+    // 判据改成真正的可达性：从索引出发，沿笔记里的 markdown 链接走（可多跳）。
+    if (!uniquePointers.has(n.file)) unreferenced.push(n);
+  }
+  // 可达性闭包：先把索引直接指到的笔记入队，再顺着它们正文里的链接扩散。
+  const outLinks = new Map();
+  for (const n of notes) {
+    outLinks.set(n.file, [...n.text.matchAll(/\]\(([^)]+?\.md)\)/g)].map((m) => m[1]));
+  }
+  const reachable = new Set();
+  const queue = [...uniquePointers].filter((p) => mdFiles.includes(p));
+  while (queue.length) {
+    const f = queue.pop();
+    if (reachable.has(f)) continue;
+    reachable.add(f);
+    for (const next of outLinks.get(f) ?? []) if (mdFiles.includes(next)) queue.push(next);
+  }
+  for (const n of unreferenced) {
+    // 只有连链接都走不到，才真是孤儿 —— 这种笔记模型读索引时永远发现不了。
+    if (!reachable.has(n.file)) {
+      add('warn', 'orphan-note', `笔记既没进索引、也没有任何笔记链接它：${n.file}`, [n.file]);
+    }
   }
   const seen = new Set();
   for (const p of pointers) {
@@ -118,15 +146,23 @@ export function auditStore(storePath, options = {}) {
     // `_full_content`），但在我们这里**只报告、绝不动用户的笔记**：笔记是 Markdown 主存储，
     // 自动改写等于替用户删资料。判据是可核对的：体积，以及「## 第 N 批」这类追加式日志章节数。
     const sections = (n.body.match(/^## /gm) || []).length;
-    // 章节标题用的是中文数字（「## 第二十七批：…」），所以数字位要同时认中文与阿拉伯数字
-    const batches = (n.body.match(/^##\s*第[〇零一二三四五六七八九十百两\d]+批/gm) || []).length;
+    // 与归档器同一套判据（认中文数字、认加粗整行、认 ### 深度）—— 否则体检说的
+    // 「可归档」和归档器真能搬走的不是一回事，用户点「执行」才发现搬不动。
+    const { batches: batchList } = splitBatches(n.body);
+    const movableBytes = batchList.reduce((sum, b) => sum + Buffer.byteLength(b.text, 'utf8'), 0);
+    const keptBytes = n.bytes - movableBytes;
     if (n.bytes > ARCHIVE_BYTES || sections > ARCHIVE_SECTIONS) {
+      const kb = (v) => `${(v / 1024).toFixed(0)}KB`;
       add(
         'info',
         'archive-suggestion',
-        `这篇 ${(n.bytes / 1024).toFixed(0)}KB / ${sections} 个「##」章节` +
-          (batches ? `，其中 ${batches} 个是「第 N 批」式追加日志` : '') +
-          `：建议把历史批次拆成独立笔记（如 ${n.file.replace(/\.md$/, '')}-history.md），正文只留结论与现状`,
+        batchList.length
+          ? keptBytes > MAX_NOTE_BYTES
+            ? `这篇 ${kb(n.bytes)}：${batchList.length} 个「第 N 批」式追加日志（约 ${kb(movableBytes)}）可搬走，` +
+              `但搬完正文仍有 ${kb(keptBytes)}、超过单篇上限 —— 得按主题拆成多篇（一条一主题）`
+            : `这篇 ${kb(n.bytes)}：${batchList.length} 个「第 N 批」式追加日志（约 ${kb(movableBytes)}）可以搬走，` +
+              `搬完正文只剩 ${kb(keptBytes)}。面板「记忆 → 归档」能一键执行`
+          : `这篇 ${kb(n.bytes)} 里没有「第 N 批」式追加日志：拆不动，只能按主题分成多篇`,
         [n.file],
       );
     }

@@ -31,7 +31,9 @@
     "./guard": "./guard.js",
     "./doctor": "./doctor.js",
     "./audit": "./audit.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./archive": "./archive.js",
+    "./index": "./index.js"
   },
   "files": [
     "index.js",
@@ -41,6 +43,7 @@
     "guard.js",
     "doctor.js",
     "audit.js",
+    "archive.js",
     "cordis.patch.yml",
     "README.md"
   ],

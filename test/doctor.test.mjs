@@ -50,8 +50,48 @@ test('索引指向不存在的文件 → error', (t) => {
   assert.equal(r.findings.find((f) => f.code === 'index-missing-file').severity, 'error');
 });
 
-test('笔记没进索引 → warn（召回时看不见它）', (t) => {
+test('笔记没进索引、也没人链接 → warn（模型读索引时永远发现不了它）', (t) => {
   const dir = makeStore({ 'reference-hello-world.md': note('reference-hello-world') }, '- 空索引\n');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.ok(has(auditStore(dir, { now: NOW }), 'orphan-note'));
+});
+
+test('归档产生的 -history 没进索引、但主笔记链接了它 → 不算孤儿', (t) => {
+  // 这是真事：归档按设计不写 MEMORY.md，只在主笔记末尾留一行「## 历史批次」链接。
+  // 判据太严时，刚归档完就会冒出 4 条 warn，把一次正常操作报成事故。
+  const main = note('project-cicd', {
+    type: 'project',
+    body: '结论与现状。\n\n## 历史批次\n\n早期日志已归档到 [project-cicd-history.md](project-cicd-history.md)。',
+  });
+  // 注意：索引必须**只列主笔记** —— makeStore 默认会把所有文件都写进索引，
+  // 那样 history 就被索引了，这个用例会为了错误的理由而变绿（吃过一次这个亏）。
+  const dir = makeStore(
+    { 'project-cicd.md': main, 'project-cicd-history.md': note('project-cicd-history', { type: 'project' }) },
+    '- [项目：CI/CD](project-cicd.md)\n',
+  );
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = auditStore(dir, { now: NOW });
+  assert.ok(!has(r, 'orphan-note'), `被链接的归档不该报孤儿：${JSON.stringify(r.findings.map((f) => f.message))}`);
+});
+
+test('可达性是传递的，且循环链接不会转不出来', (t) => {
+  // 索引 → A → B → C，C 也算可达；A 与 B 互相链接构成环，不能把检查卡死。
+  const a = note('project-a', { type: 'project', body: '见 [b](project-b.md) 与 [c](project-c.md)。' });
+  const b = note('project-b', { type: 'project', body: '回看 [a](project-a.md)，细项在 [c](project-c.md)。' });
+  const c = note('project-c', { type: 'project', body: '又见 [a](project-a.md)。' });
+  const dir = makeStore(
+    { 'project-a.md': a, 'project-b.md': b, 'project-c.md': c },
+    '- [a](project-a.md)\n',
+  );
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = auditStore(dir, { now: NOW });
+  assert.ok(!has(r, 'orphan-note'), `多跳可达不该报孤儿：${JSON.stringify(r.findings.map((f) => f.message))}`);
+});
+
+test('链到不存在的文件不算数，孤儿的判据不能被空链接骗过', (t) => {
+  // 笔记里写一行 `[别处](reference-不存在.md)` 就能自证可达？不行 —— 目标必须真实存在。
+  const stray = note('reference-stray', { body: '见 [别处](reference-nonexistent.md)。' });
+  const dir = makeStore({ 'reference-stray.md': stray }, '- 空索引\n');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   assert.ok(has(auditStore(dir, { now: NOW }), 'orphan-note'));
 });
@@ -185,9 +225,28 @@ test('archive-suggestion：长文与追加式日志会得到拆分建议，普�
   assert.equal(hits.length, 1, '只有长文那条该被建议拆分');
   assert.deepEqual(hits[0].files, ['project-giant-log.md']);
   assert.equal(hits[0].severity, 'info');
-  assert.ok(hits[0].message.includes('22 个'), `应报出章节数：${hits[0].message}`);
-  assert.ok(hits[0].message.includes('22 个是「第 N 批」'), `应识别中文数字批次：${hits[0].message}`);
+  assert.ok(hits[0].message.includes('22 个「第 N 批」式追加日志'), `应报出可搬走的批次个数：${hits[0].message}`);
+  assert.ok(hits[0].message.includes('搬完正文只剩'), `应说清归档能把它降到多少：${hits[0].message}`);
+  // 体检的建议必须和归档器真能做的事一致 —— 否则用户点「执行」才发现搬不动
+  assert.ok(hits[0].message.includes('面板「记忆 → 归档」'), `应指路到能一键执行的地方：${hits[0].message}`);
   assert.ok(!findings.some((f) => f.code === 'archive-suggestion' && f.files.includes('reference-small-note.md')));
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('archive-suggestion：搬完仍超上限的，要直说「拆不动，得按主题拆」', () => {
+  // 正文本身就 120KB、批次只占一点点：归档救不了它，闸门也会正确地拒绝这次写入。
+  // 这种时候体检不能给一句「建议归档」就完事 —— 那是在指一条走不通的路。
+  const fat = '正文'.repeat(30000); // 每个汉字 3 字节 → 约 180KB
+  const body = `${fat}\n\n## 第一批：一点日志\n\n很短。\n\n## 第二批：又一点\n\n也很短。`;
+  const giant = note('project-fat-body', { type: 'project', body });
+  const dir = makeStore({ 'project-fat-body.md': giant });
+
+  const { findings } = auditStore(dir, { now: NOW });
+  const hit = findings.find((f) => f.code === 'archive-suggestion');
+  assert.ok(hit, '该给出建议');
+  assert.match(hit.message, /得按主题拆成多篇/, `超限时要说清归档解决不了：${hit.message}`);
+  assert.doesNotMatch(hit.message, /一键执行/, '搬不动就不能指路去点「执行」');
 
   rmSync(dir, { recursive: true, force: true });
 });
