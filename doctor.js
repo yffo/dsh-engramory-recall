@@ -19,7 +19,11 @@ const TODO_RE = /待办|未完成|TODO|进行中|未做|待定|未闭环/;
 /** 归档建议的两个阈值（超过任一即提示）：体积与「##」章节数。 */
 const ARCHIVE_BYTES = 64 * 1024;
 const ARCHIVE_SECTIONS = 20;
-const ABS_PATH_RE = /(?:~|\/Users\/[A-Za-z0-9_.-]+)\/[A-Za-z0-9_@.+-]+(?:\/[A-Za-z0-9_@.+-]+)*/g;
+// 认 `~` 开头的路径，以及常见 home 前缀下的绝对路径。
+// 这里曾写死成 `/Users/`（只认 macOS）—— 结果在 Linux 上整个 path-conflict 检查静默失效：
+// 一条 finding 都不出，不报错、不告警，看起来像"没发现问题"。CI 上那个测试就是这么挂的。
+// 现在把 macOS 的 /Users 与 Linux 的 /home、/root 一起认。
+const ABS_PATH_RE = /(?:~|\/(?:Users|home|root)\/[A-Za-z0-9_.-]+)\/[A-Za-z0-9_@.+-]+(?:\/[A-Za-z0-9_@.+-]+)*/g;
 
 export function parseFrontmatter(text) {
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);

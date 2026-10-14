@@ -102,6 +102,20 @@ test('同一 basename 出现在两个真目录 → info', (t) => {
   assert.ok(c.message.includes('my-tool'));
 });
 
+test('path-conflict 也认 Linux 的 /home 前缀（曾写死 /Users/ 导致整个检查静默失效）', (t) => {
+  // 这个 bug 是在 CI 上暴露的：正则只认 macOS 的 /Users，Linux 跑起来一条 finding 都不出，
+  // 不报错也不告警，看起来像"没问题"。修好之后补这条卡住它。
+  const dir = makeStore({
+    'reference-paths.md': note('reference-paths', {
+      body: '旧：/home/runner/Documents/Meitu/my-tool\n新：/home/runner/yffto/my-tool',
+    }),
+  });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const c = auditStore(dir, { now: NOW }).findings.find((f) => f.code === 'path-conflict');
+  assert.ok(c, 'Linux 下的绝对路径必须也能被认出来');
+  assert.ok(c.message.includes('my-tool'));
+});
+
 test('path-conflict 的三条防误报：~ 归一、省略号、一层隐藏目录', (t) => {
   const dir = makeStore({
     // 同一处的两种写法——必须当成一个位置
