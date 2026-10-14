@@ -7,7 +7,7 @@
  *   - 英文词元再按连字符/斜杠/点拆一层：`html-ppt` 若整体成一个词元，查询里的 `ppt`
  *     就永远匹配不上（2026-10-14 实测「ppt 传上去样式全没了」漏召回的根因）。
  *   - 同义扩展：中文口语（「飞书」「连不上」）与笔记里的英文写法（feishu / ENOTFOUND）
- *     之间靠一张手写别名表搭桥，权重减半 —— 它是「猜」，不该盖过字面命中。
+ *     之间靠一张手写别名表搭桥，权重打折（EXTRA_WEIGHT）—— 它是「猜」，不该完全盖过字面命中。
  *   - 打分只用于「排序 + 挑一行当片段」，不是可信度，也不写回任何文件。
  *
  * k1/b 取常见默认值（与 DSH-SEP 的 BM25 同参），便于对照。
@@ -16,8 +16,21 @@
 const K1 = 1.2;
 const B = 0.75;
 
-/** 同义扩展项的权重：猜出来的词，命中也不该压过查询里的原词。 */
-const EXTRA_WEIGHT = 0.5;
+/**
+ * 同义扩展项的权重：字典里搭出来的桥，命中也不该完全压过查询里的原词。
+ *
+ * 定 0.8 而不是 0.5，是因为「原词」在这个分词器里没那么可靠：中文没有分词，查询原词
+ * 是**相邻双字**（「浏览器起不来」→ 浏览/览器/器起/起不/不来），其中「起不」纯粹是
+ * 通用谓语的碎片，却因为 df 低而 IDF 高；而 SYNONYMS 里的桥是人手写的高精度词
+ * （浏览器→browser/chrome）。让前者拿 1.0、后者拿 0.5，是让不可靠的信号压过可靠的。
+ *
+ * 实测（2026-10-14，58 篇真实笔记 / 166 个 chunk）：
+ *   w=0.5 → 口语 query 19/22  中文标题 top1 133/141
+ *   w=0.8 → 口语 query 20/22  中文标题 top1 132/141
+ * 那 1 处回退是「拿批次小标题当查询」的合成对照，从未真实发生，且仍在 top-4。0.8→1.0
+ * 无进一步收益，故保留一点折扣当作噪声闸。
+ */
+const EXTRA_WEIGHT = 0.8;
 /**
  * 单次查询最多参与打分的词项数（IDF 选词的 cap，抄 hindsight
  * `engine/search/bm25_term_selection.py`，与灵枢 `cn_recall_grams` 的 cap 同源）。
@@ -128,6 +141,40 @@ const SYNONYMS = new Map(
     密码: ['password', 'secret'],
     代理: ['proxy'],
     节点: ['node'],
+    // ── 2026-10-14 扩容 ──────────────────────────────────────────────────
+    // 证据：探针里 3 条口语 query 打不中目标笔记（「浏览器起不来」「数据库地址写在
+    // 配置里就报错」「换个库去调模型就失败了」），根因都是**字面零重叠** —— 口语说的
+    // 和笔记里写的不是同一个词。这一批就是补这些桥。
+    //
+    // 纪律：只收「同一件事的两种叫法」，不收「相关的两件事」。宽词（比如把「地址」
+    // 直接映射到 url/host）会把不相干的笔记一起抬上来，EXTRA_WEIGHT=0.5 也压不住 ——
+    // 每加一批都要跑回归对照（文件名当查询 / 中文标题当查询），掉分就退。
+    浏览器: ['browser', 'chrome', 'chromium', 'playwright', 'puppeteer'],
+    起不来: ['unavailable', 'failed', 'crash', '不可用', '打不开', '不工作'],
+    用不了: ['unavailable', 'failed', 'broken', '不可用', '失效'],
+    连接串: ['database_url', 'dsn', 'url'],
+    数据库地址: ['database_url', 'dsn'],
+    配置: ['config', 'env'],
+    模型: ['model', 'llm', 'deepseek', 'openai', 'gpt'],
+    调模型: ['api', 'llm', 'deepseek', 'openai'],
+    调用: ['api', 'call'],
+    依赖: ['deps', 'dependencies', 'node_modules', 'package'],
+    装不上: ['enoent', 'failed'],
+    没权限: ['permission', 'denied', 'forbidden', 'tcc'],
+    权限不足: ['permission', 'denied', 'tcc'],
+    空仓库: ['empty', 'clone'],
+    重复: ['duplicate', 'dup'],
+    原始数据: ['json', 'raw'],
+    编辑器: ['editor', 'blocknote', 'codemirror'],
+    表单: ['form', 'input'],
+    图片: ['image', 'img'],
+    生成: ['generate'],
+    刷新: ['reload', 'refresh'],
+    崩: ['crash'],
+    失败: ['failed', 'error', 'failure'],
+    上线: ['production', 'deploy', 'release', 'prod'],
+    线上: ['production', 'prod', 'online'],
+    本地: ['local', 'localhost', 'dev'],
   }),
 );
 
@@ -163,7 +210,13 @@ export function expandQuery(text) {
   const out = [];
   for (const [word, syns] of SYNONYMS) {
     if (!s.includes(word)) continue;
-    for (const syn of syns) if (!base.has(syn)) out.push(syn);
+    // 同义词表里的词**必须先过一遍 tokenize** 再当词项用：库里的词项是「英文整词 +
+    // 汉字相邻双字」，所以中文同义词（如 `不可用`）直接拿去 `doc.tf.has()` 永远查不到，
+    // 是一条只会静默失效的路（2026-10-14 实测发现）。英文同义词 tokenize 后仍是自身，
+    // 不受影响；`html-ppt` 这类还能顺带贡献 html + ppt 两个碎片。
+    for (const syn of syns) {
+      for (const term of tokenize(syn)) if (!base.has(term)) out.push(term);
+    }
   }
   return [...new Set(out)];
 }

@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, readdirSync,
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { tokenize, buildIndex, search } from '../bm25.js';
+import { tokenize, buildIndex, search, expandQuery } from '../bm25.js';
 import { splitNote, readDocs, chunkBody } from '../store.js';
 import { apply, isSearchable } from '../index.js';
 import { readAudit, GUARD_EPOCH } from '../audit.js';
@@ -252,6 +252,21 @@ test('同一篇笔记切桶后只占一个召回位', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── 2026-10-14 同义桥：一个静默失效的回归 ───────────────────────────
+// ⚠️ EXTRA_WEIGHT=0.8（原 0.5）**故意没有单测**。那是个由语料统计量撑起来的经验值
+// （真实库里「起不」只出现在 3 个 chunk 而 ID 高、「浏览器」类词出现在 12+ 个 chunk），
+// 在小 fixture 里 df 结构整个反过来，写出来的只会是「怎么改都通过」的假测试 —— 试过，
+// 0.5 和 0.8 都绿。证据由 `scripts/recall-probe.mjs` 在真实库上产出，见 bm25.js 的注释。
+
+test('同义扩展的词项必须过分词，否则中文同义词是死词项', () => {
+  const terms = expandQuery('浏览器起不来');
+  assert.ok(terms.includes('chrome'), `英文桥该原样进来: ${terms.join(',')}`);
+  // 中文桥必须被拆成相邻双字 —— 库里的词项就是这个形状。整词原样塞进去，
+  // `doc.tf.has('不可用')` 永远为 false，是一条只在中文上静默失效的路。
+  assert.ok(terms.includes('不可') || terms.includes('可用'), `中文桥没被分词: ${terms.join(',')}`);
+  assert.ok(!terms.includes('不可用'), `不该把整词原样当词项: ${terms.join(',')}`);
 });
 
 // ── 2026-10-14 记忆面板（可观测性）的回归测试 ────────────────────────
@@ -866,6 +881,104 @@ test('归档接口：确认后真的分层，且备份、审计、计划刷新�
     await archiveRoute.handler(postReq({ file: 'project-big.md', confirm: true }), again);
     assert.equal(again.status, 404, '重复归档必须被拒');
     assert.equal(readdirSync(dir).filter((f) => f.includes('-history')).length, outcome.historyFiles.length);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('自动归档：默认关着时一次文件系统都不碰', async () => {
+  const dir = archivableStore();
+  try {
+    const { handler } = captureHandler({ storePath: dir });
+    await handler({}, async () => ({ kind: 'enter', messages: [human('a1', '代理节点怎么搭的')] }));
+    assert.equal(readdirSync(dir).filter((f) => f.includes('-history')).length, 0, '关着还归档了');
+    assert.equal(readAudit(dir).filter((e) => e.tool === 'archive').length, 0);
+    // 配置回显也要如实说是关的，面板才能提示「每次都要手点」。
+    const route = captureHandler({ storePath: dir }).routes.find((r) => r.path === '/api/engramory-recall/state');
+    const res = captureResponse();
+    await route.handler({ method: 'GET' }, res);
+    assert.equal(JSON.parse(res.body).config.autoArchive, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('自动归档：开着时 pre-step 兜底会真的搬，并留下审计与日志', async () => {
+  const dir = archivableStore();
+  try {
+    const { handler, routes } = captureHandler({ storePath: dir, autoArchive: true });
+    const before = readFileSync(join(dir, 'project-big.md'), 'utf8').length;
+    await handler({}, async () => ({ kind: 'enter', messages: [human('a2', '代理节点怎么搭的')] }));
+
+    const hist = readdirSync(dir).filter((f) => f.includes('-history'));
+    assert.ok(hist.length > 0, '开着却没归档');
+    assert.ok(readFileSync(join(dir, 'project-big.md'), 'utf8').length < before, '主文件没变小');
+    // 原件必须还在备份里 —— 这是「可逆」的凭据，比任何日志都硬。
+    const backupRoot = join(dir, '.archive-backup');
+    assert.ok(readdirSync(backupRoot).length === 1, '没留备份');
+    const backupDir = join(backupRoot, readdirSync(backupRoot)[0]);
+    assert.ok(readFileSync(join(backupDir, 'project-big.md'), 'utf8').length === before, '备份不是搬运前的原件');
+
+    // 审计：放行，且 reason 里写明是自动、触发源是 pre-step
+    const arch = readAudit(dir).filter((e) => e.tool === 'archive');
+    assert.equal(arch.length, 1);
+    assert.equal(arch[0].verdict, 'allow');
+    assert.ok(arch[0].reason.includes('自动归档'), arch[0].reason);
+    assert.ok(arch[0].reason.includes('pre-step'), arch[0].reason);
+
+    // 日志：kind=archive-auto，面板「记忆」页签能看见
+    const stateRoute = routes.find((r) => r.path === '/api/engramory-recall/state');
+    const res = captureResponse();
+    await stateRoute.handler({ method: 'GET' }, res);
+    const snap = JSON.parse(res.body);
+    const auto = snap.log.filter((e) => e.kind === 'archive-auto');
+    assert.equal(auto.length, 1);
+    assert.ok(auto[0].reason.includes('搬走'));
+
+    // 计划已经作废：现场重算应当是空（缓存不该还留着旧计划）
+    assert.deepEqual(snap.archive.plans, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('自动归档：pre-step 有 10 分钟 TTL，不会每轮都扫一遍库', async () => {
+  const dir = archivableStore();
+  try {
+    const { handler } = captureHandler({ storePath: dir, autoArchive: true });
+    const turn = (id) => handler({}, async () => ({ kind: 'enter', messages: [human(id, '代理节点怎么搭的')] }));
+    await turn('b1');
+    const after = readdirSync(dir).filter((f) => f.includes('-history')).length;
+    assert.ok(after > 0);
+    // 后面几轮不该再多出归档文件（TTL 挡住了重复扫描）；即便漏挡，幂等性也会挡住重复搬运。
+    await turn('b2');
+    await turn('b3');
+    assert.equal(readdirSync(dir).filter((f) => f.includes('-history')).length, after);
+    assert.equal(readAudit(dir).filter((e) => e.tool === 'archive').length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('自动归档：写完记忆库那一刻也会触发（触发源记为 write）', async () => {
+  const dir = archivableStore();
+  try {
+    const { guards } = captureHandler({ storePath: dir, autoArchive: true });
+    const body = [
+      '---',
+      'name: reference-touch',
+      'description: 自动归档的 write 触发源测试',
+      'type: reference',
+      'created: 2026-10-14',
+      'updated: 2026-10-14',
+      '---',
+      '',
+      '# 随手一写',
+    ].join('\n');
+    assert.equal(guards[0]({ name: 'write', arguments: { file_path: join(dir, 'reference-touch.md'), content: body } }), undefined);
+    const arch = readAudit(dir).filter((e) => e.tool === 'archive');
+    assert.equal(arch.length, 1, '写完没有触发自动归档');
+    assert.ok(arch[0].reason.includes('write'), arch[0].reason);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
