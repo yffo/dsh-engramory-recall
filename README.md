@@ -10,6 +10,9 @@
 全部用 `node:` 内置模块实现：零第三方依赖、零网络、**默认零模型调用**、零常驻进程
 （只有你显式开启可选的语义增强时，才会走宿主的模型服务）。
 
+5. **别的宿主也能用**：`mcp.js` 是一个零依赖的 MCP（stdio）服务器，同一份记忆库可以挂给
+   Claude Code / Codex / Cursor 这类支持 MCP 的宿主 —— **只读**（检索与读笔记），写治理留在下面。
+
 ## 底线
 
 | 底线 | 本插件如何守 |
@@ -77,7 +80,10 @@
 - **无语义检索**：没有 embedding、没有向量库。同义改写、隐含意图要靠手工同义表覆盖，
   没覆盖到的就是漏检。（可选的 `ctx.llm` 模块能做矛盾检测和摘要，但它**不参与检索排序**，
   所以排序本身仍然是纯词面的。）
-- **只支持 DSH 一个宿主**：`claude-mem` 覆盖 7 个宿主，`thoth-mem` 覆盖 4 个。
+- **只有 DSH 里是「全功能」**：0.8.0 起带一个零依赖的 MCP 服务器（见下），任何支持 MCP
+  的宿主都能检索与读笔记；但写入闸门、归档、体检、沉淀提醒、面板这些**只在家用版（DSH 插件）
+  里有** —— 别的宿主拿到的是只读视图。`claude-mem` 覆盖 7 个宿主、`thoth-mem` 覆盖 4 个，
+  我们覆盖「1 个全功能 + N 个只读」。
 - **没有多端或团队同步**：basic-memory 有云同步，本插件没有。
 - **写入闸门可以被绕过**：`guard` 只拦 `write` / `edit` 工具调用，`bash` 重定向它看不见；
   `@jipika/dsh-memory` 的 guard 挂在更底层的 `tools/pre-execute`，覆盖更广。
@@ -499,6 +505,9 @@ aliases: 梯子, 翻墙, 科学上网, 节点, 代理
 | 自动合并 | 只出报告，不自动改文件 | 已实现（只报告） |
 | 语义冲突检测 | 走宿主 `ctx.llm`，**默认关闭** | 已实现（`semanticConflicts`） |
 | 自动摘要 | 走宿主 `ctx.llm`，**默认关闭** | 已实现（`semanticSummary`） |
+| 跨宿主分发 | 零依赖 stdio MCP 服务器，只读 | 已实现（`mcp.js`） |
+| 跨会话覆盖 | 「结果要多样」的选桶护栏（MMR / 覆盖优先） | 量过了，**被证伪**（见「被实测证伪的路」），收益改在长度归一 `B` 上拿到 |
+| 可选语义检索 | 可插拔 seam（向量/API 都行），默认关闭 | 计划中 |
 
 后两条默认关闭，是为了让「零模型调用」这条基线保持可复现。开启是用户的显式选择，
 而不是装完就生效：一个会自己调模型改写你笔记的插件不该默认打开。走 `ctx.llm`
@@ -580,14 +589,51 @@ dsh plugin --profile <profile> remove dsh-engramory-recall
 指向已删的路径），添或删任何插件都会一起失败，而且报错说的是那个无关的包。
 排查时看 `.plugin-manager/logs/operation-*/pnpm.log`，别盯被操作的那个包。
 
+## 别的宿主：MCP 服务器（只读）
+
+`mcp.js` 是一个零依赖的 MCP（Model Context Protocol）stdio 服务器。它只做三件事，
+全部只读、全部本机、零模型调用：
+
+| 工具 | 作用 |
+|---|---|
+| `engramory_search` | 同一个 BM25 内核（中文分词、177 条同义桥、别名、字段加权） |
+| `engramory_read` | 按文件名读一篇笔记的原文（只认库里根目录的 `.md`，路径一律拒） |
+| `engramory_status` | 库在哪、多少篇、索引几行几字节、指纹 —— 先确认读的是不是你以为的那个库 |
+
+另外把每篇笔记也注册成 MCP 资源（`engramory://note/<文件名>`），客户端可以直接列出来读。
+
+```jsonc
+// Claude Code / Claude Desktop / Cursor 之类的 mcpServers 配置
+{
+  "mcpServers": {
+    "engramory": {
+      "command": "node",
+      "args": ["/path/to/node_modules/dsh-engramory-recall/mcp.js", "--store", "~/memory/engramory"]
+    }
+  }
+}
+```
+
+```bash
+# 装了这个包就有了一个可直接调用的命令
+engramory-recall-mcp --store ~/memory/engramory      # 库路径也可以用环境变量 ENGRAMORY_STORE
+npm run mcp:smoke                                    # 自证：拉起来走一遍完整对话，打印收发记录
+```
+
+**为什么它是只读的**：写入闸门、归档、体检这些能力依赖宿主工具层的钩子（`tools/pre-execute`），
+别的宿主没有这套接口；硬做一个「谁都能写」的版本，等于把 fail-closed 的闸门换成一句口头约定。
+所以跨宿主给的是**看**的能力，治理留在家用版里。它也不 import 任何宿主包 ——
+在别的宿主里最坏是「没被用上」，不会「装上就崩」。
+
 ## 测试与自检
 
 ```bash
-npm test        # 分词 / BM25 / 切桶 / 门控 / 闸门 / 索引闸门 / 技能注册 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由 / 公开基准 harness
+npm test        # 分词 / BM25 / 切桶 / 门控 / 闸门 / 索引闸门 / 技能注册 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由 / 公开基准 harness / MCP 服务器
 npm run check   # 接线自检：配置键认不认、库路径对不对、装的是哪一份、包清单漏没漏文件
 npm run probe   # 召回质量探针：3 组 query + 三道对照，跑在真实记忆库上
 npm run probe -- --save   # 把这次结果存成基线，之后每次跑自动比对
 npm run bench:check       # 合成基准 + 和 bench/expectations.json 对账（CI 跑的就是它）
+npm run mcp:smoke         # 拿脚本当 MCP 客户端，把服务器拉起来走一遍真实对话
 node bench/longmemeval.mjs --data bench/.tmp/longmemeval_s_cleaned.json   # 公开基准（数据要自己下，264MB）
 ```
 

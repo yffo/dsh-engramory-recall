@@ -3,6 +3,27 @@
 本项目的所有重要变更都记在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.0] — 2026-10-15
+
+### 新增
+
+- **零依赖 MCP 服务器（`mcp.js`）**：走 stdio 的只读 MCP 服务器，把同一份记忆库挂给任何支持
+  MCP 的宿主（Claude Code / Codex / Cursor…）。三个工具：`engramory_search`（同一个 BM25 内核）、
+  `engramory_read`（按文件名读原文，只认库根目录的 `.md`）、`engramory_status`（库位置 / 篇数 /
+  索引余量 / 指纹）；每篇笔记另外注册成 MCP 资源（`engramory://note/<文件名>`）。
+  只用 `node:` 内置模块、不 import 任何宿主包、**只读** —— 写入闸门与归档依赖宿主工具层的钩子，
+  别的宿主没有这套接口，硬做只会把 fail-closed 换成口头约定。
+  装了包就多一个命令：`engramory-recall-mcp`（库路径用 `--store` 或环境变量 `ENGRAMORY_STORE`）。
+- `npm run mcp:smoke`：拿脚本当 MCP 客户端，把服务器真的拉起来走一遍对话
+  （initialize → tools/list → status → search → resources/read → 越界读被拒），打印收发记录。
+
+### 测试
+
+- `test/mcp.test.mjs`：8 例，**全部起真进程**（协议版本协商、工具清单与 inputSchema、检索命中、
+  非法参数只回 isError 不炸进程、`../` 越界读一律拒、resources 往返、空库给「库在哪」的提示、
+  stdout 上只允许协议帧且日志只走 stderr，外加 `--version` / `--print-config` / 坏参数的退出码）。
+  合计 192 例全绿。
+
 ## [0.7.0] — 2026-10-15
 
 ### 变更
