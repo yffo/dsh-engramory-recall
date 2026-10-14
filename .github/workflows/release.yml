@@ -28,6 +28,15 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
+      # Node 22 自带的 npm 是 10.x，而**Trusted Publisher 需要 npm ≥ 11.5.1**
+      # （Node 需要 ≥ 22.14.0）。不升这一下，OIDC 那条路根本不存在，会在 publish 那步
+      # 报 ENEEDAUTH —— 看起来像「没配好 Trusted Publisher」，其实只是 npm 太老。
+      - name: 确保 npm 支持 Trusted Publisher（≥ 11.5.1）
+        run: |
+          npm install -g 'npm@^11.5.1'
+          node -v
+          npm -v
+
       # tag 与 package.json 必须一致：否则 tag v0.9.0 会发出一个 0.8.2，事后没法解释。
       # 手动触发（workflow_dispatch）时没有 tag，就以 package.json 为准 —— 这条路径是给
       # 「tag 早就打过了、当时发不出去」准备的（0.9.0 就是这种情况：tag 在，npm 卡在口令上）。
