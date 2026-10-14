@@ -3,6 +3,31 @@
 本项目的所有重要变更都记在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.0] — 2026-10-15
+
+### 新增
+
+- **可选的语义检索接缝（`semantic.js`，默认关闭）**：`semanticProvider` 指一个本地 ESM 模块
+  （导出 `rerank({query, docs, limit, signal})` 或 `expand({query, signal})`），或者字面量
+  `host-llm`（用宿主模型做查询改写，走 `llm.js` 的动态 import）。四条边界是设计出来的：
+  - 结果是 **RRF 融合**：词面命中的文档一条不丢，提供方只能改顺序；它返回候选之外的文件名
+    一律丢弃并报数（`dropped`）；
+  - 超时**硬兜一层 `Promise.race`**：提供方忽略 `AbortSignal` 也收得住；
+  - 失败不抛错，降级回词面结果并如实报 `code`（`off` / `not-found` / `unsupported` /
+    `provider-error` / `timeout` / `provider-empty`），检索工具返回值里多了个 `semantic` 字段；
+  - **只管按需检索工具**，每轮自动注入那条热路径永远纯词面（挂外部件等于给每个用户轮加税）。
+- README 新增「可选：语义检索接缝」小节（含提供方接口示例与上面这张边界表）；「短板」两处
+  关于「无语义检索」的说法改成准确表述：开箱仍是纯词面，接缝不替你选模型、不替你出网。
+
+### 测试
+
+- `test/semantic.test.mjs` 11 例（自建假提供方模块）：抛错 / 卡住 / 返回垃圾 / 读不到模块 /
+  编造文件名 / 空结果都降级且报原因；`expand` 带进来的新文档进结果、词面第一名不丢；
+  默认关闭时用**副作用文件**证明连 import 都没发生；`module` 形式不静态 import 宿主包与 `llm.js`。
+- `test/semantic-wiring.test.mjs` 5 例：关着时不打标不 import、开着时真的融合、超时仍返回词面结果、
+  **每轮自动注入不碰接缝**、`index.js` 静态依赖里仍然没有 `llm.js`。
+- 合计 209 例全绿；`bench:check` 与期望值一致（两把中文尺子的数字不受影响 —— 接缝默认关闭）。
+
 ## [0.8.1] — 2026-10-15
 
 ### 修复

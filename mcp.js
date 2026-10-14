@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { buildIndex, search } from './bm25.js';
 import { countLines, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES, measureIndex } from './index-guard.js';
+import { describeSeam, semanticSearch } from './semantic.js';
 import { corpusFingerprint, readDocs } from './store.js';
 
 export const SERVER_NAME = 'dsh-engramory-recall';
@@ -107,7 +108,15 @@ export function resolveStorePath(raw) {
 
 export function createSession(options = {}) {
   const raw = options.store ?? process.env.ENGRAMORY_STORE ?? DEFAULT_STORE;
-  return { store: resolveStorePath(raw), storeRaw: String(raw ?? '').trim() || DEFAULT_STORE, index: null, fingerprint: '' };
+  const semantic = String(options.semantic ?? process.env.ENGRAMORY_SEMANTIC_PROVIDER ?? '').trim();
+  return {
+    store: resolveStorePath(raw),
+    storeRaw: String(raw ?? '').trim() || DEFAULT_STORE,
+    semantic,
+    semanticTimeoutMs: Number(options.semanticTimeoutMs) || 2000,
+    index: null,
+    fingerprint: '',
+  };
 }
 
 /** 索引按语料指纹缓存：库被改过就重建，没改过就复用（readDocs 自己也有 mtime 缓存）。 */
@@ -158,7 +167,7 @@ function readNote(session, file) {
   return text;
 }
 
-function toolSearch(session, args) {
+async function toolSearch(session, args) {
   const query = String(args?.query ?? '').trim();
   if (!query) throw new McpError('需要非空的 query。');
   const raw = Number(args?.limit);
@@ -167,7 +176,12 @@ function toolSearch(session, args) {
   if (!docs.length) {
     throw new McpError(`库是空的或不存在：${session.store}。用 --store <路径> 或环境变量 ENGRAMORY_STORE 指定。`);
   }
-  const hits = search(indexFor(session), query, limit);
+  // 语义接缝在 MCP 侧同样可用，但只支持「本地模块」提供方：`host-llm` 需要 DSH 宿主运行时，
+  // 这里没有（semanticSearch 会明确回 no-host 并降级，不假装成功）。
+  const seam = session.semantic || '';
+  const { hits } = seam
+    ? await semanticSearch({ index: indexFor(session), query, limit, config: { provider: seam, timeoutMs: session.semanticTimeoutMs } })
+    : { hits: searchLexical(indexFor(session), query, limit) };
   const header = `库：${session.store}（${notesOf(session).length} 篇）· 查询：${query}`;
   if (!hits.length) return `${header}\n没有命中。换个词，或先用 engramory_status 确认库对不对。`;
   const lines = hits.map((hit, i) => {
@@ -200,6 +214,11 @@ function toolStatus(session) {
   ].join('\n');
 }
 
+/** 关着（默认）时用的同步词面检索 —— 与插件里那条路径一字不差。 */
+function searchLexical(index, query, limit) {
+  return buildIndex ? search(index, query, limit) : [];
+}
+
 const HANDLERS = {
   engramory_search: toolSearch,
   engramory_read: (session, args) => readNote(session, args?.file),
@@ -213,7 +232,10 @@ export async function callTool(session, params) {
     return { content: [{ type: 'text', text: `没有这个工具：${name}。可用：${Object.keys(HANDLERS).join(' / ')}` }], isError: true };
   }
   try {
-    return { content: [{ type: 'text', text: String(handler(session, params?.arguments ?? {})) }], isError: false };
+    // 处理器可以是 async（搜索走语义接缝时就是）：这里必须 await，
+    // 否则 String(Promise) 会把结果变成一行 "[object Promise]" —— 0.9.0 开发时真踩过。
+    const value = await handler(session, params?.arguments ?? {});
+    return { content: [{ type: 'text', text: String(value) }], isError: false };
   } catch (error) {
     const text = error instanceof McpError ? error.message : `工具 ${name} 出错：${error?.message ?? error}`;
     return { content: [{ type: 'text', text }], isError: true };
@@ -326,18 +348,22 @@ export async function serveStdio(session, options = {}) {
   await Promise.all(pending);
 }
 
-export const USAGE = `用法：node mcp.js [--store <路径>] [--print-config] [--version] [--help]
+export const USAGE = `用法：node mcp.js [--store <路径>] [--semantic <本地模块路径>] [--print-config] [--version] [--help]
 
 零依赖、只读的 MCP stdio 服务器：把 Engramory markdown 记忆库暴露成
 engramory_search / engramory_read / engramory_status 三个工具。
 库路径优先级：--store > 环境变量 ENGRAMORY_STORE > ${DEFAULT_STORE}
+语义接缝（可选、默认关闭）：--semantic > 环境变量 ENGRAMORY_SEMANTIC_PROVIDER，
+只支持本地模块提供方（host-llm 需要 DSH 宿主运行时，这里会降级为词面）。
 日志一律写 stderr；stdout 只有 JSON-RPC 帧。`;
 
 export function parseArgs(argv) {
-  const args = { store: '', help: false, version: false, printConfig: false };
+  const args = { store: '', semantic: '', help: false, version: false, printConfig: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--store') args.store = argv[++i] ?? '';
+    else if (arg === '--semantic') args.semantic = argv[++i] ?? '';
+    else if (arg.startsWith('--semantic=')) args.semantic = arg.slice('--semantic='.length);
     else if (arg.startsWith('--store=')) args.store = arg.slice('--store='.length);
     else if (arg === '--help' || arg === '-h') args.help = true;
     else if (arg === '--version' || arg === '-v') args.version = true;
@@ -361,12 +387,15 @@ export async function main(argv = process.argv.slice(2)) {
     process.stdout.write(`${SERVER_VERSION}\n`);
     return 0;
   }
-  const session = createSession({ store: args.store || undefined });
+  const session = createSession({ store: args.store || undefined, semantic: args.semantic || undefined });
   if (args.printConfig) {
     process.stdout.write(`${JSON.stringify({ name: SERVER_NAME, version: SERVER_VERSION, store: session.store })}\n`);
     return 0;
   }
-  process.stderr.write(`[${SERVER_NAME}] 库：${session.store} · 只读 · 日志只走 stderr\n`);
+  const seam = describeSeam({ provider: session.semantic });
+  process.stderr.write(
+    `[${SERVER_NAME}] 库：${session.store} · 只读 · 语义接缝：${seam.enabled ? seam.spec : '关闭（默认）'} · 日志只走 stderr\n`,
+  );
   await serveStdio(session);
   return 0;
 }

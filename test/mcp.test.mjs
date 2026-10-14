@@ -145,6 +145,7 @@ test('MCP：engramory_search 命中语料里的笔记，且 stdout 上没有杂�
     const text = reply.result.content[0].text;
     assert.match(text, /reference-stdio-protocol\.md/, '该命中的笔记要出现在结果里');
     assert.match(text, /命中：/, '要给出命中词');
+    assert.ok(!text.includes('[object Promise]'), '处理器是 async：忘了 await 的话结果就变成一行 [object Promise]');
     assert.ok(reply.result.content[0].type === 'text');
     assert.equal(server.stdoutFrames.length, 2, '两问两答：通知按协议不回包，stdout 上不能多出东西');
   } finally {

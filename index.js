@@ -26,6 +26,7 @@ import { checkIndexWrite, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES } fro
 import { registerSkill, skillStatus } from './skill.js';
 import { appendAudit, readAudit, GUARD_EPOCH } from './audit.js';
 import { readDocs } from './store.js';
+import { describeSeam, semanticSearch } from './semantic.js';
 import { auditStore } from './doctor.js';
 import { planArchive, applyArchive } from './archive.js';
 
@@ -163,6 +164,17 @@ const DEFAULTS = {
   llmReasoningEffort: '',
   /** 单次模型调用的超时预算（毫秒）。 */
   llmTimeoutMs: 30000,
+  /**
+   * 语义接缝（默认关闭）：留空 = 纯词面，连 import 都不发生。
+   *
+   * 取值：本地模块路径（导出 `rerank({query, docs, limit, signal})` 或
+   * `expand({query, signal})`），或者字面量 `host-llm`（走宿主模型，动态 import llm.js）。
+   * 它只影响**按需检索工具**；每轮自动注入那条路径永远是纯词面 ——
+   * 自动召回每轮都跑，挂一个需要 300ms 的外部件等于给每个用户轮加税。
+   */
+  semanticProvider: '',
+  /** 接缝的单次超时预算（毫秒）。超时/抛错/返回垃圾一律降级回词面结果。 */
+  semanticTimeoutMs: 2000,
 };
 
 /** 只在用户句子里出现明确的「长期记住」意图时才追加一行提示（默认开）。 */
@@ -315,6 +327,16 @@ export function apply(ctx, config = {}) {
             },
           },
           note: { type: 'string' },
+          semantic: {
+            type: 'object',
+            properties: {
+              used: { type: 'boolean' },
+              code: { type: 'string' },
+              message: { type: 'string' },
+            },
+            required: ['used', 'code', 'message'],
+            additionalProperties: false,
+          },
         },
         required: ['store', 'hits', 'note'],
         additionalProperties: false,
@@ -329,7 +351,19 @@ export function apply(ctx, config = {}) {
         return { store: storePath, hits: [], note: '需要 storePath 配置与非空 query' };
       }
       const limit = Math.min(Math.max(Number(args?.limit) || 5, 1), 20);
-      const hits = search(indexOf(storePath), query, limit).map((hit) => ({
+      // 接缝关着（默认）就走原来那条同步路径：不 await、不 import、零额外开销。
+      // 开着也只是「融合」：语义提供方插进来的顺序与词面顺序做 RRF，词面命中的文档一条不丢。
+      const seam = describeSeam({ provider: settings.semanticProvider });
+      const result = seam.enabled
+        ? await semanticSearch({
+            index: indexOf(storePath),
+            query,
+            limit,
+            config: { provider: settings.semanticProvider, timeoutMs: settings.semanticTimeoutMs },
+            runtime: llmRuntime(),
+          })
+        : { hits: search(indexOf(storePath), query, limit), used: false, code: 'off', message: '语义接缝未启用（默认）' };
+      const hits = result.hits.map((hit) => ({
         file: hit.id,
         score: Number(hit.score.toFixed(3)),
         snippet: clip(hit.snippet, 140),
@@ -340,6 +374,7 @@ export function apply(ctx, config = {}) {
         note: hits.length
           ? '用 read 打开需要的文件；正文在笔记里，不在这个结果里'
           : '没有命中：换关键词再试（中文可以换相邻词）',
+        semantic: { used: result.used, code: result.code, message: result.message },
       };
     },
   });

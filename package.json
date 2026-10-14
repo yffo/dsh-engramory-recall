@@ -1,6 +1,6 @@
 {
   "name": "dsh-engramory-recall",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Local BM25 auto-recall, fail-closed write guard, static doctor and a memory panel for the Engramory markdown store — no network, no model, no daemon.",
   "keywords": [
     "dsh",
@@ -38,7 +38,8 @@
     "./skill": "./skill.js",
     "./llm": "./llm.js",
     "./index": "./index.js",
-    "./mcp": "./mcp.js"
+    "./mcp": "./mcp.js",
+    "./semantic": "./semantic.js"
   },
   "files": [
     "index.js",
@@ -52,6 +53,7 @@
     "index-guard.js",
     "skill.js",
     "llm.js",
+    "semantic.js",
     "mcp.js",
     "CHANGELOG.md",
     "cordis.patch.yml",
