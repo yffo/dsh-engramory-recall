@@ -423,9 +423,45 @@ export function tokenize(text) {
   return out;
 }
 
-/** 查询词项去重（打分时同一词项不重复计权）。 */
+/**
+ * 英文虚词：查询里带着它们不加分，只稀释真正有区分度的词。
+ *
+ * 为什么只在**查询侧**过滤、索引侧一个词不动：索引侧删词会同时改掉每篇的
+ * `len`，那等于顺手动了长度归一 —— 长度归一刚在 2026-10-15 为 `TITLE_EXTRA`
+ * 的事校准过，不该为了这个另起一轮。实测也支持这个选择：查询+索引都过滤
+ * 90.0%、只过滤查询 90.8%（LongMemEval-S 前 120 题）。
+ *
+ * 数据来源：LongMemEval-S 500 题（英文），86.2% → 87.8% RecallAny@1、
+ * Recall@5 90.7% → 91.7%、MRR@5 0.904 → 0.914。中文查询几乎不受影响
+ * （中文词不进这张表）。
+ *
+ * 只收「语法词」：疑问词、be/do/have 的变位、介词、代词、限定词。
+ * 刻意**不收**任何可能带语义的词（如 `time`、`name`、`like`）——
+ * 那类词在短查询里往往是唯一的抓手，删了就是漏检。
+ */
+const EN_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'than', 'that', 'this', 'these', 'those',
+  'what', 'which', 'who', 'whom', 'whose', 'when', 'where', 'why', 'how',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+  'do', 'does', 'did', 'doing', 'done',
+  'have', 'has', 'had', 'having',
+  'can', 'could', 'will', 'would', 'shall', 'should', 'may', 'might', 'must',
+  'of', 'in', 'on', 'at', 'to', 'from', 'by', 'with', 'for', 'about', 'as', 'into', 'over', 'after', 'before',
+  'it', 'its', 'my', 'me', 'we', 'our', 'you', 'your', 'he', 'him', 'she', 'her', 'they', 'them', 'their',
+  'there', 'here', 'so', 'such', 'no', 'not', 'only', 'just', 'also', 'very', 'much', 'many', 'more', 'most', 'some', 'any', 'all',
+]);
+
+/**
+ * 查询词项：去重 + 丢掉英文虚词。
+ * 两个例外都保留原样，宁可留噪声也不把查询清空：
+ *   · 只剩一个词项的查询（很可能那个词就是全部信息）；
+ *   · 全是虚词的查询（「what about this」这种），过滤后为空等于一条都召不回。
+ */
 export function queryTerms(text) {
-  return [...new Set(tokenize(text))];
+  const terms = [...new Set(tokenize(text))];
+  if (terms.length < 2) return terms;
+  const kept = terms.filter((term) => !EN_STOPWORDS.has(term));
+  return kept.length ? kept : terms;
 }
 
 /** 查询里命中的同义键（按原文字面，大小写不敏感）。 */

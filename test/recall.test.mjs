@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, readdirSync,
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { SYNONYMS, tokenize, buildIndex, search, expandQuery } from '../bm25.js';
+import { SYNONYMS, tokenize, queryTerms, buildIndex, search, expandQuery } from '../bm25.js';
 import { corpusFingerprint, splitNote, readDocs, chunkBody } from '../store.js';
 import { apply, isSearchable } from '../index.js';
 import { readAudit, GUARD_EPOCH } from '../audit.js';
@@ -41,6 +41,31 @@ function fixtureStore() {
   );
   return dir;
 }
+
+test('查询词项：英文虚词在查询侧被丢掉（索引侧不动）', () => {
+  assert.deepEqual(queryTerms('What degree did I graduate with?').sort(), ['degree', 'graduate']);
+  // 虚词表只收语法词：带语义的词一个不碰
+  assert.deepEqual(queryTerms('what time is it'), ['time']); // what/is/it 是虚词，time 不是
+  assert.ok(queryTerms('the name of my hamster').includes('name'));
+  assert.ok(queryTerms('the name of my hamster').includes('hamster'));
+});
+
+test('查询词项：清不空 —— 只剩虚词时退回原样，单关键词也不动', () => {
+  const all = queryTerms('what is the');
+  assert.ok(all.length >= 1, '过滤后为空等于一条都召不回，必须退回原样');
+  assert.ok(all.includes('the') || all.includes('what'));
+  assert.deepEqual(queryTerms('the'), ['the']); // 单个词项的查询不筛
+});
+
+test('BM25：查询侧丢虚词后，英文长问句不再被 how/what 之类带偏', () => {
+  const docs = [
+    { id: 'a.md', title: '', description: '', body: 'How do I deploy the worker? Set the token in .env.' },
+    { id: 'b.md', title: '', description: '', body: 'Q: What degree did you graduate with? A: Master of Science.' },
+  ];
+  const index = buildIndex(docs);
+  const hit = search(index, 'What degree did I graduate with?', 1);
+  assert.equal(hit[0]?.id, 'b.md');
+});
 
 test('分词：中文出双字，英文出词元', () => {
   const terms = new Set(tokenize('代理节点 Hy2'));
