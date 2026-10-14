@@ -28,15 +28,22 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      # tag 与 package.json 必须一致：否则 tag v0.9.0 会发出一个 0.8.2，事后没法解释
+      # tag 与 package.json 必须一致：否则 tag v0.9.0 会发出一个 0.8.2，事后没法解释。
+      # 手动触发（workflow_dispatch）时没有 tag，就以 package.json 为准 —— 这条路径是给
+      # 「tag 早就打过了、当时发不出去」准备的（0.9.0 就是这种情况：tag 在，npm 卡在口令上）。
       - name: 校验 tag 与 package.json 版本一致
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p "require('./package.json').version")"
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json 的 ${pkg} 不一致"
-            exit 1
-          fi
+          case "${GITHUB_REF}" in
+            refs/tags/*)
+              tag="${GITHUB_REF_NAME#v}"
+              if [ "$tag" != "$pkg" ]; then
+                echo "::error::tag ${GITHUB_REF_NAME} 与 package.json 的 ${pkg} 不一致"
+                exit 1
+              fi
+              ;;
+            *) echo "手动触发：以 package.json 的 ${pkg} 为准" ;;
+          esac
           echo "版本：$pkg"
 
       # 发版前的门槛与 CI 完全相同：测试 + 基准数字不许漂 + 包能打出来
