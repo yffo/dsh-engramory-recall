@@ -679,7 +679,13 @@ Settings → Trusted Publisher → GitHub Actions 要填四个字段，一个都
 | 日志里出现 | 真因 | 修法 |
 | --- | --- | --- |
 | `404 Not Found - PUT https://registry.npmjs.org/<pkg>`，紧挨着一句 bypass-2FA 提示 | `actions/setup-node` 的 `registry-url` 会写一行 `_authToken=${NODE_AUTH_TOKEN}` 并塞占位值 `XXXXX-XXXXX-XXXXX-XXXXX`；npm 只要在配置里看到 token 就**不再走 OIDC**，于是拿假 token 去 PUT | 去掉 `registry-url`；workflow 里已加一步断言 `_authToken` 为空（只打有无、不打值） |
-| `ENEEDAUTH need auth ... npm adduser` | npm 把 OIDC 交换的失败**全吞掉**（`lib/utils/oidc.js` 只写一行 verbose 就返回 undefined），所以「没绑定」和「字段不符」长得一模一样 | publish 加 `--loglevel verbose`，日志里会出现 `Failed token exchange request with body message: …`，那才是 registry 的原话 |
+| `ENEEDAUTH need auth ... npm adduser` | npm 把 OIDC 交换的失败**全吞掉**（`lib/utils/oidc.js` 只写一行 verbose 就返回 undefined），所以「没绑定」和「字段不符」长得一模一样 | 看预检步的 `交换接口 HTTP …`（见下）；或给 publish 加 `--loglevel verbose`，日志里会出现 `Failed token exchange request with body message: …` |
+| `交换接口 HTTP 404` + `OIDC token exchange error - package not found` | 这个包在 npm 上**没有任何 Trusted Publisher 绑定**（注意它不说「没绑定」，说的是「包找不到」——registry 惯用的模糊话术） | 去 Settings → Trusted Publisher → GitHub Actions 绑上那四个字段 |
+| `交换接口 HTTP 401` + `OIDC token exchange error - unauthorized` | id-token 本身没拿到或被拒（`permissions: id-token: write` 缺失、或请求里带的是假 token） | 检查 workflow 的 `permissions` |
+
+工作流里那步「**预检 OIDC 交换**」就是为这张表服务的：它自己发一次与 `npm publish` 内部完全相同的
+交换请求（`POST /-/npm/v1/oidc/token/exchange/package/<name>`），把 registry 的原话打印出来，
+并且排在测试之前 —— 缺绑定时 30 秒就失败，不必先烧两分钟测试。
 
 还有一条同类的假线索：runner 上 Node 22 自带的 npm 是 10.x，而 Trusted Publisher 要
 **npm ≥ 11.5.1**，所以 workflow 第一步就 `npm install -g 'npm@^11.5.1'` —— 少了这步也会报
