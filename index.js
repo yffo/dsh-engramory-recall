@@ -180,7 +180,7 @@ const textOf = (message) =>
 const isHuman = (message) => message?.role === 'user' && message?.source?.kind === 'user';
 
 /**
- * 把配置里的 `~/xxx` 展开成真实家目录。别人装这个插件时不会恰好也叫 yangfu，
+ * 把配置里的 `~/xxx` 展开成真实家目录。这步不能省：别人机器上的家目录不是配置里那个字面量，
  * 而 cordis 的 yaml 配置里 `~` 不会被自动展开——不处理的话 `storePath` 会静默无效
  * （readDocs 读不到目录、返回空数组，召回从此一条都不出，且没有任何报错）。
  */
