@@ -467,16 +467,41 @@ const EN_STOPWORDS = new Set([
 ]);
 
 /**
- * 查询词项：去重 + 丢掉英文虚词。
- * 两个例外都保留原样，宁可留噪声也不把查询清空：
- *   · 只剩一个词项的查询（很可能那个词就是全部信息）；
- *   · 全是虚词的查询（「what about this」这种），过滤后为空等于一条都召不回。
+ * 求助/建议类通用词（查询侧）。这些词是「同一类对话」的框架，不是话题：
+ * 一次求助会话里几乎必有 tips / suggest / advice / thinking，于是任何一次同流派会话都会
+ * 因为共现这几个框架词而被抬分 —— 那是 genre（同一类对话）在匹配，不是 topic 在匹配。
+ * 最吃亏的是「说出偏好再问建议」的查询：它的实词（巧克力曲奇、鸡尾酒、卧室家具）才是信息，
+ * 却被一堆框架词稀释成「又一场给建议的对话」。
+ *
+ * 实测（LongMemEval-S 500 题，2026-10-15，`bench/.tmp/recon-queryclean.mjs`）：
+ *   · 查询侧去掉这一类词 → Any@1 88.4% → 89.2%、MRR 0.9202 → 0.9251；
+ *     preference 分片 @1 46.7% → 60.0%，其余五个分片逐位不变。
+ *   · 换成「按 df 比例自动丢高频查询词」的通用规则则全线下跌（df<0.35 → @1 87.6%、
+ *     df<0.20 → 85.4%）⇒ 收益来自这一类词的**语义**，不是频次本身（补上一条更早的证伪：
+ *     df 下限同样无效）。
+ *   · 14 个词逐个消融：没有哪个词单独扛收益（去掉任意一个最多掉 1 题），15 词子集与
+ *     35 词大表同分 ⇒ 收益是「一类词」，不是一个咒语。
+ * 只收「在失败样本里真出现过」的写法：单复数不自动补齐（补了就是没量过的猜测）。
+ */
+const EN_REQUEST_STOPWORDS = new Set([
+  'tips', 'suggest', 'suggestions', 'recommend', 'recommendations', 'advice',
+  'think', 'thinking', 'idea', 'ideas', 'helpful', 'good', 'upcoming', 'weekend',
+]);
+
+/**
+ * 查询词项：去重 + 丢掉英文虚词 + 丢掉求助/建议类框架词。
+ * 三道保险都保留原样，宁可留噪声也不把查询清空：
+ *   · 只剩一个词项的查询（很可能那个词就是全部信息，「tips」这种就别筛了）；
+ *   · 全是虚词的查询（「what about this」这种），过滤后为空等于一条都召不回；
+ *   · 去掉框架词后为空（「any tips?」）→ 退回只过虚词的结果，而不是清空。
  */
 export function queryTerms(text) {
   const terms = [...new Set(tokenize(text))];
   if (terms.length < 2) return terms;
-  const kept = terms.filter((term) => !EN_STOPWORDS.has(term));
-  return kept.length ? kept : terms;
+  const withoutFunction = terms.filter((term) => !EN_STOPWORDS.has(term));
+  const base = withoutFunction.length ? withoutFunction : terms;
+  const kept = base.filter((term) => !EN_REQUEST_STOPWORDS.has(term));
+  return kept.length ? kept : base;
 }
 
 /** 查询里命中的同义键（按原文字面，大小写不敏感）。 */

@@ -1,7 +1,7 @@
 {
   "说明": "LongMemEval-S（cleaned）逐题检索结果。查询 = 问题原文，一篇笔记 = 一个 session，命中 = gold session 进 top-k。本引擎默认不读日期。",
   "生成命令": "node bench/longmemeval.mjs --data bench/.tmp/longmemeval_s_cleaned.json --json",
-  "引擎": "dsh-engramory-recall（仓库内 bm25.js，未调参）（0.7.0 起长度归一 B=0.4）",
+  "引擎": "dsh-engramory-recall（仓库内 bm25.js，未调参）（0.7.0 起长度归一 B=0.4；0.10.0 起查询侧丢求助/建议框架词）",
   "k": 5,
   "数据集": {
     "file": "longmemeval_s_cleaned.json",
@@ -11,11 +11,11 @@
   },
   "总表": {
     "n": 500,
-    "recallAny1": 0.884,
+    "recallAny1": 0.892,
     "recallAnyK": 0.982,
-    "recallAny10": 0.988,
+    "recallAny10": 0.99,
     "recallK": 0.9252000000000002,
-    "mrr": 0.9201999999999998
+    "mrr": 0.9250666666666666
   },
   "分题型": {
     "knowledge-update": {
@@ -44,11 +44,11 @@
     },
     "single-session-preference": {
       "n": 30,
-      "recallAny1": 0.4666666666666667,
+      "recallAny1": 0.6,
       "recallAnyK": 0.9,
-      "recallAny10": 0.9,
+      "recallAny10": 0.9333333333333333,
       "recallK": 0.9,
-      "mrr": 0.6272222222222221
+      "mrr": 0.7083333333333333
     },
     "single-session-user": {
       "n": 70,
@@ -1536,11 +1536,11 @@
       "question_type": "single-session-preference",
       "sessions": 48,
       "gold": 1,
-      "hit1": false,
+      "hit1": true,
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.5
+      "rr": 1
     },
     {
       "question_id": "75832dbd",
@@ -1548,10 +1548,10 @@
       "sessions": 48,
       "gold": 1,
       "hit1": false,
-      "hitK": true,
-      "hit10": true,
-      "recallK": 1,
-      "rr": 0.25
+      "hitK": false,
+      "hit10": false,
+      "recallK": 0,
+      "rr": 0
     },
     {
       "question_id": "0edc2aef",
@@ -1637,9 +1637,9 @@
       "gold": 1,
       "hit1": false,
       "hitK": false,
-      "hit10": false,
+      "hit10": true,
       "recallK": 0,
-      "rr": 0
+      "rr": 0.1
     },
     {
       "question_id": "6b7dfb22",
@@ -1657,11 +1657,11 @@
       "question_type": "single-session-preference",
       "sessions": 48,
       "gold": 1,
-      "hit1": false,
+      "hit1": true,
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.5
+      "rr": 1
     },
     {
       "question_id": "09d032c9",
@@ -1679,11 +1679,11 @@
       "question_type": "single-session-preference",
       "sessions": 46,
       "gold": 1,
-      "hit1": false,
+      "hit1": true,
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.5
+      "rr": 1
     },
     {
       "question_id": "d24813b1",
@@ -1712,11 +1712,11 @@
       "question_type": "single-session-preference",
       "sessions": 49,
       "gold": 1,
-      "hit1": false,
+      "hit1": true,
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.5
+      "rr": 1
     },
     {
       "question_id": "505af2f5",
@@ -1746,10 +1746,10 @@
       "sessions": 44,
       "gold": 1,
       "hit1": false,
-      "hitK": false,
-      "hit10": false,
-      "recallK": 0,
-      "rr": 0
+      "hitK": true,
+      "hit10": true,
+      "recallK": 1,
+      "rr": 0.2
     },
     {
       "question_id": "1da05512",
@@ -1793,7 +1793,7 @@
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.25
+      "rr": 0.5
     },
     {
       "question_id": "b0479f84",
@@ -1826,7 +1826,7 @@
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.2
+      "rr": 0.3333333333333333
     },
     {
       "question_id": "1c0ddc50",

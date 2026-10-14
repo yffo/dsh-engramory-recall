@@ -57,6 +57,26 @@ test('查询词项：清不空 —— 只剩虚词时退回原样，单关键词
   assert.deepEqual(queryTerms('the'), ['the']); // 单个词项的查询不筛
 });
 
+test('查询词项：求助/建议类框架词在查询侧被丢掉，实词一个不少', () => {
+  // 「说出偏好 + 问建议」这类查询里，框架词会把「同一类对话」的干扰项抬上来（见 bm25.js 注释）
+  assert.deepEqual(queryTerms('Any tips for a good hotel?').sort(), ['hotel']);
+  assert.deepEqual(queryTerms('Can you suggest a hotel for my upcoming trip?').sort(), ['hotel', 'trip']);
+  // 只丢框架词：话题词、动词、专有名词都留着
+  const coop = queryTerms('what advice do you have about my chicken coop');
+  assert.deepEqual(coop.sort(), ['chicken', 'coop']);
+  assert.ok(queryTerms('I have been thinking about buying a new road bike').includes('bike'));
+});
+
+test('查询词项：全是框架词时退回只过虚词的结果，绝不清空', () => {
+  // 「any tips?」这种查询全靠框架词，清空 = 一条都召不回
+  assert.deepEqual(queryTerms('any tips'), ['tips']);
+  // 整个查询都是框架词时，第三道保险原样退回（宁可留噪声，不可清空）
+  assert.deepEqual(queryTerms('good ideas'), ['good', 'ideas']);
+  // 单关键词的查询走第一道保险，压根不筛
+  assert.deepEqual(queryTerms('tips'), ['tips']);
+  assert.deepEqual(queryTerms('advice'), ['advice']);
+});
+
 test('BM25：查询侧丢虚词后，英文长问句不再被 how/what 之类带偏', () => {
   const docs = [
     { id: 'a.md', title: '', description: '', body: 'How do I deploy the worker? Set the token in .env.' },
