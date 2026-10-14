@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 测试（Node ${{ matrix.node }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 是 engines 声明的下限；22 是当前 LTS
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 本插件零第三方依赖，不需要 npm ci —— 没有 lockfile，也不该有
+      - name: 跑测试
+        run: npm test
+
+      - name: 确认包能打包（files 字段漏文件会让别人装上直接崩）
+        run: npm pack --dry-run
