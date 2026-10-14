@@ -656,17 +656,39 @@ git commit -am "release: 0.9.1" && git tag -a v0.9.1 -m "0.9.1" && git push orig
 
 `.github/workflows/release.yml` 会在 tag 推上去后跑：校验 tag 与 `package.json` 一致 → 测试与基准
 → `npm publish --provenance` → `npm run release:verify`（**直查版本端点**，把 registry 上的
-`dist.shasum` 与本地 `npm pack` 的逐字比对 —— 退出码不算数，这才算数）。
+`dist.shasum` 与本地 `npm pack` 的逐字比对 —— 退出码不算数，这才算数）。tag 早打过、当时发不出去
+的情况用 `gh workflow run release.yml` 手动触发，版本以 `package.json` 为准。
 
-它**不用任何长期 token**：走 npm 的 Trusted Publisher（GitHub OIDC，`.github/workflows/release.yml`
-这个名字要填进 npm 包的 Settings → Trusted Publisher → GitHub Actions）。原因是长期 token 这条
-路正在被 npm 关掉（bypass 2FA 的 token 直接发布 2027-01 起失效），而普通 token 每次发布都要
-6 位 OTP —— 人肉发版迟早卡在口令上（2026-10-15 就卡过一次）。
+它**不用任何长期 token**：走 npm 的 Trusted Publisher（GitHub OIDC）。npm 包的
+Settings → Trusted Publisher → GitHub Actions 要填四个字段，一个都不能错：
 
-需要手动发布时（比如还没配 Trusted Publisher）：
+| 字段 | 填什么 |
+| --- | --- |
+| Organization or user | `yffo` |
+| Repository | `dsh-engramory-recall` |
+| Workflow filename | `release.yml`（只写文件名，别写 `.github/workflows/`） |
+| Environment | 留空（workflow 里没有 `environment`，填了就必然对不上） |
+
+为什么非要走这条路：长期 token 正在被 npm 关掉（bypass 2FA 的 token 直接发布 2027-01 起失效），
+而普通 token 每次发布都要 6 位 OTP —— 人肉发版迟早卡在口令上（2026-10-15 就卡过一次，`EOTP`）。
+
+### 发不出去时，先看这两行日志
+
+2026-10-15 的 0.9.0 首发布连挂两次，两次的报错都是**假线索**，真因只在日志里：
+
+| 日志里出现 | 真因 | 修法 |
+| --- | --- | --- |
+| `404 Not Found - PUT https://registry.npmjs.org/<pkg>`，紧挨着一句 bypass-2FA 提示 | `actions/setup-node` 的 `registry-url` 会写一行 `_authToken=${NODE_AUTH_TOKEN}` 并塞占位值 `XXXXX-XXXXX-XXXXX-XXXXX`；npm 只要在配置里看到 token 就**不再走 OIDC**，于是拿假 token 去 PUT | 去掉 `registry-url`；workflow 里已加一步断言 `_authToken` 为空（只打有无、不打值） |
+| `ENEEDAUTH need auth ... npm adduser` | npm 把 OIDC 交换的失败**全吞掉**（`lib/utils/oidc.js` 只写一行 verbose 就返回 undefined），所以「没绑定」和「字段不符」长得一模一样 | publish 加 `--loglevel verbose`，日志里会出现 `Failed token exchange request with body message: …`，那才是 registry 的原话 |
+
+还有一条同类的假线索：runner 上 Node 22 自带的 npm 是 10.x，而 Trusted Publisher 要
+**npm ≥ 11.5.1**，所以 workflow 第一步就 `npm install -g 'npm@^11.5.1'` —— 少了这步也会报
+ENEEDAUTH，看起来像「Trusted Publisher 没配好」，其实只是 npm 太老。
+
+还没配 Trusted Publisher 时可以手动发（临时文件里放 token，用完删）：
 
 ```bash
-npm publish --access public --userconfig=/tmp/npmrc-<名字>   # token 写在临时文件里，用完删掉
+npm publish --access public --userconfig=/tmp/npmrc-<名字>
 npm run release:verify                                       # 发完必须验证
 ```
 
