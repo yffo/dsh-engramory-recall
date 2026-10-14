@@ -35,6 +35,53 @@ const B = 0.75;
  */
 const EXTRA_WEIGHT = 0.5;
 /**
+ * 字段加权：标题与描述里的词额外多计几遍（BM25F 的廉价近似）。
+ *
+ * 出处：灵枢 `dsh-memory` 的 `scoreEntry`（`lib/index.js:127-129`）给标题 3 分、
+ * 标签 2 分、正文 1 分，理由是「在标题里出现」本身就是强信号。我们原来把
+ * title/description/body 拼成一坨等权处理（`buildIndex`），于是「一篇长笔记
+ * 正文里偶然提过一次」和「标题就叫这个」拿一样的分。
+ *
+ * 用「多计几遍」而不是真做字段分离：BM25 的长度归一化会跟着一起变，
+ * 而短笔记的标题命中本来就该更值钱。
+ *
+ * 实测（2026-10-15，60 篇 / 172 chunk，指纹 c9f7fcbf9426）：
+ *   值   口径     桥     别名   对照A top1/@4   对照B top1/@4
+ *   0   20/21  10/10   5/5    20 / 79        134 / 144
+ *   1   20/21  10/10   5/5    20 / 77        138 / 144
+ *   3   20/21  10/10   5/5    21 / 91        141 / 146
+ *   6   20/21  10/10   5/5    24 / 92        142 / 146
+ *  24   20/21  10/10   5/5    33 / 93        142 / 146
+ *
+ * 取 3（灵枢那个 3:1 的设计值），**刻意不取扫描的极值**：口径是唯一的目标数，
+ * 而它在 3 之后**一步都不再动** —— 说明后面那些增量全来自对照，而 README 写明
+ * 「对照只是别掉分的底线」。拿对照当目标函数去调参，正是 EXTRA_WEIGHT 那次
+ * 「把功劳记错对象」的同一个坑。3 已吃下绝大部分收益（对照A @4 +12、对照B top1 +7），
+ * 且**没有任何一项变差**。真要往上抬，上面这张表就是证据。
+ */
+const TITLE_EXTRA = 3;
+/**
+ * 整句子串命中奖励：文档里逐字出现了整条查询时加的分。
+ *
+ * 出处：灵枢 `dsh-memory`（`lib/index.js:133`，它加 2 分）。
+ * 对中文特别有意义：没有分词器时「浏览器起不来」被拆成 `浏览/览器/器起/起不/不来`，
+ * 通用谓语的碎片反而 IDF 更高；而整句子串命中是**不需要分词器**的强证据。
+ *
+ * ⚠️ 风险（诚实写明）：这条奖励的是「逐字引用了查询」的笔记 —— 而那正是我们
+ * 踩过两次的自污染形态（调优笔记抄了探针 query 就霸榜）。
+ *
+ * **实测否决（2026-10-15，在 TITLE_EXTRA=3 之上）**：
+ *   PHRASE_BONUS   口径     对照A top1   对照B top1
+ *       0         20/21      21         141
+ *       2         20/21      20         142
+ *       5         20/21      19         142
+ *      10         20/21      17         142
+ * 口径一步不动，对照A 单调恶化（21 → 17）—— 奖励「抄了查询的笔记」确实会把
+ * 更该命中的那篇挤下去，与自污染的机理一致。**所以保持 0，机制留在代码里当证据**：
+ * 将来若有人想加，先看这张表。常量与实现都保留，是为了让这次否决可复现，不是待办。
+ */
+const PHRASE_BONUS = 0;
+/**
  * 单次查询最多参与打分的词项数（IDF 选词的 cap，抄 hindsight
  * `engine/search/bm25_term_selection.py`，与灵枢 `cn_recall_grams` 的 cap 同源）。
  * 超长消息里高频词对每个候选都加分，会淹没真正特异的词；只留最特异的这么多个。
@@ -293,12 +340,19 @@ export function buildIndex(docs, options = {}) {
     // 没写 aliases 的笔记不受影响。
     const aliases = Array.isArray(doc.aliases) ? doc.aliases.filter(Boolean).join(' ') : '';
     const tokens = tokenize(aliases ? `${text}\n${aliases} ${aliases}` : text);
+    // 字段加权：标题/描述里的词额外多计几遍（见 TITLE_EXTRA）。默认关闭时整段不执行。
+    if (TITLE_EXTRA > 0) {
+      const head = [doc.title, doc.description].filter(Boolean).join('\n');
+      if (head) for (let i = 0; i < TITLE_EXTRA; i += 1) tokens.push(...tokenize(head));
+    }
     const tf = new Map();
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
     return {
       ...doc,
       tf,
       len: tokens.length || 1,
+      // 整句子串命中用的小写全文（见 PHRASE_BONUS）。关闭时不建，省一份内存。
+      plain: PHRASE_BONUS > 0 ? text.toLowerCase() : '',
       decay: decayFactor(doc.mtimeMs, halfLifeDays, now),
       boost: recencyBoost(doc.mtimeMs, oldestMs, newestMs, recencyWeight),
     };
@@ -321,6 +375,11 @@ export function search(index, query, limit = 5) {
   const base = queryTerms(query);
   const extras = expandQuery(query);
   if (!base.length && !extras.length) return [];
+
+  // 整句子串命中的针（见 PHRASE_BONUS）。太短的查询不判：像「线上」这种两个字，
+  // 逐字命中满库都是，只会制造噪声。
+  const needle = PHRASE_BONUS > 0 ? String(query ?? '').trim().toLowerCase() : '';
+  const usePhrase = needle.length >= 2;
 
   const weights = new Map();
   for (const term of base) weights.set(term, 1);
@@ -369,6 +428,8 @@ export function search(index, query, limit = 5) {
     // decay 无界（指数，默认关）、boost 有界（±w，默认关），各自独立开关。
     score *= doc.decay ?? 1;
     score *= doc.boost ?? 1;
+    // 整句子串命中：加在乘性调整之后，是纯粹的加法微调，不参与 BM25 的饱和曲线。
+    if (usePhrase && score > 0 && doc.plain.includes(needle)) score += PHRASE_BONUS;
     if (score > 0) hits.push({ id: doc.id, section: doc.section, score, snippet: bestLine(doc, matched), matched });
   }
   hits.sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id)));
