@@ -22,6 +22,8 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { buildIndex, search, clip } from './bm25.js';
 import { checkMemoryWrite } from './guard.js';
+import { checkIndexWrite, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES } from './index-guard.js';
+import { registerSkill } from './skill.js';
 import { appendAudit, readAudit, GUARD_EPOCH } from './audit.js';
 import { readDocs } from './store.js';
 import { auditStore } from './doctor.js';
@@ -120,6 +122,27 @@ const DEFAULTS = {
    * 这种绕过闸门的情况。自动执行的每一步都进写入审计，`reason` 里写明触发源。
    */
   autoArchive: false,
+  /**
+   * 索引上限闸门：`MEMORY.md` 长过这里就拒绝写入（缩小的重写永远放行）。
+   *
+   * **融合自 `dsh-engramory` v0.2.5**，逻辑逐条搬进了 `index-guard.js`。吸收它的理由：
+   * 本插件要做完整的记忆系统，不该把「索引上限」留在外部依赖里 —— 那个插件一共只做
+   * 两件事（本闸门 + 注册 `engramory` 技能），两件都收进来之后它就可以退场了。
+   *
+   * 路径不必配置：本插件知道库在哪，索引固定是 `<storePath>/MEMORY.md`。
+   * 这比让人手钉一个绝对路径更不容易错（原插件正是为此加了 `indexPath` 配置项，
+   * 因为它按 basename 匹配会误伤别的项目里同名的 `MEMORY.md`）。
+   */
+  indexMaxLines: DEFAULT_MAX_INDEX_LINES,
+  indexMaxBytes: DEFAULT_MAX_INDEX_BYTES,
+  /**
+   * 注册 `engramory` 技能（写入纪律的正文）。默认开。
+   *
+   * 同样融合自 `dsh-engramory`（正文与 description/whenToUse 逐字保留它的措辞）。
+   * 两者同时装着时会注册同名技能 —— 内容一致，谁赢都一样；注册处包了 try/catch，
+   * 万一注册表对重名是抛错而非覆盖，不会因为一个技能名把宿主拖崩。
+   */
+  registerSkill: true,
 };
 
 /** 只在用户句子里出现明确的「长期记住」意图时才追加一行提示（默认开）。 */
@@ -315,20 +338,35 @@ export function apply(ctx, config = {}) {
         const filePath = args.file_path ?? args.filePath;
         if (!filePath) return undefined;
         const isWrite = toolName === 'write';
-        const verdict = checkMemoryWrite({
+        // 笔记文件规则先判；命中索引文件时它返回 skipped:'index'，此时改由索引上限闸门
+        // 接手（融合自 dsh-engramory，逻辑在 index-guard.js，文件头写明了为什么这么设计）。
+        let verdict = checkMemoryWrite({
           filePath: String(filePath),
           storePath: settings.storePath,
           content: isWrite ? args.content : undefined,
           fragment: isWrite ? undefined : args.new_string,
         });
+        if (verdict.ok && verdict.skipped === 'index') {
+          verdict = checkIndexWrite({
+            filePath: String(filePath),
+            storePath: settings.storePath,
+            tool: toolName,
+            content: isWrite ? args.content : undefined,
+            oldString: isWrite ? undefined : args.old_string,
+            newString: isWrite ? undefined : args.new_string,
+            maxLines: settings.indexMaxLines,
+            maxBytes: settings.indexMaxBytes,
+          });
+        }
         // 放行与拒绝都落审计（库外的写入上面已经 return，不进审计——那是噪音）。
         // 只记「谁动了库里的哪个文件」，内容一律不记（凭据可能就在里面）。
         const bytes = isWrite
           ? Buffer.byteLength(String(args.content ?? ''), 'utf8')
           : Buffer.byteLength(String(args.new_string ?? ''), 'utf8');
         if (verdict.ok) {
-          // 库外 / 索引 / 未配置（skipped）不记：那不是「对记忆库的写入」，记了是噪音。
-          // edit 的片段校验（partial）要记——它确实动了库里的文件。
+          // 库外 / 未配置（skipped）不记：那不是「对记忆库的写入」，记了是噪音。
+          // 索引写入**要**记：它通过索引闸门就是一次真实的库内写入。
+          // edit 的片段校验（partial）也要记——它确实动了库里的文件。
           if (!verdict.skipped) {
             storeWrites += 1; // 沉淀提醒的判据之一：本会话真的往库里写过东西
             appendAudit(settings.storePath, {
@@ -361,6 +399,16 @@ export function apply(ctx, config = {}) {
       }
     });
   }
+
+  // ── 注册 engramory 技能（写入纪律的正文）──────────────────────────────
+  // 融合自 dsh-engramory：正文与 description/whenToUse 逐字保留它的措辞。
+  // 收进来的理由与索引闸门相同 —— 本插件要做完整的记忆系统，纪律这一层不能留在外部。
+  registerSkill(ctx, {
+    registerSkill: settings.registerSkill !== false,
+    storePath: settings.storePath,
+    maxLines: settings.indexMaxLines,
+    maxBytes: settings.indexMaxBytes,
+  });
 
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next();

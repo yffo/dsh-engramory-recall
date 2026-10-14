@@ -181,10 +181,53 @@ if (!onlyPairs) {
   const byTitle = docs
     .filter((d) => /[\u4e00-\u9fff]/.test(String(d.title)))
     .map((d) => [String(d.title).replace(/^[#\s]+/, '').slice(0, 30), d.id.replace(/\.md$/, '')]);
-  const a = score(byName); const b = score(byTitle);
+  /**
+   * 对照 C：把「正文里最有辨识度的词」当查询。
+   *
+   * 为什么非要有这一组：对照 A 与对照 B **都拿标题当查询**，所以它们对 `TITLE_EXTRA`
+   * （标题里的词多计几遍）是**结构性偏袒**的 —— 抬高标题权重几乎必然让这两组变好，
+   * 那不是证据，是同义反复。能中立评价标题权重的，只有「查询词出自正文」这种情形：
+   * 此时抬高标题权重只会让标题里恰好有这个词的**别的**笔记平白加分、把正确答案挤下去。
+   *
+   * 取法：每篇正文词表里挑 df 最低、且**不在任何标题/描述里**的词（df ≤ 3）。
+   * 中文双字碎片不收（它们在中文里天然泛滥，拿来做 query 只会测出分词器的噪声）。
+   */
+  const byBody = (() => {
+    const df = new Map();
+    for (const d of idx.docs) for (const t of new Set(d.tf.keys())) df.set(t, (df.get(t) ?? 0) + 1);
+    // 全库标题词：query 词必须**任何**标题里都没有，才算真正「只靠正文才认得出来」
+    const allHeadTerms = new Set(
+      bm25Tokenize(idx.docs.map((d) => [d.title, d.description].filter(Boolean).join('\n')).join('\n')),
+    );
+    const seen = new Set();
+    const out = [];
+    for (const d of idx.docs) {
+      let best = null;
+      for (const t of d.tf.keys()) {
+        if (allHeadTerms.has(t)) continue;
+        if (t.length < 4) continue;
+        if (!/[a-z]/i.test(t)) continue;
+        const n = df.get(t) ?? 99;
+        if (n > 3) continue;
+        if (!best || n < best.n || (n === best.n && t.length > best.t.length)) best = { t, n };
+      }
+      if (!best) continue;
+      const key = `${best.t}\u0000${d.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push([best.t, d.id.replace(/\.md$/, '')]);
+    }
+    return out;
+  })();
+
+  const a = score(byName); const b = score(byTitle); const c = score(byBody);
   console.log(`对照 A（文件名当查询）  top1 ${a.top1}/${a.n} | recall@4 ${a.in4}/${a.n}`);
   console.log(`对照 B（中文标题当查询）top1 ${b.top1}/${b.n} | recall@4 ${b.in4}/${b.n}`);
+  console.log(`对照 C（正文独有词当查询）top1 ${c.top1}/${c.n} | recall@4 ${c.in4}/${c.n}`);
   console.log('\n对照只是「别掉分」的底线；口径才是要提的那个数。');
+  console.log('对照 A/B 都拿标题当查询，对标题权重是**结构性偏袒**的 —— 它们既不能当目标，');
+  console.log('也不能当「抬高标题权重是安全的」这个结论的证据（它们测不出这件事）。');
+  console.log('评价 TITLE_EXTRA 只看对照 C（正文独有词当查询）。');
 
   const result = {
     fingerprint: FP,
@@ -195,6 +238,7 @@ if (!onlyPairs) {
     alias: `${ALIAS_PAIRS.length - aliasMiss}/${ALIAS_PAIRS.length}`,
     controlA: `${a.top1}/${a.n} top1, ${a.in4}/${a.n} recall@4`,
     controlB: `${b.top1}/${b.n} top1, ${b.in4}/${b.n} recall@4`,
+    controlC: `${c.top1}/${c.n} top1, ${c.in4}/${c.n} recall@4`,
     at: new Date().toISOString(),
   };
 
@@ -207,13 +251,14 @@ if (!onlyPairs) {
     if (base) {
       if (base.fingerprint === FP) {
         const same = base.pairs === result.pairs && base.bridge === result.bridge && base.alias === result.alias
-          && base.controlA === result.controlA && base.controlB === result.controlB;
+          && base.controlA === result.controlA && base.controlB === result.controlB
+          && (base.controlC ?? result.controlC) === result.controlC;
         console.log(same ? '\n对比基线：指纹相同、三项数字全等 —— 这次改动没有影响召回。'
-          : `\n对比基线：指纹相同、数字有变 —— 这才是一次可信的 A/B。\n  口径 ${base.pairs} → ${result.pairs} | 桥探针 ${base.bridge} → ${result.bridge} | 别名 ${base.alias} → ${result.alias} | 对照A ${base.controlA} → ${result.controlA} | 对照B ${base.controlB} → ${result.controlB}`);
+          : `\n对比基线：指纹相同、数字有变 —— 这才是一次可信的 A/B。\n  口径 ${base.pairs} → ${result.pairs} | 桥探针 ${base.bridge} → ${result.bridge} | 别名 ${base.alias} → ${result.alias} | 对照A ${base.controlA} → ${result.controlA} | 对照B ${base.controlB} → ${result.controlB} | 对照C ${base.controlC ?? '—'} → ${result.controlC}`);
       } else {
         // 这条警告是本文件存在的主要理由之一：库变了，分数就没法直接比。
         console.log(`\n⚠️ 语料变了（指纹 ${base.fingerprint} → ${FP}，${base.notes}篇/${base.chunks}chunk → ${NOTE_COUNT}篇/${docs.length}chunk）。`);
-        console.log(`  上次：口径 ${base.pairs} | 桥探针 ${base.bridge ?? '—'} | 别名 ${base.alias ?? '—'} | 对照A ${base.controlA} | 对照B ${base.controlB}`);
+        console.log(`  上次：口径 ${base.pairs} | 桥探针 ${base.bridge ?? '—'} | 别名 ${base.alias ?? '—'} | 对照A ${base.controlA} | 对照B ${base.controlB} | 对照C ${base.controlC ?? '—'}`);
         console.log('  分数**不可直接比较** —— 掉分可能是库变了，不是代码退步。要对齐请先回溯语料，或 --save 重设基线。');
       }
     }
