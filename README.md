@@ -71,9 +71,9 @@
 
 ### 短板
 
-- **没有公开基准**：`thoth-mem` 公布了 LongMemEval-S 470 题的成绩（RecallAny@5 432/470、
-  Recall@5 84.8%、NDCG@10 0.8165、p95 9.35ms）。本插件的探针跑在自己的库上，口径与它不可比。
-  下面那一节是自建的可复算基准，但它仍然是自建口径，别当成跨插件排名。
+- **公开基准只跑了一半**：LongMemEval-S 500 题跑出 RecallAny@5 97.0%（见下），但那只测英文词面
+  检索；`thoth-mem` 公布的 470 题版本（RecallAny@5 432/470、Recall@5 84.8%、NDCG@10 0.8165）
+  用的是别的 harness，两边数字不可相减。真正的「跨插件排名」仍然不存在。
 - **无语义检索**：没有 embedding、没有向量库。同义改写、隐含意图要靠手工同义表覆盖，
   没覆盖到的就是漏检。（可选的 `ctx.llm` 模块能做矛盾检测和摘要，但它**不参与检索排序**，
   所以排序本身仍然是纯词面的。）
@@ -82,7 +82,7 @@
 - **写入闸门可以被绕过**：`guard` 只拦 `write` / `edit` 工具调用，`bash` 重定向它看不见；
   `@jipika/dsh-memory` 的 guard 挂在更底层的 `tools/pre-execute`，覆盖更广。
 
-## 召回质量：两把可复算的尺子
+## 召回质量：三把可复算的尺子
 
 ### 一、合成基准（`node bench/run.mjs`）
 
@@ -137,7 +137,7 @@ CI 里再跑一遍 `npm run bench:check` 跟 `bench/expectations.json` 对账。
 「去掉字段加权」那一行要单独说：它现在是 -0.3pt（拿掉略微更差），**在一次引擎改动之前它是 +4pt**
 （拿掉明显更好），而**真实库的中立对照一直说拿掉更差**（见下）。当时的冲突定位到机制上：
 合成语料的标题是从正文模板派生的、与正文近乎重复，抬高标题权重只是放大域词噪声；
-真实库的标题是人手提炼的。现在两把尺子都偏向「留着字段加权」，但理由仍是上面这条 ——
+真实库的标题是人手提炼的。现在前两把尺子都偏向「留着字段加权」，但理由仍是上面这条 ——
 不是冲突消失了，是那把合成尺子的标题变真实了一点。两者不一致时以对照 C 为准。
 
 ### 桥组：32 条，65.6%
@@ -206,6 +206,58 @@ CI 里再跑一遍 `npm run bench:check` 跟 `bench/expectations.json` 对账。
 实打实改变排序的。结果探针一边说「语料没变、这是可信 A/B」，一边把一次语料改动伪装成了代码改动。
 **一个漏字段的指纹比没有指纹更坏**，因为它是权威口吻的错误。现在指纹覆盖所有喂进索引的字段，
 并有专门的回归测试守着。
+
+### 三、公开数据集：LongMemEval-S
+
+前两把尺子都是自己出的卷子，这一把不是：LongMemEval 是 ICLR 2025 的记忆评测集
+（`xiaowu0162/longmemeval-cleaned`）。我们跑的是 S 版，500 题，每题一个约 48 个 session 的
+haystack，题目分六类。
+
+做法：一个 session = 一篇笔记（角色前缀保留），query = 问题原文（**不读** `question_date`，
+也**不看** `has_answer` 标注），命中 = gold session 进 top-k。500 题跑 18 秒，零模型调用。
+
+| 指标 | 全部 500 题 |
+| --- | --- |
+| RecallAny@1 | 86.2% |
+| RecallAny@5 | **97.0%** |
+| Recall@5（gold 覆盖率） | 90.7% |
+| MRR@5 | 0.9056 |
+| RecallAny@10 | 98.2% |
+
+| 题型 | 题数 | RecallAny@1 | RecallAny@5 | Recall@5 | MRR@5 |
+| --- | --- | --- | --- | --- | --- |
+| knowledge-update | 78 | 94.9% | 100.0% | 97.4% | 0.971 |
+| multi-session | 133 | 88.0% | 96.2% | 82.6% | 0.915 |
+| single-session-assistant | 56 | 98.2% | 100.0% | 100.0% | 0.991 |
+| single-session-preference | 30 | 36.7% | 86.7% | 86.7% | 0.548 |
+| single-session-user | 70 | 91.4% | 98.6% | 98.6% | 0.944 |
+| temporal-reasoning | 133 | 82.7% | 96.2% | 87.6% | 0.882 |
+
+三句必须说在前面的实话：
+
+1. **这份数据量不出本插件的长处。** 同一份数据我们用教科书 BM25（同分词口径）也跑了一遍，
+   五个指标**一模一样**。原因很实在：LongMemEval 是英文的，session 没有标题、没有别名、
+   没有中文口语，本插件多出来的那几样在这里基本没被激活。它只说明「英文词面检索不输常规写法」，
+   机制到底值多少，回上面两把尺子看。
+2. **别拿它跟别家数字直接相减。** thoth-mem 公布过 LongMemEval-S 470 题、RecallAny@5 91.9%。
+   我们用的是 cleaned 版 500 题 + 自己的 harness，题集版本、命中口径、读不读日期都未必一样，
+   相减没有意义。能担保的是：harness 与逐题结果都在仓库里（`bench/longmemeval.mjs`、
+   `bench/longmemeval-results.json`），可以逐题核。
+3. **最差的是偏好题**（36.7%@1）：「我喜欢什么」这类问题本身没什么词面抓手。这是零模型路线的
+   边界 —— 偏好类想做得更好，要么开可选的 `llm.js`，要么就老老实实把偏好写进标题。
+
+复算：
+
+```bash
+mkdir -p bench/.tmp && curl -L -o bench/.tmp/longmemeval_s_cleaned.json \
+  https://hf-mirror.com/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
+node bench/longmemeval.mjs --data bench/.tmp/longmemeval_s_cleaned.json                     # 本插件
+node bench/longmemeval.mjs --data bench/.tmp/longmemeval_s_cleaned.json --engine unigram      # 教科书 BM25
+```
+
+数据 264MB，不入库也不进 CI；CI 里跑的是同格式的小夹具
+（`bench/fixtures/longmemeval-mini.json`，四道题分别覆盖「英文命中 / 中文命中 /
+多 gold 只找到一半 / 零字面重叠必失手」），判据被改动就会红。
 
 ## 工作机制
 
@@ -412,7 +464,8 @@ aliases: 梯子, 翻墙, 科学上网, 节点, 代理
   同义改写、隐含意图会漏检，目前唯一的桥接是一张 177 条的手工同义表。
   需要模型的那两件事（矛盾检测、摘要）做成了可选工具（见「可选：语义增强」），
   但它们不参与检索排序 —— 排序仍然是纯词面的，这一点不打算含糊。
-- **没有公开基准**：只有自建口径的合成基准与真库探针（见上），跨插件排名无从谈起。
+- **没有跨插件排名**：LongMemEval-S 跑得了（见上），但那是一个英文词面基准，且各家 harness 不同；
+  合成基准与真库探针都是自建口径，只能自己跟自己比。
 
 ### 三、曾经没做、现在补上了
 
@@ -514,11 +567,12 @@ dsh plugin --profile <profile> remove dsh-engramory-recall
 ## 测试与自检
 
 ```bash
-npm test        # 分词 / BM25 / 切桶 / 门控 / 闸门 / 索引闸门 / 技能注册 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由
+npm test        # 分词 / BM25 / 切桶 / 门控 / 闸门 / 索引闸门 / 技能注册 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由 / 公开基准 harness
 npm run check   # 接线自检：配置键认不认、库路径对不对、装的是哪一份、包清单漏没漏文件
 npm run probe   # 召回质量探针：3 组 query + 三道对照，跑在真实记忆库上
 npm run probe -- --save   # 把这次结果存成基线，之后每次跑自动比对
 npm run bench:check       # 合成基准 + 和 bench/expectations.json 对账（CI 跑的就是它）
+node bench/longmemeval.mjs --data bench/.tmp/longmemeval_s_cleaned.json   # 公开基准（数据要自己下，264MB）
 ```
 
 CI 跑 `npm test` 和 `npm run bench:check` 两件事。后者是防「数字悄悄漂走」的：任何一项

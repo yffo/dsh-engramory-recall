@@ -1,0 +1,343 @@
+[
+ {
+  "question_id": "mini-1",
+  "question_type": "single-session-user",
+  "question": "What degree did I graduate with?",
+  "answer": "",
+  "question_date": "2026-01-01",
+  "haystack_dates": [
+   "2025-12-01",
+   "2025-12-02",
+   "2025-12-03",
+   "2025-12-04",
+   "2025-12-05",
+   "2025-12-06",
+   "2025-12-07",
+   "2025-12-08"
+  ],
+  "haystack_session_ids": [
+   "s1-1",
+   "s1-f0",
+   "s1-f1",
+   "s1-f2",
+   "s1-f3",
+   "s1-f4",
+   "s1-f5",
+   "s1-f6"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "I graduated with a degree in computer science from a small college."
+    },
+    {
+     "role": "assistant",
+     "content": "Noted."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 0: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 1: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 2: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 3: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 4: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 5: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 6: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s1-1"
+  ]
+ },
+ {
+  "question_id": "mini-2",
+  "question_type": "single-session-user",
+  "question": "我上次说的那个构建脚本放在哪里了？",
+  "answer": "",
+  "question_date": "2026-01-01",
+  "haystack_dates": [
+   "2025-12-01",
+   "2025-12-02",
+   "2025-12-03",
+   "2025-12-04",
+   "2025-12-05",
+   "2025-12-06",
+   "2025-12-07",
+   "2025-12-08"
+  ],
+  "haystack_session_ids": [
+   "s2-1",
+   "s2-f0",
+   "s2-f1",
+   "s2-f2",
+   "s2-f3",
+   "s2-f4",
+   "s2-f5",
+   "s2-f6"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "构建脚本我放在 ~/bin/build-all.sh，用的时候直接跑就行。"
+    },
+    {
+     "role": "assistant",
+     "content": "Noted."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 0: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 1: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 2: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 3: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 4: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 5: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 6: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s2-1"
+  ]
+ },
+ {
+  "question_id": "mini-3",
+  "question_type": "multi-session",
+  "question": "Where have I lived?",
+  "answer": "",
+  "question_date": "2026-01-01",
+  "haystack_dates": [
+   "2025-12-01",
+   "2025-12-02",
+   "2025-12-03",
+   "2025-12-04",
+   "2025-12-05",
+   "2025-12-06",
+   "2025-12-07",
+   "2025-12-08"
+  ],
+  "haystack_session_ids": [
+   "s3-1",
+   "s3-2",
+   "s3-f0",
+   "s3-f1",
+   "s3-f2",
+   "s3-f3",
+   "s3-f4",
+   "s3-f5"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "I lived in Beijing for four years before that."
+    },
+    {
+     "role": "assistant",
+     "content": "Noted."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Now I live in Shanghai, near the river."
+    },
+    {
+     "role": "assistant",
+     "content": "Noted."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 0: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 1: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 2: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 3: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 4: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 5: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s3-1",
+   "s3-2"
+  ]
+ },
+ {
+  "question_id": "mini-4",
+  "question_type": "single-session-preference",
+  "question": "What kind of music do I enjoy?",
+  "answer": "",
+  "question_date": "2026-01-01",
+  "haystack_dates": [
+   "2025-12-01",
+   "2025-12-02",
+   "2025-12-03",
+   "2025-12-04",
+   "2025-12-05",
+   "2025-12-06",
+   "2025-12-07",
+   "2025-12-08"
+  ],
+  "haystack_session_ids": [
+   "s4-1",
+   "s4-f0",
+   "s4-f1",
+   "s4-f2",
+   "s4-f3",
+   "s4-f4",
+   "s4-f5",
+   "s4-f6"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "My favourite pastime is listening to baroque composers in the evening."
+    },
+    {
+     "role": "assistant",
+     "content": "Noted."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 0: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 1: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 2: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 3: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 4: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "assistant",
+     "content": "Filler session 5: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Filler session 6: we chatted about the weather, groceries, a film, and the bus schedule. Nothing memorable happened."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s4-1"
+  ]
+ }
+]

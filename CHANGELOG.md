@@ -3,6 +3,26 @@
 本项目的所有重要变更都记在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.1] — 2026-10-15
+
+### 新增
+
+- **公开基准：LongMemEval-S**（`xiaowu0162/longmemeval-cleaned` 的 S 版，500 题）。
+  harness 是 `bench/longmemeval.mjs`，逐题结果随仓库发布（`bench/longmemeval-results.json`）。
+  本引擎 500 题跑 18 秒、零模型调用：RecallAny@1 86.2%、**RecallAny@5 97.0%**、
+  Recall@5（gold 覆盖率）90.7%、MRR@5 0.9056、RecallAny@10 98.2%。
+  harness 支持 `--engine unigram|bigram` 跑教科书 BM25 对照。
+- **同格式小夹具 + 测试**（`bench/fixtures/longmemeval-mini.json`、`test/longmemeval.test.mjs`，5 例）：
+  真数据集 264MB 不进 CI，夹具用四道题（英文命中 / 中文命中 / 多 gold 只找到一半 / 零字面重叠
+  必失手）守住判据与两个开关；判据被改动就红。
+
+### 说明
+
+- 在这份**英文**数据集上，本引擎与教科书 BM25 的五个指标完全相同：多出来的机制
+  （中文口语桥、标题字段加权、别名双计）在这里基本没被激活。README 里写明了这一点 ——
+  它只说明「英文词面检索不输常规写法」，不是「我们更准」的证据。
+- 与 `thoth-mem` 公布的 470 题成绩不可直接相减（题集版本与 harness 都不同）。
+
 ## [0.6.0] — 2026-10-15
 
 ### 新增
