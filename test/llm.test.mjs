@@ -73,6 +73,25 @@ function hangingLlm() {
   };
 }
 
+/**
+ * 让事件循环活到 collectText 自己的超时真的触发。
+ *
+ * 为什么必须有这个：AbortSignal.timeout() 的定时器是 unref 的 —— 实测 Node 20/22/25 都一样，
+ * 一个进程里只挂它、没有别的活，进程会直接退出，超时一次都不触发。下面两个用例故意不传
+ * 调用方 signal，测的就是「插件自己的超时」，所以测试进程得自己留一个 ref'd 的句柄。
+ * 不这么做的话 Node 20/22 上事件循环先排空，用例永久 pending，CI 报
+ * `cancelledByParent: Promise resolution is still pending but the event loop has already resolved`，
+ * 并把同一文件里排在后面的用例一起取消（本地 Node 25 侥幸能过，是 runner 自己还握着句柄）。
+ */
+async function withLiveLoop(ms, body) {
+  const keep = setTimeout(() => {}, ms);
+  try {
+    return await body();
+  } finally {
+    clearTimeout(keep);
+  }
+}
+
 function fakeCtx({ llm, selection, selectionThrows = false, getThrows = false } = {}) {
   const ctx = {
     getCalls: 0,
@@ -185,13 +204,15 @@ test('迭代中抛非 Abort 异常（中间件炸）→ llm-error，不会漏成
 });
 
 test('超时（AbortSignal.timeout 触发，抛 AbortError）→ llm-timeout，而不是 llm-aborted', async () => {
-  await assert.rejects(
-    () => collectText(hangingLlm(), PLAIN, 20),
-    (error) => {
-      assert.equal(error.code, LLM_TIMEOUT);
-      assert.match(error.message, /20ms/);
-      return true;
-    },
+  await withLiveLoop(200, () =>
+    assert.rejects(
+      () => collectText(hangingLlm(), PLAIN, 20),
+      (error) => {
+        assert.equal(error.code, LLM_TIMEOUT);
+        assert.match(error.message, /20ms/);
+        return true;
+      },
+    ),
   );
 });
 
@@ -411,7 +432,9 @@ test('detectConflicts：调用失败（终止 chunk）不抛给 doctor，并第�
 });
 
 test('detectConflicts：超时也归一成 semantic-unavailable（不抛，doctor 不许被带走）', async () => {
-  const findings = await detectConflicts({ ctx: fakeCtx({ llm: hangingLlm(), selection: { provider: 'p', model: 'm' } }), config: { timeoutMs: 20 } }, NOTES);
+  const findings = await withLiveLoop(200, () =>
+    detectConflicts({ ctx: fakeCtx({ llm: hangingLlm(), selection: { provider: 'p', model: 'm' } }), config: { timeoutMs: 20 } }, NOTES),
+  );
   assert.equal(findings.length, 1);
   assert.equal(findings[0].code, 'semantic-unavailable');
   assert.match(findings[0].message, /超时/);
