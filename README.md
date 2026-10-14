@@ -738,7 +738,22 @@ dsh plugin --profile <profile> remove dsh-engramory-recall
 # 装了这个包就有了一个可直接调用的命令
 engramory-recall-mcp --store ~/memory/engramory      # 库路径也可以用环境变量 ENGRAMORY_STORE
 npm run mcp:smoke                                    # 自证：拉起来走一遍完整对话，打印收发记录
+npm run bench:mcp                                    # 这一层的数字：冷启动、每步往返、协议帧多大
 ```
+
+这一层的代价（本机实测，64 篇的库、5 次冷启动取中位数）：
+
+| 指标 | 值 | 说明 |
+|---|---|---|
+| 冷启动 | 39 ms | 含 Node 启动、加载索引、`initialize` 往返 |
+| `tools/list` | < 1 ms | 清单是静态的 |
+| `engramory_search` | 74 ms | 首次检索要为 66 篇建一次索引，之后同进程走缓存 |
+| `engramory_status` | 3 ms | 只读索引头 |
+| 协议帧合计 | 3025 字节 | 一次完整对话（initialize + list + search + status）的 stdout 总量 |
+| 依赖 | 0 | 不装任何东西，进程起来就能说 MCP |
+
+延迟随机器变化，能跨机复算的是**帧的字节数与依赖性**，以及 `npm run bench:mcp` 里的那条硬断言：
+stdout 上只准有 JSON-RPC 帧，混进任何一行非 JSON，这次运行就直接失败（顺带守住「日志只走 stderr」）。
 
 **为什么它是只读的**：写入闸门、归档、体检这些能力依赖宿主工具层的钩子（`tools/pre-execute`），
 别的宿主没有这套接口；硬做一个「谁都能写」的版本，等于把 fail-closed 的闸门换成一句口头约定。
@@ -753,6 +768,8 @@ npm run check   # 接线自检：配置键认不认、库路径对不对、装�
 npm run probe   # 召回质量探针：3 组 query + 三道对照，跑在真实记忆库上
 npm run probe -- --save   # 把这次结果存成基线，之后每次跑自动比对
 npm run bench:check       # 合成基准 + 和 bench/expectations.json 对账（CI 跑的就是它）
+npm run bench:seam        # 语义接缝的代价与天花板（四种坏提供方 + 作弊上界）
+npm run bench:mcp         # MCP 这一层：冷启动、每步往返、协议帧字节数
 npm run mcp:smoke         # 拿脚本当 MCP 客户端，把服务器拉起来走一遍真实对话
 node bench/longmemeval.mjs --data bench/.tmp/longmemeval_s_cleaned.json   # 公开基准（数据要自己下，264MB）
 ```
