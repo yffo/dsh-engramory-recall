@@ -1,0 +1,18 @@
+# 给 Engramory 记忆库加一层本地自动召回 + 写入治理。
+#
+# 目标：把 Memmy / DSH-SEP 那类「每轮自动想起相关记忆」的好处留下，
+# 同时保住 Engramory 的底线 —— 纯本地、不每轮塞正文、绝不自动写入。
+#
+# 它只读记忆库：用 BM25 检索当前这句话，命中才注入「文件名 + 一行片段」，
+# 没命中一个 token 都不注入。关掉它只需把 enabled 改成 false。
+#
+# storePath 支持 `~`；留空则本插件不工作（安全默认）。
+- insert:
+    - id: engramory-recall
+      name: dsh-engramory-recall
+      config:
+        enabled: true
+        storePath: ~/memory/engramory
+        maxPointers: 4
+        maxChars: 480
+        nudge: true

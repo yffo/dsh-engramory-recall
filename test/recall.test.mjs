@@ -1,0 +1,726 @@
+/**
+ * 单元测试：node --test test/
+ *
+ * 覆盖三件事：
+ *   1. 分词与 BM25 排序在中文上确实能命中（这是 Memmy 当初「中文口语查询零命中」的反面）。
+ *   2. 笔记解析（frontmatter / 标题 / 正文）。
+ *   3. 插件注入逻辑：命中才注入、没命中不注入、同一轮不重复注入、只注入指针不注入正文。
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
+import { join } from 'node:path';
+
+import { tokenize, buildIndex, search } from '../bm25.js';
+import { splitNote, readDocs, chunkBody } from '../store.js';
+import { apply, isSearchable } from '../index.js';
+import { readAudit, GUARD_EPOCH } from '../audit.js';
+
+function fixtureStore() {
+  const dir = mkdtempSync(join(tmpdir(), 'engramory-recall-'));
+  writeFileSync(join(dir, 'MEMORY.md'), '# Memory Index\n\n- [代理节点](reference-proxy.md) — Hy2 双端口\n');
+  writeFileSync(
+    join(dir, 'reference-proxy.md'),
+    [
+      '---',
+      'name: reference-proxy',
+      'description: 美国自建代理节点架构：Hy2 双端口主力 + Trojan 兜底',
+      'type: reference',
+      '---',
+      '',
+      '# 美国自建代理节点架构',
+      '',
+      'Hy2 双端口主力 + Trojan 兜底，旧 VMess/VLESS 已退役。',
+      '国内 CDN 转发代理不可行。',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(dir, 'project-cicd.md'),
+    ['---', 'name: project-cicd', 'description: Jenkins 流水线与站点部署', '---', '', '# CI/CD', '', 'Jenkins 多段部署命令只有第一条走 SSH。'].join('\n'),
+  );
+  return dir;
+}
+
+test('分词：中文出双字，英文出词元', () => {
+  const terms = new Set(tokenize('代理节点 Hy2'));
+  assert.ok(terms.has('代理'));
+  assert.ok(terms.has('理节'));
+  assert.ok(terms.has('节点'));
+  assert.ok(terms.has('hy2'));
+});
+
+test('BM25：中文查询命中正确笔记，且不返回零分结果', () => {
+  const docs = [
+    { id: 'reference-proxy.md', title: '美国自建代理节点架构', description: 'Hy2 双端口 + Trojan 兜底', body: '国内 CDN 转发代理不可行。' },
+    { id: 'project-cicd.md', title: 'CI/CD', description: 'Jenkins 流水线', body: '多段部署命令只有第一条走 SSH。' },
+  ];
+  const index = buildIndex(docs);
+
+  const proxy = search(index, '代理节点怎么搭的', 3);
+  assert.equal(proxy[0].id, 'reference-proxy.md');
+  assert.ok(proxy[0].score > 0);
+  assert.ok(proxy[0].snippet.length > 0);
+
+  const cicd = search(index, 'Jenkins 部署', 3);
+  assert.equal(cicd[0].id, 'project-cicd.md');
+
+  assert.deepEqual(search(index, '量子纠缠火锅', 3), []);
+});
+
+test('笔记解析：frontmatter 与一级标题', () => {
+  const note = splitNote('---\nname: x\ndescription: 描述行\ntype: reference\n---\n\n# 真标题\n\n正文');
+  assert.equal(note.title, '真标题');
+  assert.equal(note.description, '描述行');
+  assert.equal(note.body, '# 真标题\n\n正文');
+});
+
+test('插件：命中才注入，且只注入指针不含正文', async () => {
+  const dir = fixtureStore();
+  try {
+    const { handler } = captureHandler({ storePath: dir });
+    const decision = {
+      kind: 'enter',
+      messages: [human('m1', '我们那个代理节点现在是什么架构？')],
+    };
+    const out = await handler({ agent: {}, signal: undefined }, async () => decision);
+
+    assert.equal(out.messages.length, 2);
+    const injected = out.messages[1];
+    assert.equal(injected.role, 'user');
+    assert.equal(injected.source.kind, 'plugin:dsh-engramory-recall', 'kind 必须是生产者自有形状；裸 plugin 会被 v4 会话格式拒绝');
+    assert.equal(injected.source.form, 'notice');
+    assert.equal(typeof injected.source.summary, 'string');
+    const text = injected.content[0].text;
+    assert.match(text, /reference-proxy\.md/);
+    assert.equal(text.includes('Hy2 双端口主力 + Trojan 兜底，旧 VMess'), false, '不应注入正文');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('插件：没命中就不注入；同一轮不重复注入', async () => {
+  const dir = fixtureStore();
+  try {
+    const { handler } = captureHandler({ storePath: dir });
+
+    const miss = await handler({}, async () => ({ kind: 'enter', messages: [human('m1', '今天天气不错')] }));
+    assert.equal(miss.messages.length, 1, '无命中不应注入任何东西');
+
+    const hit = await handler({}, async () => ({ kind: 'enter', messages: [human('m2', '代理节点')] }));
+    assert.equal(hit.messages.length, 2);
+    const again = await handler({}, async () => ({ kind: 'enter', messages: [human('m2', '代理节点')] }));
+    assert.equal(again.messages.length, 1, '同一个消息 id 不应重复注入');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('插件：非真人消息（工具结果轮）不注入', async () => {
+  const dir = fixtureStore();
+  try {
+    const { handler } = captureHandler({ storePath: dir });
+    const out = await handler({}, async () => ({
+      kind: 'enter',
+      messages: [{ id: 't1', role: 'tool', content: [{ type: 'text', text: '代理节点' }], source: { kind: 'tool' } }],
+    }));
+    assert.equal(out.messages.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('真实记忆库：一次中文口语查询能命中相关笔记', () => {
+  const store = join(process.env.HOME ?? '', 'memory', 'engramory');
+  const docs = readDocs(store);
+  if (!docs.length) return; // 没有库就跳过（CI 或换机器）
+  const index = buildIndex(docs);
+  const hits = search(index, '自动召回是怎么做的', 3);
+  assert.ok(hits.length > 0, '应当至少命中一条');
+  assert.ok(hits.every((hit) => hit.score > 0));
+});
+
+test('工具：engramory_search 能按需检索，且形状符合注册契约', async () => {
+  const dir = fixtureStore();
+  try {
+    const { tool } = captureHandler({ storePath: dir });
+    assert.ok(tool, 'apply() 应当注册 engramory_search 工具');
+    assert.equal(tool.name, 'engramory_search');
+    // register() 只校验这两项：output.schema 必须是受支持的 JSON Schema、render 必须是函数
+    assert.equal(tool.output.schema.type, 'object');
+    assert.equal(typeof tool.output.render, 'function');
+    assert.equal(tool.parameters.type, 'object');
+    assert.deepEqual(tool.parameters.required, ['query']);
+    assert.equal(tool.parameters.additionalProperties, false);
+
+    const hit = await tool.execute({ query: '代理节点' });
+    assert.equal(hit.store, dir);
+    assert.ok(hit.hits.length > 0);
+    assert.equal(hit.hits[0].file, 'reference-proxy.md');
+    assert.equal(typeof hit.hits[0].score, 'number');
+    assert.ok(hit.hits[0].snippet.length > 0);
+
+    // limit 上限被夹住；空 query 不炸
+    const capped = await tool.execute({ query: '部署', limit: 999 });
+    assert.ok(capped.hits.length <= 20);
+    const empty = await tool.execute({ query: '   ' });
+    assert.deepEqual(empty.hits, []);
+
+    // render 返回内容块（宿主据此渲染）
+    const blocks = tool.output.render({}, hit);
+    assert.equal(blocks[0].type, 'text');
+    assert.match(blocks[0].text, /reference-proxy\.md/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function captureHandler(config) {
+  let handler;
+  let tool;
+  const routes = [];
+  const guards = [];
+  const ctx = {
+    on: (event, fn) => { if (event === 'agent/pre-step') handler = fn; },
+    tools: {
+      register: (definition) => { tool = definition; },
+      // ctx.tools.guard(fn) 注册单调守卫：返回字符串即拒绝。
+      guard: (fn) => { guards.push(fn); return () => {}; },
+    },
+    // 真实 cordis 的 ctx.inject(deps, cb) 在依赖服务就绪后才跑 cb；
+    // 测试里直接给一份最小的 webServer，把注册到的路由收出来。
+    inject: (_deps, fn) => {
+      fn({ webServer: { register: (route) => { routes.push(route); return () => {}; } } });
+    },
+  };
+  apply(ctx, config);
+  assert.ok(handler, 'apply() 应当注册 agent/pre-step 监听');
+  return { handler, tool, routes, guards };
+}
+
+function captureResponse() {
+  return {
+    status: 0,
+    headers: {},
+    body: '',
+    writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers ?? {}); },
+    end(body) { this.body = body ?? ''; },
+  };
+}
+
+function human(id, text) {
+  return { id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } };
+}
+
+// ── 2026-10-14 三机制改造的回归测试 ─────────────────────────────────
+
+test('寒暄与极短消息不触发检索', () => {
+  for (const s of ['继续', '嗯', '重试一下', '好的', '谢谢', 'ok', '可以', '接着做', '再来一次']) {
+    assert.equal(isSearchable(s), false, `「${s}」不该去检索`);
+  }
+  for (const s of ['飞书连不上', 'ppt 样式没了', '主题变量改了颜色没生效']) {
+    assert.equal(isSearchable(s), true, `「${s}」应当去检索`);
+  }
+});
+
+test('超长正文按章节切桶，每桶不超上限', () => {
+  const filler = Array.from({ length: 60 }, (_, j) => `第 ${j} 行内容 ${'填'.repeat(20)}`).join('\n');
+  const body = Array.from({ length: 6 }, (_, i) => `## 段 ${i}\n\n${filler}`).join('\n');
+  const chunks = chunkBody(body, 1024);
+  assert.ok(chunks.length > 1, '超长正文应当被切成多桶');
+  for (const chunk of chunks) {
+    assert.ok(Buffer.byteLength(chunk.body) <= 1024 + 64, `桶超限: ${Buffer.byteLength(chunk.body)}`);
+  }
+});
+
+test('同一篇笔记切桶后只占一个召回位', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'engramory-chunk-'));
+  try {
+    const long = ['---', 'name: long', 'description: 超长日志', '---', '', '# 超长日志', ''];
+    for (let i = 0; i < 12; i += 1) {
+      long.push(`## 第 ${i} 批`, '', `量子纠缠记录 ${i} ${'填充内容'.repeat(300)}`, '');
+    }
+    writeFileSync(join(dir, 'long.md'), long.join('\n'));
+    writeFileSync(
+      join(dir, 'short.md'),
+      ['---', 'name: short', 'description: 短笔记', '---', '', '# 短笔记', '', '量子纠缠 也在这篇里。'].join('\n'),
+    );
+    const docs = readDocs(dir);
+    assert.ok(docs.length > 2, '超长笔记应当被切成多桶');
+    const ids = search(buildIndex(docs), '量子纠缠', 5).map((hit) => hit.id);
+    assert.equal(new Set(ids).size, ids.length, '同一篇笔记不得重复占位');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── 2026-10-14 记忆面板（可观测性）的回归测试 ────────────────────────
+
+test('宿主路由：状态接口返回记忆库快照，且每次召回都留痕', async () => {
+  const dir = fixtureStore();
+  try {
+    const { handler, routes } = captureHandler({ storePath: dir });
+
+    assert.equal(routes.length, 1, 'apply() 应当注册一条宿主路由');
+    const route = routes[0];
+    assert.equal(route.kind, 'exact');
+    assert.equal(route.path, '/api/engramory-recall/state');
+    assert.equal(typeof route.handler, 'function');
+
+    // 首次取状态：有库快照、暂无召回日志
+    const first = captureResponse();
+    await route.handler({ method: 'GET' }, first);
+    assert.equal(first.status, 200);
+    assert.match(first.headers['content-type'], /application\/json/);
+    const before = JSON.parse(first.body);
+    assert.equal(before.store, dir);
+    assert.ok(before.notes.length > 0, '应当列出笔记');
+    assert.ok(before.totals.bytes > 0);
+    assert.ok(before.notes.every((note) => note.file && typeof note.bytes === 'number'));
+    assert.deepEqual(before.log, [], '还没召回时日志应为空');
+    assert.equal(before.config.maxPointers, 4);
+
+    // 命中一轮 → 日志要有 hit 与命中明细
+    await handler({}, async () => ({ kind: 'enter', messages: [human('m-hit', '代理节点怎么搭的')] }));
+    const afterHit = captureResponse();
+    await route.handler({ method: 'GET' }, afterHit);
+    const hitLog = JSON.parse(afterHit.body).log;
+    assert.equal(hitLog.length, 1);
+    assert.equal(hitLog[0].kind, 'hit');
+    assert.ok(hitLog[0].hits.length > 0, 'hit 应当带命中条目');
+    assert.equal(hitLog[0].hits[0].id, 'reference-proxy.md');
+    assert.ok(hitLog[0].chars > 0 && hitLog[0].injected > 0);
+
+    // 寒暄轮 → 记成 skip（「为什么没召回」也要看得见）
+    await handler({}, async () => ({ kind: 'enter', messages: [human('m-skip', '继续')] }));
+    const afterSkip = captureResponse();
+    await route.handler({ method: 'GET' }, afterSkip);
+    assert.equal(JSON.parse(afterSkip.body).log[0].kind, 'skip');
+
+    // 无命中轮 → 记成 empty
+    await handler({}, async () => ({ kind: 'enter', messages: [human('m-empty', '量子纠缠火锅怎么做')] }));
+    const afterEmpty = captureResponse();
+    await route.handler({ method: 'GET' }, afterEmpty);
+    const emptyLog = JSON.parse(afterEmpty.body).log;
+    assert.equal(emptyLog[0].kind, 'empty');
+    assert.ok(emptyLog.every((entry) => entry.at > 0 && typeof entry.query === 'string'));
+
+    // 只读：非 GET 一律 405
+    const rejected = captureResponse();
+    await route.handler({ method: 'POST' }, rejected);
+    assert.equal(rejected.status, 405);
+    assert.equal(rejected.headers.allow, 'GET');
+
+    // 体检结果随状态接口一起下发，面板的「体检」tab 靠它
+    const auditBody = JSON.parse(afterEmpty.body).audit;
+    assert.ok(auditBody, '状态接口应当带上体检结果');
+    assert.ok(Array.isArray(auditBody.findings));
+    assert.equal(typeof auditBody.summary.bySeverity.error, 'number');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('freshness 衰减：默认关闭时新旧完全同分，开启后新笔记压过旧笔记', () => {
+  const DAY = 86400000;
+  const now = 1_700_000_000_000;
+  // 两篇正文与标题完全相同，唯一变量是 mtime —— 词项、长度、idf 全同，只有 decay 不同。
+  const mk = (id, ageDays) => ({
+    id,
+    title: '缓存穿透排查',
+    description: '',
+    body: '缓存穿透的排查方法，以及它和缓存击穿的区别。',
+    mtimeMs: now - ageDays * DAY,
+  });
+  const docs = [mk('old-note.md', 180), mk('new-note.md', 0)];
+
+  // 关闭（默认）：乘子恒为 1，两篇同分，此时谁排前面只看 id 兜底。
+  const off = buildIndex(docs, { halfLifeDays: 0, now });
+  assert.deepEqual(
+    off.docs.map((d) => d.decay),
+    [1, 1],
+  );
+  const offHits = search(off, '缓存穿透', 2);
+  assert.equal(offHits.length, 2);
+  assert.equal(offHits[0].score, offHits[1].score);
+
+  // 开启：180 天 = 6 个半衰期 ⇒ 旧笔记只剩 0.5^6 ≈ 0.0156 分。
+  const on = buildIndex(docs, { halfLifeDays: 30, now });
+  const decayOf = new Map(on.docs.map((d) => [d.id, d.decay]));
+  assert.equal(decayOf.get('new-note.md'), 1);
+  assert.ok(decayOf.get('old-note.md') > 0.01 && decayOf.get('old-note.md') < 0.02);
+  const onHits = search(on, '缓存穿透', 2);
+  assert.equal(onHits[0].id, 'new-note.md');
+  assert.ok(onHits[0].score > onHits[1].score * 10);
+});
+
+test('缓存键：只改中间那篇笔记也必须让索引失效', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'engramory-recall-cache-'));
+  try {
+    writeFileSync(join(dir, 'MEMORY.md'), '# Memory Index\n');
+    writeFileSync(join(dir, 'aaa-first.md'), '# 甲\n\n内容甲。\n');
+    writeFileSync(join(dir, 'mmm-middle.md'), '# 乙\n\n内容乙。\n');
+    writeFileSync(join(dir, 'zzz-last.md'), '# 丙\n\n内容丙。\n');
+
+    const before = readDocs(dir);
+    assert.equal(before.length, 3);
+    assert.ok(before.find((d) => d.id === 'mmm-middle.md').body.includes('内容乙'));
+
+    // 只动中间那篇：首末两篇与 MEMORY.md 都不碰，旧缓存键（只看首末文件名）不会变。
+    writeFileSync(join(dir, 'mmm-middle.md'), '# 乙\n\n内容乙改成了量子纠缠。\n');
+    // 显式把 mtime 推后：同毫秒内改写会让 mtime 看起来没变，测试会假绿。
+    const future = new Date(Date.now() + 5000);
+    utimesSync(join(dir, 'mmm-middle.md'), future, future);
+
+    const after = readDocs(dir);
+    assert.ok(
+      after.find((d) => d.id === 'mmm-middle.md').body.includes('量子纠缠'),
+      '改了中间那篇之后必须重新读盘，不能命中旧缓存',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── 写入闸门（fail-closed）──────────────────────────────────────────
+
+test('写入闸门：库外放行，库里不合规的拒绝', () => {
+  const dir = fixtureStore();
+  try {
+    const { guards } = captureHandler({ storePath: dir });
+    assert.equal(guards.length, 1, 'apply() 应当注册恰好一个写入守卫');
+    const guard = guards[0];
+
+    // 不是它的管辖范围：库外路径、非 write/edit 工具。
+    assert.equal(guard({ name: 'write', arguments: { file_path: '/tmp/other/note.md', content: '# 随便' } }), undefined);
+    assert.equal(guard({ name: 'bash', arguments: { command: 'echo hi > note.md' } }), undefined);
+    assert.equal(guard({ name: 'write', arguments: {} }), undefined);
+
+    // 库里：文件名不合规 → 返回字符串即拒绝。
+    const badName = guard({
+      name: 'write',
+      arguments: { file_path: join(dir, 'notes.md'), content: '---\nname: x\ndescription: y\n---\n' },
+    });
+    assert.equal(typeof badName, 'string');
+    assert.match(badName, /文件名/);
+
+    // 库里：合法笔记 → 放行。
+    assert.equal(
+      guard({
+        name: 'write',
+        arguments: {
+          file_path: join(dir, 'reference-ok.md'),
+          content: '---\nname: reference-ok\ndescription: 说明\ntype: reference\n---\n\n# 正文\n',
+        },
+      }),
+      undefined,
+    );
+
+    // 库里：内容含真凭据 → 拒绝。
+    assert.match(
+      guard({
+        name: 'write',
+        arguments: {
+          file_path: join(dir, 'reference-ok.md'),
+          content: '---\nname: x\ndescription: y\n---\n\nsk-abcdefghijklmnopqrst\n',
+        },
+      }),
+      /凭据/,
+    );
+
+    // edit 只给片段，看不到结构，但仍然查凭据。
+    assert.match(
+      guard({
+        name: 'edit',
+        arguments: {
+          file_path: join(dir, 'reference-ok.md'),
+          old_string: 'a',
+          new_string: 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+        },
+      }),
+      /凭据/,
+    );
+    assert.equal(
+      guard({ name: 'edit', arguments: { file_path: join(dir, 'reference-ok.md'), old_string: 'a', new_string: '普通一行' } }),
+      undefined,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('写入闸门：被拒的写入会留在召回日志里（面板看得到）', async () => {
+  const dir = fixtureStore();
+  try {
+    const { guards, routes } = captureHandler({ storePath: dir });
+    assert.match(
+      guards[0]({ name: 'write', arguments: { file_path: join(dir, 'notes.md'), content: 'x' } }),
+      /文件名/,
+    );
+
+    const res = captureResponse();
+    await routes[0].handler({ method: 'GET' }, res);
+    const body = JSON.parse(res.body);
+    assert.equal(body.log[0].kind, 'deny');
+    assert.match(body.log[0].reason, /文件名/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── 2026-10-14 第二波：从四家竞品源码里抄回来的机制 ──────────────────
+
+test('注入去重：渲染文本一字未变时不重复注入', async () => {
+  const dir = fixtureStore();
+  try {
+    const { handler } = captureHandler({ storePath: dir });
+    const turn = (id, q) => handler({}, async () => ({ kind: 'enter', messages: [human(id, q)] }));
+
+    const first = await turn('m1', '我们那个代理节点现在是什么架构？');
+    assert.equal(first.messages.length, 2, '首轮应当注入');
+
+    const second = await turn('m2', '我们那个代理节点现在是什么架构？');
+    assert.equal(second.messages.length, 1, '命中与渲染完全相同 → 第二轮不重复注入');
+
+    // 去重比的是整段渲染文本，不是「有没有命中」：片段变了就该照常注入。
+    const third = await turn('m3', 'Trojan 兜底还在用吗');
+    assert.equal(third.messages.length, 2, '渲染文本变了要照常注入');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('注入去重：跨轮轮换换了命中集时，同一查询的第二次仍要跳过', async () => {
+  // 真实库上探针跑出来的 bug：去重原先比「整段渲染文本」，而机制三（跨轮轮换）
+  // 会在第二轮扩容候选池并给上一轮的条目降权 → 命中集/顺序一变渲染文本必变 →
+  // 去重永不生效。maxPointers 压到 1 就能在小 fixture 上复现这个置换。
+  const dir = fixtureStore();
+  try {
+    writeFileSync(
+      join(dir, 'reference-proxy-alt.md'),
+      [
+        '---',
+        'name: reference-proxy-alt',
+        'description: 代理节点备用线路：同城第二跳',
+        'type: reference',
+        '---',
+        '',
+        '# 代理节点备用线路',
+        '',
+        '代理节点备用线路走同城第二跳，主线路挂了再切。',
+      ].join('\n'),
+    );
+    const { handler } = captureHandler({ storePath: dir, maxPointers: 1 });
+    const turn = (id, q) => handler({}, async () => ({ kind: 'enter', messages: [human(id, q)] }));
+
+    const first = await turn('m1', '代理节点');
+    assert.equal(first.messages.length, 2, '首轮应当注入');
+
+    // 第二轮：rotating 生效（候选池 1 → 5，上一轮那条被降权），命中集被置换。
+    const second = await turn('m2', '代理节点');
+    assert.equal(second.messages.length, 1, '查询没变、命中集只是被轮换置换 → 不该重复注入');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('长消息：开头交代的主题词不会被截断丢掉', async () => {
+  // 原实现是 `slice(-400)` 只留尾部（灵枢 issue #108 同类坑）。真实库探针实测：1190 字
+  // 的消息开头写「飞书那边一直连不上」、中间贴 1146 字日志，只取尾部时完全召不回飞书笔记。
+  // 现在改成头尾各取一半：开头（交代意图）与结尾（最新追问）都保住，中间粘贴正文才是可丢的。
+  const dir = fixtureStore();
+  try {
+    const { handler } = captureHandler({ storePath: dir });
+    const 开头 = '代理节点现在是什么架构？';
+    const 中间 = Array.from({ length: 60 }, (_, i) => `第 ${i} 行日志：占位文本占位文本占位文本`).join('\n');
+    const 结尾 = '大体就是这样了。';
+    const long = `${开头}\n${中间}\n${结尾}`;
+    assert.ok(long.length > 400, '构造的消息必须超过默认查询预算');
+
+    const r = await handler({}, async () => ({ kind: 'enter', messages: [human('m1', long)] }));
+    assert.equal(r.messages.length, 2, '长消息应当注入');
+    assert.match(r.messages.at(-1).content[0].text, /reference-proxy\.md/, '开头提到的代理节点笔记必须被召回');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('注入预算阶梯：装不下的条目塌缩成只有文件名，而不是整条丢掉', async () => {
+  const dir = fixtureStore();
+  try {
+    // 三篇都命中，而 maxChars 只够两条完整条目 → 第三条必须降级成「只有文件名」。
+    writeFileSync(
+      join(dir, 'reference-proxy-backup.md'),
+      [
+        '---',
+        'name: reference-proxy-backup',
+        'description: 代理节点备用方案',
+        'type: reference',
+        '---',
+        '',
+        '# 代理备用',
+        '',
+        '备用节点走 Trojan。',
+      ].join('\n'),
+    );
+    const { handler } = captureHandler({ storePath: dir, maxChars: 180, maxPointers: 4 });
+    const out = await handler({}, async () => ({ kind: 'enter', messages: [human('m1', '代理节点与部署')] }));
+    assert.equal(out.messages.length, 2, '至少要有命中');
+    const text = out.messages.at(-1).content[0].text;
+    assert.match(text, /^- \S+\.md — /m, '至少要有一条完整条目（文件名 + 片段）');
+    assert.match(text, /^- \S+\.md$/m, '预算不够的条目应当塌缩成只有文件名');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('跨轮轮换：最近注入过的条目在下一轮被降权（记录 rotated）', async () => {
+  const dir = fixtureStore();
+  try {
+    // 关掉注入去重，否则第二轮会被「渲染文本未变」直接拦下，测不到轮换。
+    const { handler, routes } = captureHandler({ storePath: dir, dedupeInjection: false, rotationPenalty: 0.5 });
+    const q = '代理节点';
+    await handler({}, async () => ({ kind: 'enter', messages: [human('m1', q)] }));
+    await handler({}, async () => ({ kind: 'enter', messages: [human('m2', q)] }));
+
+    const res = captureResponse();
+    await routes[0].handler({ method: 'GET' }, res);
+    const body = JSON.parse(res.body);
+    const rotated = body.log.some((entry) => entry.kind === 'hit' && (entry.hits ?? []).some((hit) => hit.rotated));
+    assert.ok(rotated, '第二轮应当给上一轮注入过的条目打 rotated 标记');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('写入审计：放行与拒绝都落盘，库外写入不记', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'engramory-audit-'));
+  const { guards } = await captureHandler({ storePath: dir });
+  const guard = guards[0];
+
+  // 库外：完全不进审计（那是噪音）
+  guard({ name: 'write', arguments: { file_path: '/tmp/elsewhere/notes.md', content: 'x' } });
+  assert.equal(readAudit(dir).length, 0);
+
+  // 合法笔记：放行 + 记一条 allow
+  const okFile = join(dir, 'reference-audit-demo.md');
+  const body = [
+    '---',
+    'name: reference-audit-demo',
+    'description: 审计测试用的合法笔记',
+    'type: reference',
+    'scope: global',
+    'created: 2026-10-14',
+    'updated: 2026-10-14',
+    '---',
+    '',
+    '# 审计测试',
+  ].join('\n');
+  assert.equal(guard({ name: 'write', arguments: { file_path: okFile, content: body } }), undefined);
+  let entries = readAudit(dir);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].verdict, 'allow');
+  assert.equal(entries[0].tool, 'write');
+  assert.equal(entries[0].file, 'reference-audit-demo.md');
+  assert.equal(entries[0].epoch, GUARD_EPOCH);
+  assert.ok(entries[0].bytes > 0);
+
+  // 坏文件名：拒绝 + 记一条 deny（带理由）
+  const reason = guard({ name: 'edit', arguments: { file_path: join(dir, 'notes.md'), new_string: 'y' } });
+  assert.equal(typeof reason, 'string');
+  entries = readAudit(dir);
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].verdict, 'deny');
+  assert.equal(entries[0].tool, 'edit');
+  assert.ok(entries[0].reason.includes('文件名'));
+
+  // 新记录在前（readAudit 反序）
+  assert.ok(entries[0].ts >= entries[1].ts);
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ── 沉淀提醒：长会话零写入时提醒一次（2026-10-14 加） ──────────────────
+/** 跑一轮 pre-step，返回「本轮新注入的消息」数组。 */
+async function runTurn(handler, id, text) {
+  const decision = { kind: 'enter', messages: [human(id, text)] };
+  const out = await handler({}, async () => decision);
+  return out.messages.slice(decision.messages.length);
+}
+
+const hasSediment = (injected) =>
+  injected.some((m) => (m.content ?? []).some((part) => String(part?.text ?? '').includes('沉淀提醒')));
+
+test('沉淀提醒：轮次不够时一个字都不注入，够了且零写入才提醒一次', async () => {
+  const dir = fixtureStore();
+  // sedimentMinTurns 默认 12；这里用默认值验证门槛本身
+  const { handler, routes } = captureHandler({ storePath: dir, minScore: 0, maxPointers: 2 });
+
+  // 前 11 轮：查询各不相同（避开注入去重），且在库里查不到（避开命中干扰）
+  for (let i = 0; i < 11; i += 1) {
+    const injected = await runTurn(handler, `h${i}`, `库里不存在的提问第${i}号，问的是别的事情`);
+    assert.equal(hasSediment(injected), false, `第 ${i + 1} 轮不该有沉淀提醒`);
+  }
+
+  // 第 12 轮：越过门槛，且本会话零写入 → 提醒一次
+  const twelfth = await runTurn(handler, 'h11', '库里不存在的提问第11号，问的是别的事情');
+  assert.equal(hasSediment(twelfth), true, '第 12 轮应当出现沉淀提醒');
+  assert.ok(twelfth.length >= 1);
+
+  // 第 13 轮：冷却期内不再提醒
+  const thirteenth = await runTurn(handler, 'h12', '库里不存在的提问第12号，问的是别的事情');
+  assert.equal(hasSediment(thirteenth), false, '冷却期内不该重复提醒');
+
+  // 面板看得到：日志里留了一条 kind='sediment'
+  const res = captureResponse();
+  await routes.find((r) => r.path === '/api/engramory-recall/state').handler({ method: 'GET', url: '/api/engramory-recall/state' }, res);
+  const body = JSON.parse(res.body);
+  assert.ok(body.log.some((entry) => entry.kind === 'sediment' && entry.sediment === true), '日志里应当有 sediment 记录');
+  assert.equal(body.config.nudgeSediment, true);
+  assert.equal(body.config.sedimentMinTurns, 12);
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('沉淀提醒：本会话写过记忆库之后就不再提醒', async () => {
+  const dir = fixtureStore();
+  const { handler, guards } = captureHandler({ storePath: dir, minScore: 0, maxPointers: 2, sedimentMinTurns: 2 });
+
+  // 一次合法写入 → storeWrites + 1
+  const body = ['---', 'name: reference-sediment', 'description: 沉淀提醒测试', 'type: reference', '---', '', '# 测试'].join('\n');
+  assert.equal(
+    guards[0]({ name: 'write', arguments: { file_path: join(dir, 'reference-sediment.md'), content: body } }),
+    undefined,
+  );
+
+  // 之后即使轮次远超门槛，也不该再提醒
+  for (let i = 0; i < 5; i += 1) {
+    const injected = await runTurn(handler, `w${i}`, `写过之后的第${i}号提问，库里同样不存在`);
+    assert.equal(hasSediment(injected), false, '写过记忆库之后不该再有沉淀提醒');
+  }
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('沉淀提醒：nudgeSediment=false 时彻底关闭', async () => {
+  const dir = fixtureStore();
+  const { handler } = captureHandler({ storePath: dir, minScore: 0, maxPointers: 2, sedimentMinTurns: 1, nudgeSediment: false });
+  for (let i = 0; i < 3; i += 1) {
+    const injected = await runTurn(handler, `x${i}`, `关闭开关后的第${i}号提问，库里不存在`);
+    assert.equal(hasSediment(injected), false);
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('配置：storePath 支持 ~ 展开（别人装插件时不会恰好也叫同一个用户名）', async () => {
+  const dir = fixtureStore();
+  const home = homedir();
+  const { routes } = captureHandler({ storePath: '~/memory/engramory', minScore: 0 });
+  const res = captureResponse();
+  await routes[0].handler({ method: 'GET', url: '/api/engramory-recall/state' }, res);
+  const body = JSON.parse(res.body);
+  // 断言的是「展开成了真实家目录」而不是硬编码用户名
+  assert.equal(body.store, join(home, 'memory', 'engramory'));
+  assert.ok(!body.store.includes('~'), '不该把 ~ 原样传给 fs');
+  rmSync(dir, { recursive: true, force: true });
+});

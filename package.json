@@ -1,0 +1,62 @@
+{
+  "name": "dsh-engramory-recall",
+  "version": "0.2.0",
+  "description": "Local BM25 auto-recall, fail-closed write guard, static doctor and a memory panel for the Engramory markdown store — no network, no model, no daemon.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "engramory",
+    "memory",
+    "bm25",
+    "recall",
+    "markdown"
+  ],
+  "author": "yffto",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yffo/dsh-engramory-recall.git"
+  },
+  "homepage": "https://github.com/yffo/dsh-engramory-recall#readme",
+  "bugs": {
+    "url": "https://github.com/yffo/dsh-engramory-recall/issues"
+  },
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client/client.js",
+    "./bm25": "./bm25.js",
+    "./store": "./store.js",
+    "./guard": "./guard.js",
+    "./doctor": "./doctor.js",
+    "./audit": "./audit.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client/client.js",
+    "bm25.js",
+    "store.js",
+    "guard.js",
+    "doctor.js",
+    "audit.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check-engramory-wiring.mjs"
+  }
+}

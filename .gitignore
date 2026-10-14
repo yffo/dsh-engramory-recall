@@ -1,0 +1,23 @@
+# 依赖与构建产物
+node_modules/
+*.tgz
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+
+# ⚠️ 记忆库绝不入库：里面是私人事实、路径与偏好。
+#    本插件只读它，仓库里永远不该出现笔记内容或索引。
+memory/
+engramory/
+MEMORY.md
+
+# ⚠️ 写入审计（落在记忆库里，不在仓库里；这条是保险）
+.engramory-audit.jsonl
+.engramory-audit.jsonl.*
