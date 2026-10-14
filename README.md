@@ -616,6 +616,32 @@ export async function expand({ query, signal }) {
 `autoArchive` 打开后归档会在两处自动跑：每轮 pre-step 兜底（10 分钟 TTL，不会每轮扫库），
 以及写完记忆库的那一刻（触发源记为 `write`）。它仍然先备份、仍然过写入闸门，只是不再等你点按钮。
 
+## 发版（打 tag 就发，不用长期 token）
+
+```bash
+# 1. 改 package.json 的 version + 写 CHANGELOG
+# 2. 本地三条门槛全过（CI 里跑的是同样三条）
+npm test && npm run bench:check && npm pack --dry-run
+# 3. 提交、打 tag、推上去 —— 剩下的交给 GitHub Actions
+git commit -am "release: 0.9.1" && git tag -a v0.9.1 -m "0.9.1" && git push origin main --tags
+```
+
+`.github/workflows/release.yml` 会在 tag 推上去后跑：校验 tag 与 `package.json` 一致 → 测试与基准
+→ `npm publish --provenance` → `npm run release:verify`（**直查版本端点**，把 registry 上的
+`dist.shasum` 与本地 `npm pack` 的逐字比对 —— 退出码不算数，这才算数）。
+
+它**不用任何长期 token**：走 npm 的 Trusted Publisher（GitHub OIDC，`.github/workflows/release.yml`
+这个名字要填进 npm 包的 Settings → Trusted Publisher → GitHub Actions）。原因是长期 token 这条
+路正在被 npm 关掉（bypass 2FA 的 token 直接发布 2027-01 起失效），而普通 token 每次发布都要
+6 位 OTP —— 人肉发版迟早卡在口令上（2026-10-15 就卡过一次）。
+
+需要手动发布时（比如还没配 Trusted Publisher）：
+
+```bash
+npm publish --access public --userconfig=/tmp/npmrc-<名字>   # token 写在临时文件里，用完删掉
+npm run release:verify                                       # 发完必须验证
+```
+
 ## 安装 / 卸载
 
 ```bash

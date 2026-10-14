@@ -28,6 +28,18 @@
   **每轮自动注入不碰接缝**、`index.js` 静态依赖里仍然没有 `llm.js`。
 - 合计 209 例全绿；`bench:check` 与期望值一致（两把中文尺子的数字不受影响 —— 接缝默认关闭）。
 
+### 工程
+
+- 新增 `.github/workflows/release.yml`：推 `v*` tag 即发版，**不用任何长期 token**（npm 的
+  Trusted Publisher / GitHub OIDC + `--provenance`）。发版前跑与 CI 完全相同的三条门槛
+  （测试 / 基准数字不漂 / 包能打出来），tag 与 `package.json` 版本不一致直接报错，
+  同版本已发布则跳过。
+- 新增 `npm run release:verify`：发布成功的判定**不看退出码**，而是直查版本端点
+  （packument 有分钟级缓存，会骗人），并把 registry 上的 `dist.shasum` / `dist.integrity`
+  与本机 `npm pack` 的逐字比对 —— 证明「发上去的就是工作区这一份」。
+- 起因：2026-10-15 人肉发版被 npm 的口令机制卡住（bypass token 被限制、普通 token 要 OTP），
+  而 npm 的计划正是 **bypass 2FA 的 token 直接发布 2027-01 失效** —— 与其等它到期，不如现在改道。
+
 ## [0.8.1] — 2026-10-15
 
 ### 修复

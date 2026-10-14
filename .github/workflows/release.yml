@@ -1,0 +1,68 @@
+name: Release
+
+# 打 tag 就发版。**不用任何长期 token** —— 走 npm 的 Trusted Publisher（GitHub OIDC）：
+# npm 那边绑定「仓库 + 工作流文件名 release.yml」，这里用 id-token 换一次性凭证。
+# 为什么必须这么干：bypass 2FA 的 token 已被 npm 限制（直接发布 2027-01 起失效），
+# 而普通 token 每次发布都要 6 位 OTP —— 人肉发版迟早会因为「口令过期」卡住（2026-10-15 就卡过一次）。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC：换短时发布凭证 + 生成 provenance
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # tag 与 package.json 必须一致：否则 tag v0.9.0 会发出一个 0.8.2，事后没法解释
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json 的 ${pkg} 不一致"
+            exit 1
+          fi
+          echo "版本：$pkg"
+
+      # 发版前的门槛与 CI 完全相同：测试 + 基准数字不许漂 + 包能打出来
+      - run: npm test
+      - run: npm run bench:check
+      - run: npm pack --dry-run
+
+      - name: 已经发过同一版本就跳过（重推 tag 不该炸）
+        id: exists
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "dsh-engramory-recall@${version}" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "registry 上已经有 ${version} 了，跳过发布（改版本号再打 tag）。"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 注意这里**没有** NODE_AUTH_TOKEN / NPM_TOKEN：
+      # 配好 Trusted Publisher 之后 npm 自己用 OIDC 换凭证。若哪天有人塞回长期 token，
+      # 这条流水线就退回到「口令会过期、会被限制」的老路 —— 那正是它要解决的问题。
+      - name: 发布（Trusted Publisher / OIDC + provenance）
+        if: steps.exists.outputs.skip != 'true'
+        run: npm publish --access public --provenance
+
+      # 退出码不算数：直查版本端点，并把 registry 上的 shasum 与本地 pack 的逐字比对
+      - name: 验证「发上去的就是这一份」
+        if: steps.exists.outputs.skip != 'true'
+        run: node scripts/verify-release.mjs --timeout 300
