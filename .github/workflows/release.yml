@@ -23,10 +23,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # **故意不写 registry-url**：写了它，setup-node 会往 $RUNNER_TEMP/.npmrc 里塞一行
+      #   //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+      # 并把 NODE_AUTH_TOKEN 导出成占位值 "XXXXX-XXXXX-XXXXX-XXXXX"。npm 只要在配置里
+      # 看到 token 就**不再走 OIDC**，于是发布退化成「拿一个假 token 去 PUT」→
+      # 404 Not Found - PUT https://registry.npmjs.org/<pkg>（0.9.0 首次发版就栽在这儿，
+      # 日志里那句 bypass-2FA 提示就是它在用 token 的证据）。不发 registry-url，
+      # npm 的默认 registry 就是 registry.npmjs.org，而发布凭证交给 OIDC。
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
 
       # Node 22 自带的 npm 是 10.x，而**Trusted Publisher 需要 npm ≥ 11.5.1**
       # （Node 需要 ≥ 22.14.0）。不升这一下，OIDC 那条路根本不存在，会在 publish 那步
@@ -59,6 +65,18 @@ jobs:
       - run: npm test
       - run: npm run bench:check
       - run: npm pack --dry-run
+
+      - name: 确认发布凭证会走 OIDC（只打有无，不打值）
+        run: |
+          echo "OIDC 可用：$([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo yes || echo no)"
+          echo "node $(node -v) / npm $(npm -v)"
+          raw="$(npm config get //registry.npmjs.org/:_authToken 2>/dev/null || true)"
+          if [ -z "$raw" ] || [ "$raw" = "undefined" ] || [ "$raw" = "null" ]; then
+            echo "_authToken：空 → 发布交给 OIDC（正确）"
+          else
+            echo "::error::配置里存在 _authToken，它会盖住 OIDC；请检查 setup-node 的 registry-url"
+            exit 1
+          fi
 
       - name: 已经发过同一版本就跳过（重推 tag 不该炸）
         id: exists
