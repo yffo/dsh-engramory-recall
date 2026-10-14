@@ -61,10 +61,16 @@ jobs:
           esac
           echo "版本：$pkg"
 
-      # 发版前的门槛与 CI 完全相同：测试 + 基准数字不许漂 + 包能打出来
-      - run: npm test
-      - run: npm run bench:check
-      - run: npm pack --dry-run
+      - name: 已经发过同一版本就跳过（重推 tag 不该炸）
+        id: exists
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "dsh-engramory-recall@${version}" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "registry 上已经有 ${version} 了，跳过发布（改版本号再打 tag）。"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: 确认发布凭证会走 OIDC（只打有无，不打值）
         run: |
@@ -78,16 +84,37 @@ jobs:
             exit 1
           fi
 
-      - name: 已经发过同一版本就跳过（重推 tag 不该炸）
-        id: exists
+      # 把「npm 上还没绑定」和「发布本身出问题」分开：这里做一次与 npm publish 内部
+      # 完全相同的 OIDC 交换（lib/utils/oidc.js 的
+      # POST /-/npm/v1/oidc/token/exchange/package/<name>）。绑定没生效时它立刻给出
+      # registry 的原话（HTTP 401/404 + message），比等 npm 把错误吞掉、外层只报一句
+      # 笼统的 ENEEDAUTH 强得多；绑定生效时它只是提前拿一次临时 token。
+      # 放在测试之前：缺绑定时 30 秒就失败，不必先烧两分钟测试。
+      - name: 预检 OIDC 交换（Trusted Publisher 是否生效）
+        if: steps.exists.outputs.skip != 'true'
         run: |
-          version="$(node -p "require('./package.json').version")"
-          if npm view "dsh-engramory-recall@${version}" version >/dev/null 2>&1; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "registry 上已经有 ${version} 了，跳过发布（改版本号再打 tag）。"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::拿不到 ACTIONS_ID_TOKEN_REQUEST_URL —— workflow 需要 permissions: id-token: write"
+            exit 1
           fi
+          name="$(node -p "require('./package.json').name")"
+          token_url="$(AUD='npm:registry.npmjs.org' node -e 'const u = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL); u.searchParams.append("audience", process.env.AUD); process.stdout.write(u.href)')"
+          id_token="$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "$token_url" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(!j.value){console.error("拿不到 id-token：",JSON.stringify(j).slice(0,200));process.exit(1)}process.stdout.write(j.value)})')"
+          body="$(mktemp)"
+          status="$(curl -sS -o "$body" -w '%{http_code}' -X POST -H "Authorization: Bearer ${id_token}" \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${name}")"
+          echo "交换接口 HTTP ${status}"
+          node -e 'const fs=require("fs");const raw=fs.readFileSync(process.argv[1],"utf8").trim();let j;try{j=JSON.parse(raw)}catch{console.log("registry 的原始回复：",raw.slice(0,300)||"(空)");process.exit(0)}console.log("registry 说：",j.token?"拿到临时 token（绑定有效）":(j.message||JSON.stringify(j).slice(0,300)))' "$body"
+          if [ "$status" != "200" ]; then
+            echo "::error::OIDC 交换没成（HTTP ${status}）—— 先去 npm 包 Settings → Trusted Publisher 绑定：user=yffo / repo=dsh-engramory-recall / workflow=release.yml / environment 留空"
+            exit 1
+          fi
+
+      # 发版前的门槛与 CI 完全相同：测试 + 基准数字不许漂 + 包能打出来
+      - run: npm test
+      - run: npm run bench:check
+      - run: npm pack --dry-run
 
       # 注意这里**没有** NODE_AUTH_TOKEN / NPM_TOKEN：
       # 配好 Trusted Publisher 之后 npm 自己用 OIDC 换凭证。若哪天有人塞回长期 token，
