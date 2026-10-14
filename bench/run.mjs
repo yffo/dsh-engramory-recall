@@ -3,10 +3,12 @@
  *
  * 用法：
  *   npm run bench              # 打印 markdown 报告
+ *   npm run bench:check        # 额外比对 bench/expectations.json（CI 里跑这个）
  *   node bench/run.mjs --json  # 额外写 bench/.bench-result.json
  *
- * 退出码：仅当本插件的 hit@1 **低于**最好的基线时才非零 —— 这是防自欺的那一道门，
- * 不做「必须达到某个绝对分数」的卡点（绝对分数会随语料演化，卡死只会逼人改尺子）。
+ * 退出码：① 本插件的 hit@1 **低于**最好的基线（防自欺的那一道门，不做「必须达到某个
+ * 绝对分数」的卡点 —— 绝对分数会随语料演化，卡死只会逼人改尺子）；② `--check` 时，
+ * 任何一项跟 expectations.json 的偏差超过容差（防的是「悄悄漂走」，不是防分数低）。
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -20,6 +22,7 @@ import { SYNONYMS, buildIndex, search } from '../bm25.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const K = 4;
 const wantJson = process.argv.includes('--json');
+const wantCheck = process.argv.includes('--check');
 
 const { docs, queries, meta } = buildCorpus();
 
@@ -241,6 +244,50 @@ if (wantJson) {
     baselines: baselines.map((r) => ({ name: r.name, detail: r.detail, hit1: r.result.hit1, hitK: r.result.hitK, mrr: r.result.mrr })),
     kinds,
   }, null, 2)}\n`);
+}
+
+if (wantCheck) {
+  const exp = JSON.parse(readFileSync(join(here, 'expectations.json'), 'utf8'));
+  const problems = [];
+  // 先对语料：语料变了，数字必然变 —— 那不是回归，是尺子换了。尺子换了得有人承认。
+  for (const [label, got, want] of [
+    ['语料 seed', meta.seed, exp['语料'].seed],
+    ['笔记数', meta.notes, exp['语料'].notes],
+    ['查询数', meta.queries, exp['语料'].queries],
+  ]) {
+    if (got !== want) problems.push(`${label}：期望 ${want}，实际 ${got}（尺子换了就得重设期望值）`);
+  }
+  const check = (label, metric, got, want, tol) => {
+    if (want === undefined) return;
+    if (Math.abs(got - want) > tol + 1e-9) {
+      problems.push(`${label} 的 ${metric}：期望 ${pct(want)}，实际 ${pct(got)}（容差 ${(tol * 100).toFixed(1)}pt）`);
+    }
+  };
+  for (const [name, want] of Object.entries(exp.metrics)) {
+    const run = runs.find((r) => r.name === name) ?? baselines.find((r) => r.name === name);
+    if (!run) {
+      problems.push(`期望值里写了「${name}」，但这次运行里没有这一项（名字改了？）`);
+      continue;
+    }
+    check(name, 'hit@1', run.result.hit1, want.hit1, exp.tolerance);
+    check(name, 'hit@4', run.result.hitK, want.hitK, exp.tolerance);
+  }
+  for (const [style, want] of Object.entries(exp.groups ?? {})) {
+    const group = ours.byStyle[style];
+    if (!group) {
+      problems.push(`期望值里写了「${style}」组，但这次运行没有这一组（样式名改了？）`);
+      continue;
+    }
+    check(`本插件 ${style} 组`, 'hit@1', group.hit1, want.hit1, want.tolerance ?? 0.001);
+  }
+  if (problems.length) {
+    console.error(`\n✗ 基准数字漂了（${problems.length} 处）：`);
+    for (const p of problems) console.error(`  - ${p}`);
+    console.error('\n两种可能：这是回归，或者这是刻意改动。刻意改的话，把 bench/expectations.json 一起改，');
+    console.error('并让 CHANGELOG 说清为什么 —— 数字不该在我们不知情的时候变。');
+    process.exit(1);
+  }
+  console.log(`\n✓ 基准数字全在容差内：${Object.keys(exp.metrics).length} 项指标 + ${Object.keys(exp.groups ?? {}).length} 个必满分分组。`);
 }
 
 if (ours.hit1 + 1e-9 < bestBaseline.result.hit1) {

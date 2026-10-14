@@ -30,5 +30,10 @@ jobs:
       - name: 跑测试
         run: npm test
 
+      # 合成基准是确定性的（固定种子），所以能当回归测试用：
+      # 分数低不红，数字漂走才红 —— 漂了就必须有人解释是回归还是刻意改动。
+      - name: 基准自检（数字漂了必须有人解释）
+        run: npm run bench:check
+
       - name: 确认包能打包（files 字段漏文件会让别人装上直接崩）
         run: npm pack --dry-run

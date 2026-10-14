@@ -1,6 +1,6 @@
 {
   "name": "dsh-engramory-recall",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Local BM25 auto-recall, fail-closed write guard, static doctor and a memory panel for the Engramory markdown store — no network, no model, no daemon.",
   "keywords": [
     "dsh",
@@ -71,6 +71,8 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "check": "node scripts/check-recall-wiring.mjs",
-    "probe": "node scripts/recall-probe.mjs"
+    "probe": "node scripts/recall-probe.mjs",
+    "bench": "node bench/run.mjs",
+    "bench:check": "node bench/run.mjs --check"
   }
 }
