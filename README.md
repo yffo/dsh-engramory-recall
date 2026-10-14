@@ -339,7 +339,8 @@ aliases: 梯子, 翻墙, 科学上网, 美国节点, 代理
 ## 安装 / 卸载
 
 ```bash
-dsh plugin --profile <profile> add /path/to/dsh-engramory-recall
+npm i dsh-engramory-recall                              # 从 npm 装
+dsh plugin --profile <profile> add /path/to/dsh-engramory-recall   # 或从源码目录装
 dsh plugin --profile <profile> remove dsh-engramory-recall
 ```
 
@@ -347,17 +348,24 @@ dsh plugin --profile <profile> remove dsh-engramory-recall
 > 软链断链时宿主只会打印一行 `skipping profile bundle`，**插件整轮不加载却不影响其它功能**
 > —— 这个坑我们真踩过（白测了三天）。
 
+> ⚠️ **`dsh plugin` 是「全有或全无」的**：它每次都会重装 profile 的**整个**依赖集，
+> 所以只要 `package.json` 里有**任何一个** spec 解析不了（版本被 registry 下架、
+> 被供应链策略拦住、指向已删的路径），**添/删任何插件都会一起失败**，
+> 而且报错说的是那个无关的包。2026-10-15 真踩过：`dsh-boot-animation@^0.1.2`
+> 的版本被镜像下架，导致「移除 `dsh-engramory`」报的是 `dsh-boot-animation` 的错。
+> 排查时看 `.plugin-manager/logs/operation-*/pnpm.log`，别盯被操作的那个包。
+
 ## 测试与自检
 
 ```bash
-npm test        # 89 个用例：分词 / BM25 / 切桶 / 门控 / 闸门 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由
+npm test        # 132 个用例：分词 / BM25 / 切桶 / 门控 / 闸门 / 索引闸门 / 技能注册 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由
 npm run check   # 检查 profile 接线是否还覆盖得住上游默认键
-npm run probe   # 召回质量探针：3 组 query（36 条）+ 两道对照，跑在**真实记忆库**上
+npm run probe   # 召回质量探针：3 组 query（36 条）+ 三道对照，跑在**真实记忆库**上
 npm run probe -- --save   # 把这次结果存成基线，之后每次跑自动比对
 ```
 
 > 这三条是**克隆仓库开发时**用的：`test/` 与 `scripts/` 不在 npm 包的 `files` 白名单里。
-> 发布出去的是运行时真正需要的那 12 个文件（`npm pack --dry-run` 可核），
+> 发布出去的是运行时真正需要的那 15 个文件（`npm pack --dry-run` 可核），
 > 其中 `package.test.mjs` 会从 `index.js` 递归跟所有 `./x.js` 的 import，
 > 逐个核对是否都在白名单里 —— 这个检查已经抓到过两次真事故（漏 `audit.js`、漏 `archive.js`），
 > 两次的后果都是别人装上一装就 `ERR_MODULE_NOT_FOUND`、整个插件加载失败。
