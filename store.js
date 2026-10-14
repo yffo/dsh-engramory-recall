@@ -4,6 +4,7 @@
  * 契约：本模块**绝不写入**记忆库，只读 MEMORY.md 与同目录的 *.md 笔记。
  * 索引在内存里按「索引文件 mtime + 笔记数量」失效，不产生任何缓存文件。
  */
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -178,4 +179,28 @@ export function chunkBody(body, limit = SECTION_BYTES) {
     }
   }
   return out;
+}
+
+/**
+ * 语料指纹：把每个 chunk 的 id 与正文喂进 sha256，取前 12 位。
+ *
+ * 为什么需要它：召回质量只能拿**真实库**当卷子（小 fixture 的 df 结构是反的，测不出东西），
+ * 而真实库天天在变。于是「今天 20/21、昨天 21/21」这种比较根本不成立 —— 分掉了不是代码
+ * 退步，是卷子换了。这个坑真实踩过两次（自己写的笔记变成召回第一名；同义表没补全时量了
+ * 个权重差，把功劳记错了对象）。
+ *
+ * 是单向哈希，不泄露内容；库动一个字它就变。分数必须和指纹一起读。
+ */
+export function corpusFingerprint(docs) {
+  const h = createHash('sha256');
+  for (const d of [...docs].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    // ⚠️ 这里必须覆盖**所有喂进索引的字段**，而不只是正文。
+    // 第一版只哈希了 id + body，于是「只改 aliases」时指纹纹丝不动 —— 而 aliases 是会
+    // 被 `bm25.js` 计两遍、实打实影响排序的。结果就是探针一边说「语料没变、这次是可信
+    // A/B」，一边把一次语料改动伪装成一次代码改动。**一个漏字段的指纹比没有指纹更坏。**
+    for (const field of [d.id, d.title, d.description, d.aliases, d.body]) {
+      h.update(String(field ?? '')); h.update('\0');
+    }
+  }
+  return h.digest('hex').slice(0, 12);
 }

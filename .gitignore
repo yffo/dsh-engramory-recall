@@ -21,3 +21,4 @@ MEMORY.md
 # ⚠️ 写入审计（落在记忆库里，不在仓库里；这条是保险）
 .engramory-audit.jsonl
 .engramory-audit.jsonl.*
+scripts/.probe-baseline.json

@@ -12,8 +12,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, readdirSync,
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { tokenize, buildIndex, search, expandQuery } from '../bm25.js';
-import { splitNote, readDocs, chunkBody } from '../store.js';
+import { SYNONYMS, tokenize, buildIndex, search, expandQuery } from '../bm25.js';
+import { corpusFingerprint, splitNote, readDocs, chunkBody } from '../store.js';
 import { apply, isSearchable } from '../index.js';
 import { readAudit, GUARD_EPOCH } from '../audit.js';
 
@@ -564,7 +564,6 @@ test('长消息：开头交代的主题词不会被截断丢掉', async () => {
 test('注入预算阶梯：装不下的条目塌缩成只有文件名，而不是整条丢掉', async () => {
   const dir = fixtureStore();
   try {
-    // 三篇都命中，而 maxChars 只够两条完整条目 → 第三条必须降级成「只有文件名」。
     writeFileSync(
       join(dir, 'reference-proxy-backup.md'),
       [
@@ -579,12 +578,39 @@ test('注入预算阶梯：装不下的条目塌缩成只有文件名，而不�
         '备用节点走 Trojan。',
       ].join('\n'),
     );
-    const { handler } = captureHandler({ storePath: dir, maxChars: 180, maxPointers: 4 });
-    const out = await handler({}, async () => ({ kind: 'enter', messages: [human('m1', '代理节点与部署')] }));
+
+    // 两趟跑。第一趟把预算放开，量出真实条目长度；第二趟把预算**卡在刚好装不下第二条**的位置。
+    //
+    // 为什么不写死一个数字：条目长度取决于命中片段的截断位置，而片段是排序的产物 ——
+    // 同义表一改，片段长度就变。原先写死 `maxChars: 180` 的版本，在一次纯粹的同义表扩容里
+    // 变红了，而它本该测试的「预算阶梯」根本没有回归。**一个会被无关改动打红的测试，测的
+    // 不是它声称的东西**。所以这里改成自己量：布局怎么变，它都精确落在要测的那一级上。
+    const enter = () => ({ kind: 'enter', messages: [human('m1', '代理节点与部署')] });
+
+    const wide = captureHandler({ storePath: dir, maxChars: 100000, maxPointers: 4 });
+    const wideOut = await wide.handler({}, async () => enter());
+    assert.equal(wideOut.messages.length, 2, '放开预算时应当有命中注入');
+    const wideLines = wideOut.messages.at(-1).content[0].text.split('\n');
+    assert.ok(wideLines.length >= 4, `放开预算后应列出全部命中，实际只有 ${wideLines.length - 1} 行`);
+
+    const headerLen = wideLines[0].length;
+    const [first, second] = wideLines.slice(1, 3);
+    const bareSecond = `- ${second.slice(2).split(' — ')[0]}`;
+    const afterFirst = headerLen + first.length + 1;
+    const budget = afterFirst + bareSecond.length + 1; // 裸名刚好装得下，完整条目刚好装不下
+    assert.ok(budget >= 160, 'maxChars 有 160 的下限，太小的预算测不到阶梯');
+    assert.ok(afterFirst + second.length + 1 > budget, '第二条必须真的装不下，否则测不到塌缩这一级');
+
+    const { handler } = captureHandler({ storePath: dir, maxChars: budget, maxPointers: 4 });
+    const out = await handler({}, async () => enter());
     assert.equal(out.messages.length, 2, '至少要有命中');
     const text = out.messages.at(-1).content[0].text;
     assert.match(text, /^- \S+\.md — /m, '至少要有一条完整条目（文件名 + 片段）');
-    assert.match(text, /^- \S+\.md$/m, '预算不够的条目应当塌缩成只有文件名');
+    assert.ok(text.includes(`\n${bareSecond}\n`) || text.endsWith(`\n${bareSecond}`), `预算不够的条目应当塌缩成只有文件名：\n${text}`);
+    // 第三条（裸名都装不下）应当被如实计数，而不是静默消失 —— 这才是「阶梯」的完整契约：
+    // 完整条目 → 裸文件名 → 如实报「另有 N 条」。三级的每一级都不能丢信息。
+    const leftover = text.match(/（另有 (\d+) 条命中因预算未列出）/);
+    assert.ok(!leftover || leftover[1] === '1', `只有第三条该被丢掉，实际：\n${text}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -982,4 +1008,86 @@ test('自动归档：写完记忆库那一刻也会触发（触发源记为 writ
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── 语料指纹 ──────────────────────────────────────────────────────
+// 这组用例守的是一件事：**指纹必须真的跟着内容变**。如果哪天有人图省事改成只哈希 id
+// 或只哈希文件名，指纹就会对内容编辑无感 —— 而它存在的唯一理由就是「告诉你卷子换了」。
+// 一个对变化无感的指纹，比没有指纹更糟：它会让人以为两次分数可比。
+
+test('语料指纹：顺序无关（同一批 chunk 换个顺序，指纹不变）', () => {
+  const docs = [
+    { id: 'a.md', body: '甲' },
+    { id: 'b.md', body: '乙' },
+  ];
+  assert.equal(corpusFingerprint(docs), corpusFingerprint([...docs].reverse()));
+});
+
+test('语料指纹：内容改一个字就变（否则它无法承担「卷子换了」的告警）', () => {
+  const before = [{ id: 'a.md', body: '甲' }, { id: 'b.md', body: '乙' }];
+  const after = [{ id: 'a.md', body: '甲' }, { id: 'b.md', body: '乙丙' }];
+  assert.notEqual(corpusFingerprint(before), corpusFingerprint(after));
+});
+
+test('语料指纹：只是「同样内容的另一个 chunk 集合」也算变（条数变了）', () => {
+  const one = [{ id: 'a.md', body: '甲' }];
+  const two = [{ id: 'a.md', body: '甲' }, { id: 'a.md', body: '甲' }];
+  assert.notEqual(corpusFingerprint(one), corpusFingerprint(two));
+});
+
+test('语料指纹：索引用到的每个字段都要算进去（尤其是 aliases）', () => {
+  // 这条守的是一个真实踩过的坑：第一版只哈希 id + body，于是「只给笔记加 aliases」
+  // 时指纹不变 —— 而 aliases 会被计两遍、实打实改变排序。探针就会报告「语料没变，
+  // 这次是可信的代码 A/B」，把一次语料改动伪装成代码改动。
+  const base = { id: 'a.md', title: '标题', description: '描述', aliases: '', body: '正文' };
+  const fp = (patch) => corpusFingerprint([{ ...base, ...patch }]);
+  const ref = fp({});
+  assert.notEqual(fp({ aliases: '梯子' }), ref, 'aliases 变了指纹必须变');
+  assert.notEqual(fp({ title: '换个标题' }), ref, 'title 变了指纹必须变');
+  assert.notEqual(fp({ description: '换个描述' }), ref, 'description 变了指纹必须变');
+  assert.notEqual(fp({ body: '换个正文' }), ref, 'body 变了指纹必须变');
+  assert.equal(fp({}), ref, '同一个 chunk 重复算应当稳定');
+});
+
+test('语料指纹：不泄露正文（长度固定、十六进制，且不等于正文本身）', () => {
+  const fp = corpusFingerprint([{ id: 'secret.md', body: '超级机密的正文内容' }]);
+  assert.match(fp, /^[0-9a-f]{12}$/);
+  assert.ok(!fp.includes('机密'));
+});
+
+// ── 同义表本体 ────────────────────────────────────────────────────
+// 这几条查的是**源码文本**而不是运行时行为，理由很具体：JS 对象字面量里重复的键会**静默
+// 覆盖前一个**（严格模式也不报错），于是「给同一个键补了两次词」的净效果是第一次白写。
+// 运行时看不出任何异常，`SYNONYMS.get()` 也只会给你最后那一份 —— 只有读源码才查得出来。
+test('同义表：不能有重复的键（对象字面量重复键会静默覆盖）', () => {
+  const src = readFileSync(new URL('../bm25.js', import.meta.url), 'utf8');
+  const start = src.indexOf('export const SYNONYMS');
+  assert.ok(start > 0, '应当能从源码里定位 SYNONYMS');
+  const body = src.slice(start, src.indexOf('\n]);', start));
+  const keys = [...body.matchAll(/^ {4}(\S+?):\s*\[/gm)].map((m) => m[1]);
+  assert.ok(keys.length > 50, `应当解析出全部键，实际只解析到 ${keys.length} 个`);
+  const seen = new Map();
+  const dup = [];
+  for (const k of keys) {
+    if (seen.has(k)) dup.push(k);
+    seen.set(k, true);
+  }
+  assert.deepEqual(dup, [], `这些键写了两遍，前一份被静默覆盖：${dup.join(', ')}`);
+});
+
+test('同义表：每个值都不为空、不含空白（值会先过 tokenize，空白会切出碎片）', () => {
+  for (const [key, values] of SYNONYMS) {
+    for (const v of values) {
+      assert.ok(String(v).trim() === String(v) && String(v).length > 0, `${key} 的值 "${v}" 带空白或是空的`);
+    }
+  }
+});
+
+test('同义表：查询扩展出来的词项，必须是分词器认得的形状', () => {
+  // 这条守的是那个藏了很久的真 bug：中文同义词原样返回时，它永远匹配不上
+  // 「英文整词 + 汉字相邻双字」的词项形状 —— 写了等于没写，且不报错。
+  const expanded = expandQuery('浏览器起不来');
+  assert.ok(expanded.includes('chrome'), '应当桥到 chrome');
+  assert.ok(expanded.some((t) => t.startsWith('不可') || t.startsWith('可用')), '应当桥出汉字双字');
+  assert.ok(!expanded.includes('不可用'), '不得把整词「不可用」当词项 —— 它永远查不到');
 });

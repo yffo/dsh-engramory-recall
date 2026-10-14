@@ -103,7 +103,7 @@ function recencyBoost(mtimeMs, oldestMs, newestMs, weight) {
  * 收录纪律：只收「同一件事的两种叫法」，不收情绪近义词；键不短于 2 字（单字太泛，
  * 会污染一大批无关查询）。宁缺毋滥 —— 每多一条就多一分误召回。
  */
-const SYNONYMS = new Map(
+export const SYNONYMS = new Map(
   Object.entries({
     飞书: ['feishu', 'lark'],
     连不上: ['enotfound', 'econnrefused', 'timeout', 'dns'],
@@ -119,17 +119,17 @@ const SYNONYMS = new Map(
     样式丢: ['css', 'assets'],
     没样式: ['css', 'assets'],
     丢失: ['missing', 'lost'],
-    上传: ['upload'],
+    上传: ['upload', 'presign'],
     下载: ['download'],
     打包: ['build', 'bundle'],
     部署: ['deploy', 'release'],
     构建: ['build'],
     缓存: ['cache'],
-    数据库: ['db', 'database'],
-    登录: ['login', 'auth'],
+    数据库: ['db', 'database', 'pg_dump', 'prisma'],
+    登录: ['login', 'auth', 'prefetch', 'redirect', 'hydration'],
     权限: ['permission', 'auth'],
-    截图: ['screenshot'],
-    字体: ['font'],
+    截图: ['screenshot', 'peekaboo', 'tcc'],
+    字体: ['font', 'woff'],
     主题: ['theme'],
     深色: ['dark'],
     浅色: ['light'],
@@ -138,12 +138,12 @@ const SYNONYMS = new Map(
     搜索: ['search'],
     索引: ['index'],
     内存: ['memory'],
-    备份: ['backup'],
+    备份: ['backup', 'restore', 'pg_dump'],
     域名: ['domain', 'dns'],
-    证书: ['cert', 'ssl', 'tls'],
+    证书: ['cert', 'ssl', 'tls', 'acme', 'certbot', 'letsencrypt', 'webroot'],
     密码: ['password', 'secret'],
-    代理: ['proxy'],
-    节点: ['node'],
+    代理: ['proxy', 'trojan', 'hysteria2', 'vless', 'vmess', 'mihomo', 'clash', 'socks5', 'tunnel'],
+    节点: ['node', 'ping', 'relay', 'tunnel'],
     // ── 2026-10-14 扩容 ──────────────────────────────────────────────────
     // 证据：探针里 3 条口语 query 打不中目标笔记（「浏览器起不来」「数据库地址写在
     // 配置里就报错」「换个库去调模型就失败了」），根因都是**字面零重叠** —— 口语说的
@@ -178,6 +178,52 @@ const SYNONYMS = new Map(
     上线: ['production', 'deploy', 'release', 'prod'],
     线上: ['production', 'prod', 'online'],
     本地: ['local', 'localhost', 'dev', '本机'],
+
+    // ── 下面这批是**挖出来**的，不是想出来的 ──────────────────────────
+    // 方法：先问「语料里真实存在哪些有区分度的锚点词」（df 低 = 专有名词/技术栈名），
+    // 再倒推杨总会用哪句大白话去问它。**语料里不存在的锚点一个都不写** —— 写了也永远
+    // 是零分，只会让表看起来很长。所以这张表是「中文口语 → 本库实际用词」的桥，
+    // 不是通用词典。换一个库，这张表就该重挖。
+    梯子: ['proxy', 'trojan', 'hysteria2', 'vless', 'vmess', 'mihomo', 'clash', 'socks5'],
+    翻墙: ['proxy', 'tunnel', 'trojan', 'hysteria2'],
+    科学上网: ['proxy', 'tunnel', 'hysteria2'],
+    节点慢: ['ping', 'relay', 'mbps'],
+    线路: ['relay', 'tunnel', 'mbps', 'route'],
+    网速: ['mbps', 'ping'],
+    卸载: ['uninstall', 'removal', 'purge', 'prune'],
+    删干净: ['uninstall', 'removal', 'purge', 'prune'],
+    残留: ['removal', 'launchd', 'launchctl', 'prune'],
+    自启: ['launchd', 'launchctl', 'systemd', 'resurrect', 'bootout', 'disown'],
+    开机启动: ['launchd', 'systemd', 'resurrect', 'bootout'],
+    进程: ['process', 'pm2', 'systemd', 'resurrect'],
+    服务: ['service', 'pm2', 'systemd', 'daemon'],
+    续期: ['renew', 'certbot', 'acme', 'webroot'],
+    过期: ['renew', 'expired', 'certbot'],
+    分享图: ['og', 'opengraph', 'satori', 'ogimageurl'],
+    缩略图: ['og', 'opengraph', 'satori'],
+    选品: ['sourcing', 'seller', 'temu', 'ecommerce'],
+    选款: ['sourcing', 'seller', 'temu'],
+    电商: ['ecommerce', 'seller', 'temu', 'rpa'],
+    体检: ['doctor', 'audit', 'auditstore'],
+    巡检: ['doctor', 'audit'],
+    沙箱: ['sandbox', 'writableroots', 'workspaceroot'],
+    写不进去: ['sandbox', 'writableroots', 'write'],
+    工作区: ['workspace', 'worktree', 'handoff'],
+    交接: ['handoff', 'worktree', 'workspace'],
+    暗色: ['dark', 'light-dark', 'data-theme', 'theme'],
+    夜间模式: ['dark', 'light-dark', 'data-theme'],
+    样式失效: ['light-dark', 'color-mix', 'css'],
+    跳转: ['redirect', 'prefetch'],
+    预取: ['prefetch', 'redirect'],
+    首屏: ['hydration', 'ssr', 'render'],
+    端口: ['eaddrinuse', 'port', 'address'],
+    图床: ['upload', 'presign', 's3'],
+    打印: ['printtopdf', 'print', 'pdf'],
+    幻灯片: ['ppt', 'presentation'],
+    演示: ['ppt', 'presentation'],
+    记忆库: ['engramory', 'memory', 'bm25'],
+    召回: ['recall', 'search', 'bm25'],
+    归档: ['archive', 'history'],
   }),
 );
 
