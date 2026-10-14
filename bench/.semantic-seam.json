@@ -1,0 +1,69 @@
+{
+  "when": "bench/semantic-seam.mjs",
+  "total": 704,
+  "K": 4,
+  "timeoutMs": 50,
+  "rows": [
+    {
+      "label": "关闭（默认）",
+      "hit1": 355,
+      "hitK": 475,
+      "used": 0,
+      "avgMs": 1.3394886363636365,
+      "codes": {
+        "off": 704
+      }
+    },
+    {
+      "label": "提供方抛错",
+      "hit1": 355,
+      "hitK": 475,
+      "used": 0,
+      "avgMs": 1.4076704545454546,
+      "codes": {
+        "provider-error": 704
+      }
+    },
+    {
+      "label": "提供方卡住不返回",
+      "hit1": 355,
+      "hitK": 475,
+      "used": 0,
+      "avgMs": 53.03551136363637,
+      "codes": {
+        "timeout": 704
+      }
+    },
+    {
+      "label": "提供方返回编造的 id",
+      "hit1": 355,
+      "hitK": 475,
+      "used": 0,
+      "avgMs": 1.3764204545454546,
+      "codes": {
+        "provider-empty": 704
+      }
+    },
+    {
+      "label": "字符三元组重排（离线、确定、真打分）",
+      "hit1": 328,
+      "hitK": 461,
+      "used": 704,
+      "avgMs": 1.4105113636363635,
+      "codes": {
+        "reranked": 704
+      }
+    },
+    {
+      "label": "按 gold 重排（作弊上界，只验管线）",
+      "hit1": 610,
+      "hitK": 610,
+      "used": 610,
+      "avgMs": 1.3821022727272727,
+      "codes": {
+        "reranked": 610,
+        "provider-empty": 94
+      }
+    }
+  ]
+}
