@@ -94,7 +94,11 @@ jobs:
       # 这条流水线就退回到「口令会过期、会被限制」的老路 —— 那正是它要解决的问题。
       - name: 发布（Trusted Publisher / OIDC + provenance）
         if: steps.exists.outputs.skip != 'true'
-        run: npm publish --access public --provenance
+        # --loglevel verbose 是必须的：npm 的 OIDC 交换（lib/utils/oidc.js）**吞掉所有错误**，
+        # 任何失败都只写一行 verbose 日志然后返回 undefined，外层于是报一个笼统的
+        # "ENEEDAUTH need auth ... You need to authorize this machine using npm adduser" ——
+        # 看起来像「没登录」，真因（registry 说没有绑定/字段不符）只在那行 verbose 里。
+        run: npm publish --access public --provenance --loglevel verbose
 
       # 退出码不算数：直查版本端点，并把 registry 上的 shasum 与本地 pack 的逐字比对
       - name: 验证「发上去的就是这一份」
