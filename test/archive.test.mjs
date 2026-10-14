@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -321,4 +321,74 @@ test('splitBatches：### 深度的批次同样认（真实库里就有一条）'
   assert.match(batches[0].text, /子标题下还是这一批的内容/, '批内子标题不该把它后面的内容切出去');
   assert.match(head, /结论留在主文件/);
   assert.doesNotMatch(head, /这一批的正文/);
+});
+
+// ── 第二层：归档产物自己也会长大 ──────────────────────────────────
+// 真实事故背景：`project-by-yffto-cicd-history-2.md` 长到 92406 字节，而闸门单篇上限
+// 是 100KB。归档产物本来被 planArchive 排除在外（为了躲开「归档器归档自己的归档」），
+// 于是它**永远不会被收缩** —— 某天会以「写入被拒、归档失败」的形式炸出来，而不是
+// 慢慢变慢。这组用例锁住修复的三件事：够大就拆、不够大别折腾、编号接着排。
+
+test('第二层：归档产物顶到闸门门口时，它自己也会出计划', () => {
+  // 3 批 × 20000 字（汉字 3 字节）≈ 180KB，远超 HISTORY_MAX_BYTES(90KB)
+  const dir = makeStore({ 'project-demo-history.md': bigNote({ name: 'project-demo-history', batches: 3, pad: 20000 }) });
+  try {
+    const { plans } = planArchive(dir);
+    assert.equal(plans.length, 1, `应该只盯上这一份归档产物，实际: ${plans.map((p) => p.file).join(',')}`);
+    assert.equal(plans[0].file, 'project-demo-history.md');
+    assert.equal(plans[0].freshCount, 3, '它自己的批次不能被当成「已归档过」而跳过');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('第二层：编号接着既有序列排，不会出现 -history-history', () => {
+  const dir = makeStore({
+    'project-demo.md': '# 演示\n\n## 结论\n\n现状正常。\n',
+    'project-demo-history.md': bigNote({ name: 'project-demo-history', batches: 3, pad: 20000 }),
+  });
+  try {
+    const { plans } = planArchive(dir);
+    const plan = plans.find((p) => p.file === 'project-demo-history.md');
+    assert.ok(plan, '归档产物应该出现在计划里');
+    for (const h of plan.historyFiles) {
+      assert.doesNotMatch(h.file, /-history-history/, `命名不该叠罗汉: ${h.file}`);
+      assert.match(h.file, /^project-demo-history-\d+\.md$/, `应该接着编号排: ${h.file}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('第二层：没到线的归档产物不动它（不为了拆分而拆分）', () => {
+  // 5 批 × 5000 字 ≈ 75KB：超过主文件的 64KB 线，但没到归档产物的 90KB 线
+  const dir = makeStore({ 'project-demo-history.md': bigNote({ name: 'project-demo-history', batches: 5, pad: 5000 }) });
+  try {
+    const { plans } = planArchive(dir);
+    assert.equal(plans.length, 0, '归档产物是纯日志，拆它只为留出闸门余量，不该按 64KB 折腾');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('第二层：落盘后的归档文件确实不超上限（抬头开销已计入）', () => {
+  const dir = makeStore({
+    'project-demo.md': '# 演示\n\n## 结论\n\n现状正常。\n',
+    'project-demo-history.md': bigNote({ name: 'project-demo-history', batches: 3, pad: 20000 }),
+  });
+  try {
+    // 先把 project-demo-history.md 本身撑到线上，再执行
+    const plan = planArchive(dir).plans.find((p) => p.file === 'project-demo-history.md');
+    const res = applyArchive(dir, plan, { now: NOW });
+    assert.equal(res.ok, true, res.reason);
+    for (const h of res.historyFiles) {
+      const bytes = Buffer.byteLength(readFileSync(join(dir, h), 'utf8'), 'utf8');
+      assert.ok(
+        bytes <= HISTORY_MAX_BYTES,
+        `${h} 落盘 ${bytes} 字节，超了 HISTORY_MAX_BYTES(${HISTORY_MAX_BYTES}) —— 抬头开销没算进去`,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

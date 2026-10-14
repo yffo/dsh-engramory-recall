@@ -7,10 +7,12 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { tokenize } from './bm25.js';
-// 「什么叫一批追加日志」只能有一处定义。这里曾经自己抄了一份 `^##\s*第…批`，
-// 于是归档器已经认加粗行与 ### 深度了、体检还在报 32 批（真值是 46）——
-// 同一个概念两套判据，迟早对不上。
-import { splitBatches } from './archive.js';
+// ★ 「哪篇该归档」只能有一处定义，而且就是**归档器本人**。
+// 这里先后踩过两次同一个坑：① 自己抄了一份 `^##\s*第…批`，于是归档器已经认加粗行与
+// ### 深度了、体检还在报 32 批（真值是 46）；② 自己抄了一份 64KB 门槛，于是体检对一份
+// 89KB 的归档产物说「可以一键执行」，而归档器根本不会碰它。
+// 现在直接问 `planArchive` 要结果：体检说的每一句，都是按钮真做得到的事。
+import { HISTORY_FILE_RE, planArchive } from './archive.js';
 
 export const NOTE_KINDS = ['user', 'feedback', 'project', 'reference'];
 export const INDEX_FILE = 'MEMORY.md';
@@ -21,8 +23,6 @@ export const DUPLICATE_TOPIC_THRESHOLD = 0.5;
 const NOTE_FILE_RE = new RegExp(`^(${NOTE_KINDS.join('|')})-[a-z0-9][a-z0-9-]*\\.md$`);
 const TODO_RE = /待办|未完成|TODO|进行中|未做|待定|未闭环/;
 /** 归档建议的两个阈值（超过任一即提示）：体积与「##」章节数。 */
-const ARCHIVE_BYTES = 64 * 1024;
-const ARCHIVE_SECTIONS = 20;
 // 认 `~` 开头的路径，以及常见 home 前缀下的绝对路径。
 // 这里曾写死成 `/Users/`（只认 macOS）—— 结果在 Linux 上整个 path-conflict 检查静默失效：
 // 一条 finding 都不出，不报错、不告警，看起来像"没发现问题"。CI 上那个测试就是这么挂的。
@@ -98,6 +98,11 @@ export function auditStore(storePath, options = {}) {
     if (!mdFiles.includes(p)) add('error', 'index-missing-file', `索引指向的笔记不存在：${p}`, [p]);
   }
   const unreferenced = [];
+  // 归档器亲自出的计划：体检不再自己判定「哪篇该归档」
+  const { plans: archivePlans, skipped: archiveSkipped } = planArchive(storePath, options.archive);
+  const archivePlanByFile = new Map(archivePlans.map((p) => [p.file, p]));
+  const archiveSkipByFile = new Map(archiveSkipped.map((s) => [s.file, s]));
+
   for (const n of notes) {
     // 「孤儿」原来的判据是「没出现在 MEMORY.md 里」，太严了：归档产生的
     // `xxx-history.md` 按设计**不写进索引**（索引由另一套守卫管，且归档是机械派生），
@@ -142,29 +147,27 @@ export function auditStore(storePath, options = {}) {
     if (!n.fields.description) add('warn', 'missing-description', `缺 description（召回全靠它）：${n.file}`, [n.file]);
     if (n.bytes > MAX_NOTE_BYTES) add('warn', 'oversize-note', `单篇 ${(n.bytes / 1024).toFixed(0)}KB，超过 ${MAX_NOTE_BYTES / 1024}KB：${n.file}`, [n.file]);
 
-    // 归档建议 —— 对标 dsh-mneme 的 `phaseDemotion`（超期归档 / 降级为截断摘要 / 原库存
-    // `_full_content`），但在我们这里**只报告、绝不动用户的笔记**：笔记是 Markdown 主存储，
-    // 自动改写等于替用户删资料。判据是可核对的：体积，以及「## 第 N 批」这类追加式日志章节数。
-    const sections = (n.body.match(/^## /gm) || []).length;
-    // 与归档器同一套判据（认中文数字、认加粗整行、认 ### 深度）—— 否则体检说的
-    // 「可归档」和归档器真能搬走的不是一回事，用户点「执行」才发现搬不动。
-    const { batches: batchList } = splitBatches(n.body);
-    const movableBytes = batchList.reduce((sum, b) => sum + Buffer.byteLength(b.text, 'utf8'), 0);
-    const keptBytes = n.bytes - movableBytes;
-    if (n.bytes > ARCHIVE_BYTES || sections > ARCHIVE_SECTIONS) {
+    // 归档建议 —— 对标 dsh-mneme 的 `phaseDemotion`（超期归档 / 降级为截断摘要），
+    // 但在我们这里**只报告、绝不动用户的笔记**：笔记是 Markdown 主存储，自动改写等于
+    // 替用户删资料。判据不在这里判 —— 直接查归档器刚出的计划，见文件头的说明。
+    const ap = archivePlanByFile.get(n.file);
+    const as = archiveSkipByFile.get(n.file);
+    if (ap) {
       const kb = (v) => `${(v / 1024).toFixed(0)}KB`;
       add(
         'info',
         'archive-suggestion',
-        batchList.length
-          ? keptBytes > MAX_NOTE_BYTES
-            ? `这篇 ${kb(n.bytes)}：${batchList.length} 个「第 N 批」式追加日志（约 ${kb(movableBytes)}）可搬走，` +
-              `但搬完正文仍有 ${kb(keptBytes)}、超过单篇上限 —— 得按主题拆成多篇（一条一主题）`
-            : `这篇 ${kb(n.bytes)}：${batchList.length} 个「第 N 批」式追加日志（约 ${kb(movableBytes)}）可以搬走，` +
-              `搬完正文只剩 ${kb(keptBytes)}。面板「记忆 → 归档」能一键执行`
-          : `这篇 ${kb(n.bytes)} 里没有「第 N 批」式追加日志：拆不动，只能按主题分成多篇`,
+        ap.keptBytes > MAX_NOTE_BYTES
+          ? `这篇 ${kb(ap.bytes)}：${ap.freshCount} 个「第 N 批」式追加日志可搬走，` +
+            `但搬完正文仍有 ${kb(ap.keptBytes)}、超过单篇上限 —— 得按主题拆成多篇（一条一主题）`
+          : `这篇 ${kb(ap.bytes)}：${ap.freshCount} 个「第 N 批」式追加日志（约 ${kb(ap.movedBytes)}）可以搬走，` +
+            `搬完正文只剩 ${kb(ap.keptBytes)}。面板「记忆 → 归档」能一键执行`,
         [n.file],
       );
+    } else if (as) {
+      // 归档器算了但搬不动（没有「第 N 批」式日志段）。这种时候不能只说「建议归档」——
+      // 那是在指一条走不通的路，用户点开面板会发现根本没有可执行的计划。
+      add('info', 'archive-suggestion', `${as.reason} —— 得按主题拆成多篇（一条一主题）`, [n.file]);
     }
 
     const updated = Date.parse(n.fields.updated ?? '');
@@ -221,18 +224,22 @@ export function auditStore(storePath, options = {}) {
   }
 
   // ---- 可疑重复（阈值定高：宁可不报，也不刷屏） ----
-  // 两条防误报：① 缺 description 的笔记跳过——没有描述就无从比较，硬拼会把 `undefined`
-  // 字符串化成 token，两篇裸 md 因此算出过"相似度 1.00"；② 一律回落空串，不再拼 name。
-  for (let i = 0; i < notes.length; i++) {
-    if (!notes[i].fields.description) continue;
-    for (let j = i + 1; j < notes.length; j++) {
-      if (!notes[j].fields.description) continue;
+  // 三条防误报：① 缺 description 的笔记跳过——没有描述就无从比较，硬拼会把 `undefined`
+  // 字符串化成 token，两篇裸 md 因此算出过"相似度 1.00"；② 一律回落空串，不再拼 name；
+  // ③ **归档产物跳过**——它们的 description 是归档器按同一模板生成的（"X 的历史批次
+  // 归档：…"），彼此天然 0.94 相似，于是 N 份归档会报出 N²/2 条「可能讲的是同一件事」。
+  // 那是机械派生的噪声，不是人写重了；体检的可信度就是被这种条目磨掉的。
+  const dupCandidates = notes.filter((n) => !HISTORY_FILE_RE.test(n.file));
+  for (let i = 0; i < dupCandidates.length; i++) {
+    if (!dupCandidates[i].fields.description) continue;
+    for (let j = i + 1; j < dupCandidates.length; j++) {
+      if (!dupCandidates[j].fields.description) continue;
       const score = jaccard(
-        `${notes[i].fields.description} ${notes[i].file}`,
-        `${notes[j].fields.description} ${notes[j].file}`,
+        `${dupCandidates[i].fields.description} ${dupCandidates[i].file}`,
+        `${dupCandidates[j].fields.description} ${dupCandidates[j].file}`,
       );
       if (score >= dupThreshold) {
-        add('info', 'duplicate-topic', `description 相似度 ${score.toFixed(2)}，可能讲的是同一件事：${notes[i].file} × ${notes[j].file}`, [notes[i].file, notes[j].file]);
+        add('info', 'duplicate-topic', `description 相似度 ${score.toFixed(2)}，可能讲的是同一件事：${dupCandidates[i].file} × ${dupCandidates[j].file}`, [dupCandidates[i].file, dupCandidates[j].file]);
       }
     }
   }

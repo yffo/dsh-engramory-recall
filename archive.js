@@ -144,6 +144,45 @@ export function historyFileName(slug, index) {
 }
 
 /**
+ * 从任意笔记名取「基础 slug」：`x.md` 与 `x-history-2.md` 都归到 `x`。
+ *
+ * 为什么需要它：归档产物自己也会长大（真实库里 `-history-2.md` 已经 92KB，紧贴闸门
+ * 100KB），所以它必须能被**再归档一次**。但如果直接拿文件名当 slug，产物会叫
+ * `x-history-2-history.md` —— 编号既丑陋又会与既有序列脱节。归一化之后，第二层
+ * 归档接着同一个编号往下排（`x-history-5.md`），扫库时也还能一眼看出它们是同族。
+ */
+export function baseSlug(file) {
+  return String(file).replace(/\.md$/, '').replace(/-history(?:-\d+)?$/, '');
+}
+
+/**
+ * 某一篇的归档门槛（字节）。
+ *
+ * 主文件按 `ARCHIVE_BYTES`（64KB）；归档产物按 `HISTORY_MAX_BYTES`（90KB）—— 理由见
+ * `planArchive` 里的注释：它已经是纯日志，拆它只为留出闸门余量。
+ *
+ * ★ 这是**导出给体检用的**：`doctor.js` 以前自己抄了一份 `ARCHIVE_BYTES`，于是出现
+ * 「体检说这篇 89KB 可以搬走、点执行却什么都不发生」—— 判据一分为二，早晚漂移。
+ * 一个概念只能有一处定义。
+ */
+export function archiveBar(file, options = {}) {
+  const minBytes = options.minBytes ?? ARCHIVE_BYTES;
+  if (!HISTORY_FILE_RE.test(String(file))) return minBytes;
+  return Math.max(minBytes, options.historyMinBytes ?? HISTORY_MAX_BYTES);
+}
+
+/**
+ * 归档文件自己的抬头开销（frontmatter + 标题 + 一行导语）。
+ *
+ * 为什么必须扣掉：`groupBatches` 只累加**批次正文**，而真正落盘的文件还带着这一段。
+ * 这正是真实库里出现 92406 字节（> HISTORY_MAX_BYTES 92160）的原因 —— 判据比事实窄了
+ * 一个抬头。凡是「估算写入体积」的地方都得把框架算进去，否则闸门会在最后一刻拒绝。
+ */
+export function historyOverhead(fields, file, slug) {
+  return bytesOf(renderHistory(fields, file, slug, [], '')) + 1;
+}
+
+/**
  * 扫描库，产出归档计划（纯读，不写任何文件）。
  * 返回 { plans, skipped }：
  *   plans   —— 够大且有 ≥ MIN_BATCHES 个批次章节的笔记，附拆分后的体积预估
@@ -159,12 +198,22 @@ export function planArchive(storePath, options = {}) {
 
   let files = [];
   try {
-    files = readdirSync(storePath).filter((f) => f.endsWith('.md') && f !== INDEX_FILE && !HISTORY_FILE_RE.test(f));
+    // 归档产物（`-history*.md`）**同样在扫描范围内**：它们也会长大，而它们没有别的地方
+    // 可以去。早先为了躲开「归档器归档自己的归档」而把它们排除在外，代价是那一层永远
+    // 不会被收缩 —— 闸门会在某天以「写入被拒」的形式把它暴露出来，而不是慢慢变慢。
+    files = readdirSync(storePath).filter((f) => f.endsWith('.md') && f !== INDEX_FILE);
   } catch {
     return { plans, skipped };
   }
 
   for (const file of files.sort()) {
+    // ★ 归档产物自己也有门槛，而且更高。
+    // 主文件 64KB 就拆，是因为长文会在召回里霸榜（章节切桶 + 长度归一治不完全）；
+    // 而 `-history*.md` 是**纯日志**，拆它只有一个目的：别顶到闸门的 100KB 上限。
+    // 拿 64KB 去卡它，就会把一份刚生成的归档立刻再劈成两半 —— 文件数变多、召回排序
+    // 一点没变好，纯粹是折腾。所以 history 文件的线设在 `HISTORY_MAX_BYTES`。
+    const bar = archiveBar(file, options);
+
     let text = '';
     try {
       text = readFileSync(join(storePath, file), 'utf8');
@@ -173,7 +222,10 @@ export function planArchive(storePath, options = {}) {
     }
     const bytes = bytesOf(text);
     const sections = (text.match(/^## /gm) || []).length;
-    if (bytes <= minBytes && sections <= minSections) continue; // 不够大，不属于归档对象
+    // 两条判据是**或**的关系：足够大，或者章节多到已经不像一篇笔记（追加式日志的形态）。
+    // 别把它改成「体积硬门槛」—— 那会让一份 22 个批次、体积却只 1KB 的日志永远不算数，
+    // 而它恰恰是最该被拆的那种：正文被日志淹没，召回时又长又散。
+    if (bytes <= bar && sections <= minSections) continue;
 
     const { fields, body } = parseFrontmatter(text);
     const { head, tail, batches } = splitBatches(body);
@@ -190,15 +242,20 @@ export function planArchive(storePath, options = {}) {
       continue;
     }
 
-    const slug = file.replace(/\.md$/, '');
+    const slug = baseSlug(file);
 
-    // 已经归档过的批次标题（可能已有多份 -history.md / -history-2.md …），用于去重
+    // 已经归档过的批次标题（可能已有多份 -history.md / -history-2.md …），用于去重。
+    // ★ 但**要跳过自己**：当归档源本身就是一个 `-history-N.md` 时，它里面的标题按定义
+    // 就是「已归档」的，若不排除，fresh 会永远是空的 —— 这层文件于是谁都动不了，
+    // 静默地卡在闸门门口。
     const existingTitles = new Set();
     let existingCount = 0;
     for (let i = 0; i < 100; i += 1) {
-      const hp = join(storePath, historyFileName(slug, i));
+      const hf = historyFileName(slug, i);
+      const hp = join(storePath, hf);
       if (!existsSync(hp)) break;
       existingCount += 1;
+      if (hf === file) continue;
       for (const line of readFileSync(hp, 'utf8').match(/^## .*/gm) ?? []) {
         existingTitles.add(line.replace(/^##\s*/, '').trim());
       }
@@ -206,8 +263,10 @@ export function planArchive(storePath, options = {}) {
     const fresh = batches.filter((b) => !existingTitles.has(b.title));
     if (!fresh.length) continue; // 这一篇的批次都已经归档过了
 
-    // 按 90KB 分组：归档文件同样要过写入闸门的 100KB 单篇上限，超了就写第二份
-    const groups = groupBatches(fresh);
+    // 按体积分组：归档文件同样要过写入闸门的 100KB 单篇上限，超了就写第二份。
+    // 上限要先把抬头开销扣掉，否则估算总是偏乐观（真实库里就写出过 92406 字节的文件）。
+    const limit = Math.max(1024, (options.historyMaxBytes ?? HISTORY_MAX_BYTES) - historyOverhead(fields, file, slug));
+    const groups = groupBatches(fresh, limit);
     const historyFiles = groups.map((g, i) => ({
       file: historyFileName(slug, existingCount + i),
       batchCount: g.items.length,
@@ -304,7 +363,7 @@ export function applyArchive(storePath, plan, options = {}) {
   if (!batches.length) return { ok: false, reason: `${plan.file} 里已经没有可搬的批次章节` };
 
   // 与 planArchive 用同一套判据：已归档标题去重 + 已存在的归档文件计数
-  const slug = plan.file.replace(/\.md$/, '');
+  const slug = baseSlug(plan.file);
   const existingTitles = new Set();
   const existingFiles = [];
   for (let i = 0; i < 100; i += 1) {
@@ -313,12 +372,15 @@ export function applyArchive(storePath, plan, options = {}) {
     if (!existsSync(hp)) break;
     const text = readFileSync(hp, 'utf8');
     existingFiles.push({ file: hf, text });
+    // 跳过自己：归档源本身就是 `-history-N.md` 时，它自己的标题正是要搬走的东西
+    if (hf === plan.file) continue;
     for (const line of text.match(/^## .*/gm) ?? []) existingTitles.add(line.replace(/^##\s*/, '').trim());
   }
   const fresh = batches.filter((b) => !existingTitles.has(b.title));
   if (!fresh.length) return { ok: false, reason: `${plan.file} 的批次章节都已归档过` };
 
-  const groups = groupBatches(fresh, options.historyMaxBytes ?? HISTORY_MAX_BYTES);
+  const bodyLimit = Math.max(1024, (options.historyMaxBytes ?? HISTORY_MAX_BYTES) - historyOverhead(fields, plan.file, slug));
+  const groups = groupBatches(fresh, bodyLimit);
   const writes = groups.map((g, i) => {
     const file = historyFileName(slug, existingFiles.length + i);
     return {
