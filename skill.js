@@ -164,7 +164,7 @@ export function skillBody({ storePath = '~/memory/engramory', maxLines = 200, ma
  * 万一注册表对重名是抛错而非覆盖，绝不能因为一个技能名把整个宿主拖崩。
  */
 export function registerSkill(ctx, options = {}) {
-  if (options.registerSkill === false) return;
+  if (options.registerSkill === false) return { ok: false, reason: 'disabled' };
   try {
     ctx.inject(['skills'], (inner) => {
       const content = options.skill ?? skillBody(options);
@@ -178,7 +178,23 @@ export function registerSkill(ctx, options = {}) {
         }),
       );
     });
-  } catch {
+    // 自报状态：注册这条链是**同步失败、静默失败**的（注入表可能还没就绪、
+    // 或者同名技能已被 dsh-engramory 注册而注册表选择抛错）。不回报，
+    // 摘掉那个插件之后才发现技能根本没注册，就太晚了 —— 那正是本函数存在的唯一目的。
+    lastSkillStatus = { ok: true, reason: 'injected' };
+  } catch (err) {
     // 技能注册表不可用照常工作：闸门与召回都不依赖它。
+    lastSkillStatus = { ok: false, reason: String(err?.message ?? err) };
   }
+  return lastSkillStatus;
+}
+
+/**
+ * 最近一次注册尝试的结果。暴露给面板与状态接口，用来回答
+ * 「技能到底注册上了没有」—— 这条链失败时是静默的。
+ */
+let lastSkillStatus = { ok: false, reason: 'not-attempted' };
+
+export function skillStatus() {
+  return { ...lastSkillStatus, name: SKILL_NAME };
 }

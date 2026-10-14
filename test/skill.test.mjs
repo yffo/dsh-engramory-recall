@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { SKILL_DESCRIPTION, SKILL_NAME, SKILL_WHEN_TO_USE, registerSkill, skillBody } from '../skill.js';
+import { SKILL_DESCRIPTION, SKILL_NAME, SKILL_WHEN_TO_USE, registerSkill, skillBody, skillStatus } from '../skill.js';
 
 /** 造一个假的 ctx，记录注册了什么、effect 有没有被调用。 */
 function fakeCtx({ injectThrows = false, registerThrows = false } = {}) {
@@ -126,6 +126,21 @@ describe('技能：注册路径', () => {
     const { ctx, calls } = fakeCtx({ injectThrows: true });
     assert.doesNotThrow(() => registerSkill(ctx, {}));
     assert.deepEqual(calls.registered, []);
+  });
+
+  it('每次尝试都自报状态 —— 这条链失败是静默的，不回报就发现不了', () => {
+    const ok = registerSkill(fakeCtx().ctx, {});
+    assert.equal(ok.ok, true);
+    assert.equal(skillStatus().name, 'engramory');
+
+    const bad = registerSkill(fakeCtx({ injectThrows: true }).ctx, {});
+    assert.equal(bad.ok, false);
+    assert.match(bad.reason, /skills registry not available/);
+    assert.equal(skillStatus().ok, false, '状态要跟着更新，面板才看得出这次失败');
+
+    const off = registerSkill(fakeCtx().ctx, { registerSkill: false });
+    assert.equal(off.ok, false);
+    assert.equal(off.reason, 'disabled');
   });
 
   it('重名注册抛错时也吞掉（与 dsh-engramory 同时装着的情况）', () => {

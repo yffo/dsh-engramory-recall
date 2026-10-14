@@ -180,6 +180,7 @@ function captureHandler(config) {
   let tool;
   const routes = [];
   const guards = [];
+  const skills = [];
   const ctx = {
     on: (event, fn) => { if (event === 'agent/pre-step') handler = fn; },
     tools: {
@@ -187,15 +188,24 @@ function captureHandler(config) {
       // ctx.tools.guard(fn) 注册单调守卫：返回字符串即拒绝。
       guard: (fn) => { guards.push(fn); return () => {}; },
     },
-    // 真实 cordis 的 ctx.inject(deps, cb) 在依赖服务就绪后才跑 cb；
-    // 测试里直接给一份最小的 webServer，把注册到的路由收出来。
-    inject: (_deps, fn) => {
-      fn({ webServer: { register: (route) => { routes.push(route); return () => {}; } } });
+    // 真实 cordis 的 ctx.inject(deps, cb) 在依赖服务就绪后才跑 cb；这里的假实现
+    // **按 deps 分派**（早先不分派、一律塞一份 webServer，于是技能那条链永远拿不到
+    // skills 而静默走 catch —— 恰好把要测的东西测没了）。
+    inject: (deps, fn) => {
+      if (deps.includes('webServer')) {
+        fn({ webServer: { register: (route) => { routes.push(route); return () => {}; } } });
+      }
+      if (deps.includes('skills')) {
+        fn({
+          effect: (f) => f(),
+          skills: { register: (entry) => { skills.push(entry); return () => {}; } },
+        });
+      }
     },
   };
   apply(ctx, config);
   assert.ok(handler, 'apply() 应当注册 agent/pre-step 监听');
-  return { handler, tool, routes, guards };
+  return { handler, tool, routes, guards, skills };
 }
 
 function captureResponse() {
@@ -460,6 +470,59 @@ test('写入闸门：库外放行，库里不合规的拒绝', () => {
       guard({ name: 'edit', arguments: { file_path: join(dir, 'reference-ok.md'), old_string: 'a', new_string: '普通一行' } }),
       undefined,
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('写入闸门：索引文件改由索引上限闸门接手（融合自 dsh-engramory）', () => {
+  const dir = fixtureStore();
+  try {
+    // 注意：apply() 是 `{ ...DEFAULTS, ...config }` 展开配置的，**没有** settings 这一层
+    const { guards } = captureHandler({ storePath: dir, indexMaxLines: 5, indexMaxBytes: 4096 });
+    const guard = guards[0];
+    const index = join(dir, 'MEMORY.md');
+
+    // 上限内 → 放行（checkMemoryWrite 对索引返回 skipped:'index'，路由给索引闸门后通过）
+    assert.equal(
+      guard({ name: 'write', arguments: { file_path: index, content: '- a.md\n- b.md' } }),
+      undefined,
+    );
+
+    // 顶过上限 → 拒绝，且理由必须说清是**索引**、并带上真实行数
+    const reason = guard({
+      name: 'write',
+      arguments: {
+        file_path: index,
+        content: Array.from({ length: 30 }, (_, i) => `- n${i}.md`).join('\n'),
+      },
+    });
+    assert.match(reason, /索引/);
+    assert.match(reason, /30 行/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('融合进来的 engramory 技能会真的注册到宿主', () => {
+  const dir = fixtureStore();
+  try {
+    const { skills } = captureHandler({ storePath: dir });
+    assert.equal(skills.length, 1, 'apply() 应当注册恰好一个技能');
+    assert.equal(skills[0].name, 'engramory');
+    assert.match(skills[0].content, /curated file-based memory/);
+    assert.match(skills[0].content, /a greeting,\s+an\s+acknowledgement/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('registerSkill:false 时不注册技能（其余照常）', () => {
+  const dir = fixtureStore();
+  try {
+    const { skills, guards } = captureHandler({ storePath: dir, registerSkill: false });
+    assert.equal(skills.length, 0);
+    assert.equal(guards.length, 1, '闸门不该受技能开关影响');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

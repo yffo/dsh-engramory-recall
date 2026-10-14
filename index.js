@@ -23,7 +23,7 @@ import path from 'node:path';
 import { buildIndex, search, clip } from './bm25.js';
 import { checkMemoryWrite } from './guard.js';
 import { checkIndexWrite, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES } from './index-guard.js';
-import { registerSkill } from './skill.js';
+import { registerSkill, skillStatus } from './skill.js';
 import { appendAudit, readAudit, GUARD_EPOCH } from './audit.js';
 import { readDocs } from './store.js';
 import { auditStore } from './doctor.js';
@@ -741,6 +741,9 @@ export function apply(ctx, config = {}) {
       writeAudit: storePath ? { epoch: GUARD_EPOCH, entries: readAudit(storePath, 40) } : { epoch: GUARD_EPOCH, entries: [] },
       // 归档计划：只出计划不动手。真正的执行在 POST /api/engramory-recall/archive。
       archive: storePath ? archivePlans(storePath) : { plans: [], skipped: [] },
+      // 技能注册的自报状态。这条链失败时**完全静默**（注入表没就绪、或同名技能已被
+      // dsh-engramory 注册而注册表选择抛错），不回报就只能在摘掉那个插件之后才发现。
+      skill: skillStatus(),
       config: {
         enabled: settings.enabled !== false,
         maxPointers: Number(settings.maxPointers) || 4,
@@ -751,6 +754,9 @@ export function apply(ctx, config = {}) {
         nudgeSediment: settings.nudgeSediment !== false,
         sedimentMinTurns: SEDIMENT_MIN_TURNS,
         autoArchive: settings.autoArchive === true,
+        indexMaxLines: Number(settings.indexMaxLines) || DEFAULT_MAX_INDEX_LINES,
+        indexMaxBytes: Number(settings.indexMaxBytes) || DEFAULT_MAX_INDEX_BYTES,
+        registerSkill: settings.registerSkill !== false,
         recencyWeight: Number(settings.recencyWeight) || 0,
         rotationPenalty: Number(settings.rotationPenalty ?? 0),
         dedupeInjection: settings.dedupeInjection !== false,
