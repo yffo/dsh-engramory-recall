@@ -107,6 +107,19 @@ const DEFAULTS = {
   nudgeSediment: true,
   /** 沉淀提醒的轮次门槛（本会话第几个真实用户轮才可能触发）。 */
   sedimentMinTurns: 12,
+  /**
+   * 自动归档：笔记长过阈值时自动做物理分层，不必每次人工点「执行」。**默认关。**
+   *
+   * 敢把它做成一个开关，是因为归档已经被验证成**可逆且零信息损失**：不删不截断、原件
+   * 整份进 `.archive-backup/<时间戳>/`、拆出去的 history 仍在同一库目录内、仍被索引、
+   * 仍能被召回，主笔记末尾还留一行指针指过去（doctor 的孤儿判据已改成可达性，认这行）。
+   * 既然最坏情况只是「多出几个文件、随时能读回来」，拦人一道的价值就低于它的摩擦。
+   *
+   * 触发时机刻意选在**刚写完记忆库之后**：笔记变大只可能来自写入，那一刻检查最自然，
+   * 也不必常驻定时器。另加 pre-step 兜底（10 分钟一次），管住「手动用 bash 改大了」
+   * 这种绕过闸门的情况。自动执行的每一步都进写入审计，`reason` 里写明触发源。
+   */
+  autoArchive: false,
 };
 
 /** 只在用户句子里出现明确的「长期记住」意图时才追加一行提示（默认开）。 */
@@ -325,6 +338,9 @@ export function apply(ctx, config = {}) {
               verdict: 'allow',
               partial: verdict.partial === true,
             });
+            // 另一个触发源：刚往库里写完 —— 笔记变大只可能来自写入，
+            // 所以此刻检查最自然，也不必常驻定时器。开关关着时是空转。
+            maybeAutoArchive('write');
           }
           return undefined;
         }
@@ -358,6 +374,9 @@ export function apply(ctx, config = {}) {
       if (id && seen.has(id)) return decision;
       // 本会话的第几个真实用户轮（沉淀提醒的判据之一）
       turnCount += 1;
+      // 自动归档的两个触发源之一：兜底路径。（另一个在闸门放行写入之后。）
+      // 开关关着时这里立刻返回，连文件系统都不碰。
+      maybeAutoArchive('pre-step');
 
       // 超长消息在头尾各取一半：只取尾部会把开头交代的主题词整个丢掉（灵枢 #108 同类坑，
       // 实测见 DEFAULTS.queryChars 的注释）。中间一般是粘贴的正文，噪音最多。
@@ -550,6 +569,70 @@ export function apply(ctx, config = {}) {
     return value;
   };
 
+  // ── 自动归档（默认关，理由见 DEFAULTS.autoArchive 的注释）────────────────────
+  // 两个触发源：'write'（闸门刚放行一次写入）与 'pre-step'（每 10 分钟兜底一次，
+  // 管住绕过闸门的手动改文件）。开关关着时这一整段是空转，一次文件系统都不碰。
+  const AUTO_ARCHIVE_TTL_MS = 10 * 60 * 1000;
+  let autoArchiveCheckedAt = 0;
+  /** 本会话内已知搬不动的文件：别每次写入都拿同一堵墙撞一遍（pre-step 时会清空重试）。 */
+  const autoArchiveStuck = new Set();
+
+  const maybeAutoArchive = (trigger) => {
+    if (settings.autoArchive !== true) return null;
+    const storePath = String(settings.storePath || '').trim();
+    if (!storePath) return null;
+    if (trigger === 'pre-step') {
+      const now = Date.now();
+      if (now - autoArchiveCheckedAt < AUTO_ARCHIVE_TTL_MS) return null;
+      autoArchiveCheckedAt = now;
+      autoArchiveStuck.clear(); // 兜底路径给失败过的文件一次新机会
+    }
+    try {
+      const { plans } = planArchive(storePath);
+      const todo = plans.filter((plan) => !autoArchiveStuck.has(plan.file));
+      if (!todo.length) return null;
+      const attempted = [];
+      for (const plan of todo) {
+        const outcome = applyArchive(storePath, plan);
+        if (!outcome.ok) {
+          // 搬不动多半是「搬完主文件仍超单篇上限」——那是闸门在正确地拒绝，
+          // 不是归档坏了。记住它，别在每次写入后重试；把原因留在日志里等人看。
+          autoArchiveStuck.add(plan.file);
+          attempted.push({ file: plan.file, ok: false, reason: outcome.reason });
+          continue;
+        }
+        appendAudit(storePath, {
+          tool: 'archive',
+          file: plan.file,
+          bytes: outcome.movedBytes,
+          verdict: 'allow',
+          reason: `自动归档（触发：${trigger}）搬走 ${outcome.moved} 个批次 → ${outcome.historyFiles.join('、')}；备份 ${outcome.backupDir}`,
+        });
+        attempted.push({ file: plan.file, ok: true, moved: outcome.moved, movedBytes: outcome.movedBytes });
+      }
+      if (!attempted.length) return null;
+      archiveCache = { key: '', at: 0, value: null }; // 计划已作废，下次读状态重新算
+      record({
+        kind: 'archive-auto',
+        query: trigger,
+        hits: [],
+        injected: attempted.filter((a) => a.ok).length,
+        reason: attempted
+          .map((a) =>
+            a.ok
+              ? `${a.file} 搬走 ${a.moved} 个批次 / ${Math.round(a.movedBytes / 1024)}KB`
+              : `${a.file} 没搬成：${a.reason}`,
+          )
+          .join('；'),
+      });
+      return attempted;
+    } catch (err) {
+      // 自动归档出任何问题都不能拖垮这一轮：吞掉异常，只在召回日志里留一行。
+      record({ kind: 'archive-auto', query: trigger, hits: [], reason: `自动归档异常：${String(err?.message ?? err)}` });
+      return null;
+    }
+  };
+
   const storeSnapshot = () => {
     const storePath = String(settings.storePath || '').trim();
     const docs = storePath ? readDocs(storePath) : [];
@@ -619,6 +702,7 @@ export function apply(ctx, config = {}) {
         guardWrites: settings.guardWrites !== false,
         nudgeSediment: settings.nudgeSediment !== false,
         sedimentMinTurns: SEDIMENT_MIN_TURNS,
+        autoArchive: settings.autoArchive === true,
         recencyWeight: Number(settings.recencyWeight) || 0,
         rotationPenalty: Number(settings.rotationPenalty ?? 0),
         dedupeInjection: settings.dedupeInjection !== false,

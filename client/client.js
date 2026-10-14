@@ -20,6 +20,8 @@ window.__ModuleLoader__.load({
 
     const STATE_URL = '/api/engramory-recall/state';
     const ARCHIVE_URL = '/api/engramory-recall/archive';
+    /** busy 的哨兵值：正在跑「全部执行」，此时所有单篇按钮都该禁用。 */
+    const ALL = '@all';
     const POLL_MS = 3000;
 
     /** 深浅色都成立的克制配色：底子用 currentColor 的透明度，不假设主题变量存在。 */
@@ -90,12 +92,13 @@ window.__ModuleLoader__.load({
     }
 
     function LogEntry({ entry, expanded, onToggle }) {
-      const tone = entry.kind === 'hit' ? 'hit' : entry.kind === 'skip' ? 'skip' : entry.kind === 'deny' ? 'deny' : entry.kind === 'sediment' ? 'sediment' : 'empty';
+      const tone = entry.kind === 'hit' ? 'hit' : entry.kind === 'skip' ? 'skip' : entry.kind === 'deny' ? 'deny' : (entry.kind === 'sediment' || entry.kind === 'archive-auto') ? 'sediment' : 'empty';
       const label = entry.kind === 'hit' ? `注入 ${entry.injected} 条`
         : entry.kind === 'skip' ? '跳过'
         : entry.kind === 'deny' ? '拦截写入'
         : entry.kind === 'deny-error' ? '闸门异常'
-        : entry.kind === 'sediment' ? '沉淀提醒' : '无命中';
+        : entry.kind === 'sediment' ? '沉淀提醒'
+        : entry.kind === 'archive-auto' ? '自动归档' : '无命中';
       const hits = Array.isArray(entry.hits) ? entry.hits : [];
 
       return h('div', { style: { padding: '7px 0', borderBottom: `1px solid ${dim(8)}` } },
@@ -123,6 +126,7 @@ window.__ModuleLoader__.load({
       const [filter, setFilter] = React.useState('');
       const [busy, setBusy] = React.useState('');
       const [results, setResults] = React.useState({});
+      const [bulk, setBulk] = React.useState(null);
 
       if (!state) {
         return h('div', { style: S.root },
@@ -164,8 +168,7 @@ window.__ModuleLoader__.load({
 
       // 两段式的第二段：计划是刚看的那个，执行前宿主还会现算一遍再核一次。
       // confirm:true 不是走过场 —— 宿主路由会拒掉没有它的请求。
-      const runArchive = (file) => {
-        setBusy(file);
+      const archiveOne = (file) =>
         fetch(ARCHIVE_URL, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -185,12 +188,42 @@ window.__ModuleLoader__.load({
                 ? { ok: true, text: `已归档 → ${(data.historyFiles || []).join('、')}；原件备份在 ${data.backupDir}` }
                 : { ok: false, text: String(data.reason || `HTTP ${res.status}`) },
             }));
-            reload();
+            return good;
           })
           .catch((err) => {
             setResults((prev) => ({ ...prev, [file]: { ok: false, text: String((err && err.message) || err) } }));
-          })
-          .finally(() => setBusy(''));
+            return false;
+          });
+
+      const runArchive = (file) => {
+        setBusy(file);
+        archiveOne(file).finally(() => {
+          setBusy('');
+          reload();
+        });
+      };
+
+      // 「全部执行」：一篇一篇顺着来，不并发 —— 每篇都会重算一次计划、动一次库，
+      // 并发只会让后一篇基于作废的计划去动库。失败不中断，剩下的照做，最后统一报数。
+      const runAll = () => {
+        setBusy(ALL);
+        (async () => {
+          let ok = 0;
+          const failed = [];
+          for (const plan of plans) {
+            // eslint-disable-next-line no-await-in-loop
+            if (await archiveOne(plan.file)) ok += 1;
+            else failed.push(plan.file);
+          }
+          setBulk(
+            failed.length
+              ? { ok: false, text: `成功 ${ok} 篇，失败 ${failed.length} 篇：${failed.join('、')}` }
+              : { ok: true, text: `全部 ${ok} 篇都归档完了。` },
+          );
+        })().finally(() => {
+          setBusy('');
+          reload();
+        });
       };
 
       return h('div', { style: S.root },
@@ -308,9 +341,20 @@ window.__ModuleLoader__.load({
             ? h('div', { style: { color: '#c25a4a', marginBottom: '8px' } }, `归档规划崩了：${archive.crashed}`)
             : null,
 
+          plans.length > 1
+            ? h('div', { style: { ...S.row, gap: '8px', marginBottom: '4px' } },
+                h('button', {
+                  style: { ...S.btn, opacity: busy ? 0.5 : 1, fontWeight: 600 },
+                  disabled: Boolean(busy),
+                  onClick: runAll,
+                }, busy === ALL ? `正在依次搬运 ${plans.length} 篇…` : `全部执行（${plans.length} 篇）`),
+                h('span', { style: { ...S.muted, fontSize: '11.5px' } }, '一篇一篇顺着来，失败不中断'))
+            : null,
+
           plans.length
             ? plans.map((plan, i) => {
                 const res = results[plan.file];
+                const thisBusy = busy === plan.file || busy === ALL;
                 return h('div', {
                   key: plan.file,
                   style: { padding: '9px 0', borderTop: i ? `1px solid ${dim(10)}` : 'none' },
@@ -321,10 +365,10 @@ window.__ModuleLoader__.load({
                       `${fmtBytes(plan.bytes)} → ${fmtBytes(plan.keptBytes)}`),
                     h('span', { style: S.chip('hit') }, `省 ${fmtBytes(plan.savedBytes)}`),
                     h('button', {
-                      style: { ...S.btn, opacity: busy === plan.file ? 0.5 : 1 },
-                      disabled: busy === plan.file,
+                      style: { ...S.btn, opacity: thisBusy ? 0.5 : 1 },
+                      disabled: thisBusy,
                       onClick: () => runArchive(plan.file),
-                    }, busy === plan.file ? '搬运中…' : '执行归档')),
+                    }, busy === plan.file ? '搬运中…' : busy === ALL ? '排队中' : '执行归档')),
                   h('div', { style: { ...S.muted, fontSize: '11.5px', marginTop: '3px' } },
                     `${plan.batchCount} 个批次章节，搬走 ${plan.freshCount} 个 → `,
                     (plan.historyFiles || []).map((hf) => `${hf.file}（${hf.batchCount} 批 / ${fmtBytes(hf.bytes)}）`).join('、'),
@@ -335,6 +379,17 @@ window.__ModuleLoader__.load({
               })
             : h('div', { style: S.muted },
                 '没有超标的笔记。触发线：单篇 >64KB 或 >20 个章节，且至少 3 个可搬的批次章节。'),
+
+          bulk
+            ? h('div', {
+                style: { color: bulk.ok ? '#2e9e63' : '#c2803a', fontSize: '11.5px', marginTop: '8px' },
+              }, bulk.text)
+            : null,
+
+          h('div', { style: { ...S.muted, fontSize: '11px', marginTop: '10px', paddingTop: '8px', borderTop: `1px solid ${dim(10)}` } },
+            state.config?.autoArchive
+              ? '自动归档已开启：每次写完记忆库后自动搬运，另有 10 分钟一次的兜底检查，每一步都进写入审计。'
+              : '自动归档当前关闭——每次都要在这里点一下「执行归档」。想改成后台自动做，在插件配置里加 autoArchive: true。'),
 
           archSkipped.length
             ? h('div', { style: { ...S.muted, fontSize: '11px', marginTop: '10px', paddingTop: '8px', borderTop: `1px solid ${dim(10)}` } },
@@ -348,6 +403,7 @@ window.__ModuleLoader__.load({
           `maxPointers=${state.config?.maxPointers} maxChars=${state.config?.maxChars} ` +
           `minScore=${state.config?.minScore} nudge=${state.config?.nudge ? 'on' : 'off'} ` +
           `guardWrites=${state.config?.guardWrites ? 'on' : 'off'} ` +
+          `autoArchive=${state.config?.autoArchive ? 'on' : 'off'} ` +
           `enabled=${state.config?.enabled ? 'on' : 'off'}`));
     }
 
