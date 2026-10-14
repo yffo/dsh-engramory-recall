@@ -132,7 +132,7 @@ test('含待办字样且长期没更新 → info；刚更新过则不报', (t) =
 test('同一 basename 出现在两个真目录 → info', (t) => {
   const dir = makeStore({
     'reference-paths.md': note('reference-paths', {
-      body: `旧：${homedir()}/Documents/Meitu/my-tool\n新：${homedir()}/yffto/my-tool`,
+      body: `旧：${homedir()}/Documents/Acme/my-tool\n新：${homedir()}/proj-x/my-tool`,
     }),
   });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -147,7 +147,7 @@ test('path-conflict 也认 Linux 的 /home 前缀（曾写死 /Users/ 导致整�
   // 不报错也不告警，看起来像"没问题"。修好之后补这条卡住它。
   const dir = makeStore({
     'reference-paths.md': note('reference-paths', {
-      body: '旧：/home/runner/Documents/Meitu/my-tool\n新：/home/runner/yffto/my-tool',
+      body: '旧：/home/runner/Documents/Acme/my-tool\n新：/home/runner/proj-x/my-tool',
     }),
   });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -159,7 +159,7 @@ test('path-conflict 也认 Linux 的 /home 前缀（曾写死 /Users/ 导致整�
 test('path-conflict 的三条防误报：~ 归一、省略号、一层隐藏目录', (t) => {
   const dir = makeStore({
     // 同一处的两种写法——必须当成一个位置
-    'reference-same.md': note('reference-same', { body: 'A: ~/yffto/proj-x\nB: ' + homedir() + '/yffto/proj-x' }),
+    'reference-same.md': note('reference-same', { body: 'A: ~/proj-x/sub\nB: ' + homedir() + '/proj-x/sub' }),
     // 省略号是缩写，不是另一个位置
     'reference-ellipsis.md': note('reference-ellipsis', { body: '~/Library/Caches/ms-playwright/shell-1208/chrome-shell\n~/Library/Caches/ms-playwright/.../chrome-shell' }),
     // 各工具自己的配置位

@@ -28,7 +28,7 @@ export const NOTE_FILE_RE = /^(user|feedback|project|reference)-[a-z0-9][a-z0-9-
 export const INDEX_FILE = 'MEMORY.md';
 
 /**
- * 单篇笔记上限。库里 `project-by-yffto-cicd.md` 267KB 是历史包袱——一条一主题才是纪律，
+ * 单篇笔记上限。库里那种 267KB 的追加式日志是历史包袱——一条一主题才是纪律，
  * 超过这个体积基本可以断定是在往一篇里堆时间线。
  */
 export const MAX_NOTE_BYTES = 100 * 1024;

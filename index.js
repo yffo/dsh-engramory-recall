@@ -143,6 +143,26 @@ const DEFAULTS = {
    * 万一注册表对重名是抛错而非覆盖，不会因为一个技能名把宿主拖崩。
    */
   registerSkill: true,
+  /**
+   * ── 语义增强（唯一的「会发模型请求」开关，默认全关）──────────────────────
+   *
+   * 招牌是「不装、不配、不显式开启时一个模型请求都不发」。这条承诺靠三层锁着：
+   *   1. 两个开关默认 false；
+   *   2. 关着时**连工具都不注册**，模型看不到这两个入口；
+   *   3. 开着时也只在工具被调用那一刻 `await import('./llm.js')` —— 静态依赖图里没有它，
+   *      自动召回、面板、体检、写入闸门全部不在任何情况下发请求。
+   *
+   * 为什么不做成「面板刷新时顺便查一遍」：面板是轮询的，那样等于按秒烧 token，
+   * 而且体检结果会随模型心情变化，不可复现。模型显式调工具才是对的时机。
+   */
+  semanticConflicts: false,
+  semanticSummary: false,
+  /** 调用路由：留空则用宿主的 agentDefaultModel；两个都给才生效（半截路由会被忽略）。 */
+  llmProvider: '',
+  llmModel: '',
+  llmReasoningEffort: '',
+  /** 单次模型调用的超时预算（毫秒）。 */
+  llmTimeoutMs: 30000,
 };
 
 /** 只在用户句子里出现明确的「长期记住」意图时才追加一行提示（默认开）。 */
@@ -323,6 +343,121 @@ export function apply(ctx, config = {}) {
       };
     },
   });
+
+  // ── 语义增强：可选、显式、按次（默认两个工具都不注册）────────────────────
+  // 关着的时候模型连这两个工具名都看不到，也就不存在「误触发一次模型调用」的可能。
+  // llm.js 用动态 import：静态依赖图里没有它，自动召回/面板/体检/写入闸门四条路径
+  // 在任何情况下都不可能顺带发请求 —— 招牌那句承诺是结构上成立的，不是靠自觉。
+  const llmRuntime = () => ({
+    ctx,
+    config: {
+      provider: settings.llmProvider,
+      model: settings.llmModel,
+      reasoningEffort: settings.llmReasoningEffort,
+      timeoutMs: Number(settings.llmTimeoutMs) || 30000,
+    },
+  });
+
+  if (settings.semanticConflicts === true) {
+    ctx.tools.register({
+      name: 'engramory_conflicts',
+      description:
+        'Ask the harness model to check the local Engramory store for notes that contradict each other ' +
+        '(semantic conflicts that the static doctor cannot see). Reads at most 80 notes per call and ' +
+        'reports only pairs the model names with real filenames. It costs model tokens — call it when ' +
+        'the user asks whether the memory store is self-consistent, not on every turn.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', description: 'Check only the first N notes (default: all, capped at 80).' },
+        },
+        additionalProperties: false,
+      },
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            store: { type: 'string' },
+            notes: { type: 'integer' },
+            findings: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  severity: { type: 'string' },
+                  code: { type: 'string' },
+                  message: { type: 'string' },
+                  files: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['severity', 'code', 'message', 'files'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['store', 'notes', 'findings'],
+          additionalProperties: false,
+        },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      async execute(args) {
+        const storePath = String(settings.storePath || '').trim();
+        if (!storePath) return { store: storePath, notes: 0, findings: [] };
+        const docs = readDocs(storePath);
+        const limit = Math.max(Number(args?.limit) || docs.length, 1);
+        const picked = docs.slice(0, limit);
+        const { detectConflicts } = await import('./llm.js');
+        const findings = await detectConflicts(llmRuntime(), picked);
+        return { store: storePath, notes: picked.length, findings };
+      },
+    });
+  }
+
+  if (settings.semanticSummary === true) {
+    ctx.tools.register({
+      name: 'engramory_summarize',
+      description:
+        'Summarize one note of the local Engramory store with the harness model (long notes get compressed, ' +
+        'keeping decisions, reasons and concrete details). It costs model tokens and the note body is sent ' +
+        'to the model — call it deliberately, never as a background step.',
+      parameters: {
+        type: 'object',
+        properties: { file: { type: 'string', description: 'Note filename as returned by engramory_search.' } },
+        required: ['file'],
+        additionalProperties: false,
+      },
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            file: { type: 'string' },
+            summary: { type: 'string' },
+            model: { type: 'string' },
+            ms: { type: 'integer' },
+            error: { type: 'string' },
+          },
+          required: ['file', 'summary', 'model', 'ms'],
+          additionalProperties: false,
+        },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      async execute(args) {
+        const file = String(args?.file ?? '').trim();
+        const storePath = String(settings.storePath || '').trim();
+        if (!storePath || !file) return { file, summary: '', model: '', ms: 0, error: '需要 storePath 配置与非空 file' };
+        const docs = readDocs(storePath);
+        const note = docs.find((doc) => doc.id === file || doc.file === file);
+        if (!note) return { file, summary: '', model: '', ms: 0, error: `库里没有 ${file}` };
+        const { summarizeNote } = await import('./llm.js');
+        try {
+          const { summary, route, ms } = await summarizeNote(llmRuntime(), note);
+          return { file, summary, model: route.model, ms };
+        } catch (error) {
+          // 失败就把话说明白：这是给人按的入口，返回空摘要等于骗人。
+          return { file, summary: '', model: '', ms: 0, error: `${error?.message ?? error}${error?.code ? ` [${error.code}]` : ''}` };
+        }
+      },
+    });
+  }
 
   // ── 写入闸门：fail-closed 的「编外复核」 ────────────────────────────────
   // 宿主流水线：tools/pre-execute（可扩展门禁）→ ctx.tools.guard（单调守卫，本处）
@@ -761,6 +896,9 @@ export function apply(ctx, config = {}) {
         rotationPenalty: Number(settings.rotationPenalty ?? 0),
         dedupeInjection: settings.dedupeInjection !== false,
         queryChars: Number(settings.queryChars) || 400,
+        // 面板要能一眼看出「这个装法会不会发模型请求」——两个开关都关着就是绝对不发。
+        semanticConflicts: settings.semanticConflicts === true,
+        semanticSummary: settings.semanticSummary === true,
       },
       totals: {
         notes: notes.length,

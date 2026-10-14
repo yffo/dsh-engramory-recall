@@ -22,3 +22,7 @@ MEMORY.md
 .engramory-audit.jsonl
 .engramory-audit.jsonl.*
 scripts/.probe-baseline.json
+
+# 基准临时产物
+bench/.tmp/
+bench/.bench-result.json

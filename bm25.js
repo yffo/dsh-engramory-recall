@@ -83,6 +83,34 @@ const EXTRA_WEIGHT = 0.5;
  */
 const TITLE_EXTRA = 24;
 /**
+ * 标题重复是否**也**计入长度归一（默认 false = 计入，即当前实现）。
+ *
+ * 提出这个口子的理由（2026-10-15 合成基准暴露）：TITLE_EXTRA=24 会把每篇的长度
+ * 撑大 24×标题词数×桶数，而 BM25 的分母 `tf + K1·(1-B+B·len/avgLen)` 直接用这个 len ——
+ * 也就是说「标题权重」实际上是通过**惩罚长度**间接起作用的，标题命中本身的贡献早就饱和了
+ * （tf 大时 `tf(K1+1)/(tf+…)` 上限就是 K1+1）。合成语料上把它从长度里摘出去（true）
+ * 与 TITLE_EXTRA=0 谁更好，是「字段加权该不该污染长度归一」这个问题的直接实验。
+ *
+ * 真库对照 C（唯一对标题权重中立的构造）在 false 时选了 24，所以这个开关默认关；
+ * 两个语料上的实测对比见 README「召回基准」一节与 bench/。
+ */
+const TITLE_LEN_EXCLUDED = false;
+/**
+ * 命中同义键时，把这个键**自身的字面碎片**降为弱证据（2026-10-15 合成基准发现）。
+ *
+ * 现象：桥组查询 `打包 崩了`（笔记正文里只有 build / crash，一个汉字都没有）命中率只有 27%。
+ * 原因不在桥，而在查询自己的碎片：「了」「打」「包」这些字在**别的**笔记的随手记录里到处都是，
+ * 它们按基础权重（1.0）计分，而真正桥到的 build/crash 只有 0.5 —— 噪声把桥压住了。
+ *
+ * 直觉上该把这些碎片直接剔掉（那条目标笔记里本来就没这些字），但**剔掉会误伤**：
+ * `代理节点与部署` 里的 `代理` 既是同义键、也是笔记正文里的原词，剔掉它反而丢掉了真证据
+ * （实测直接把 `test/recall.test.mjs` 的注入预算用例打红）。所以这里是**降权而不是剔除**：
+ * 一个词既然被表认定为口语说法，它的字面碎片只算弱证据，真正桥到的技术词才是强证据。
+ */
+const BRIDGED_FRAGMENT_WEIGHT = 0.5;
+/** 桥到的词项权重（见 BRIDGED_FRAGMENT_WEIGHT）。 */
+const BRIDGE_WEIGHT = 1;
+/**
  * 整句子串命中奖励：文档里逐字出现了整条查询时加的分。
  *
  * 出处：灵枢 `dsh-memory`（`lib/index.js:133`，它加 2 分）。
@@ -321,6 +349,17 @@ export function queryTerms(text) {
   return [...new Set(tokenize(text))];
 }
 
+/** 查询里命中的同义键（按原文字面，大小写不敏感）。 */
+export function matchedSynonymKeys(text) {
+  const s = String(text ?? '').toLowerCase();
+  const out = [];
+  for (const word of SYNONYMS.keys()) {
+    const key = String(word).toLowerCase();
+    if (key && s.includes(key)) out.push(key);
+  }
+  return out;
+}
+
 /** 按原文字面捞同义词；返回已去重的扩展词项（不含查询自身的词）。 */
 export function expandQuery(text) {
   const s = String(text ?? '').toLowerCase();
@@ -362,6 +401,8 @@ export function buildIndex(docs, options = {}) {
     // 没写 aliases 的笔记不受影响。
     const aliases = Array.isArray(doc.aliases) ? doc.aliases.filter(Boolean).join(' ') : '';
     const tokens = tokenize(aliases ? `${text}\n${aliases} ${aliases}` : text);
+    // 正文口径的长度：不含后面的标题重复（见 TITLE_LEN_EXCLUDED）。
+    const baseLen = tokens.length;
     // 字段加权：标题/描述里的词额外多计几遍（见 TITLE_EXTRA）。默认关闭时整段不执行。
     if (TITLE_EXTRA > 0) {
       const head = [doc.title, doc.description].filter(Boolean).join('\n');
@@ -372,7 +413,7 @@ export function buildIndex(docs, options = {}) {
     return {
       ...doc,
       tf,
-      len: tokens.length || 1,
+      len: (TITLE_LEN_EXCLUDED ? baseLen : tokens.length) || 1,
       // 整句子串命中用的小写全文（见 PHRASE_BONUS）。关闭时不建，省一份内存。
       plain: PHRASE_BONUS > 0 ? text.toLowerCase() : '',
       decay: decayFactor(doc.mtimeMs, halfLifeDays, now),
@@ -394,6 +435,10 @@ export function buildIndex(docs, options = {}) {
  * @returns {Array<{id, score, snippet, matched}>}
  */
 export function search(index, query, limit = 5) {
+  // 命中同义键时，这个键自身的字面碎片降权（见 BRIDGED_FRAGMENT_WEIGHT）。
+  const bridged = matchedSynonymKeys(query);
+  const fragments = new Set();
+  for (const key of bridged) for (const term of tokenize(key)) fragments.add(term);
   const base = queryTerms(query);
   const extras = expandQuery(query);
   if (!base.length && !extras.length) return [];
@@ -403,9 +448,11 @@ export function search(index, query, limit = 5) {
   const needle = PHRASE_BONUS > 0 ? String(query ?? '').trim().toLowerCase() : '';
   const usePhrase = needle.length >= 2;
 
+  // 权重：普通词项 1；同义键自己的碎片 0.5；桥到的技术词 = BRIDGE_WEIGHT（没有键命中时退回 EXTRA_WEIGHT）。
+  const bridgeWeight = bridged.length ? BRIDGE_WEIGHT : EXTRA_WEIGHT;
   const weights = new Map();
-  for (const term of base) weights.set(term, 1);
-  for (const term of extras) if (!weights.has(term)) weights.set(term, EXTRA_WEIGHT);
+  for (const term of base) weights.set(term, fragments.has(term) ? BRIDGED_FRAGMENT_WEIGHT : 1);
+  for (const term of extras) if (!weights.has(term)) weights.set(term, bridgeWeight);
   const terms = [...weights.keys()];
 
   const { docs, avgLen } = index;
