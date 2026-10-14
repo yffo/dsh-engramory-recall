@@ -1,7 +1,7 @@
 {
   "说明": "LongMemEval-S（cleaned）逐题检索结果。查询 = 问题原文，一篇笔记 = 一个 session，命中 = gold session 进 top-k。本引擎默认不读日期。",
   "生成命令": "node bench/longmemeval.mjs --data bench/.tmp/longmemeval_s_cleaned.json --json",
-  "引擎": "dsh-engramory-recall（仓库内 bm25.js，未调参）",
+  "引擎": "dsh-engramory-recall（仓库内 bm25.js，未调参）（0.7.0 起长度归一 B=0.4）",
   "k": 5,
   "数据集": {
     "file": "longmemeval_s_cleaned.json",
@@ -11,28 +11,28 @@
   },
   "总表": {
     "n": 500,
-    "recallAny1": 0.878,
-    "recallAnyK": 0.974,
-    "recallAny10": 0.984,
-    "recallK": 0.915166666666667,
-    "mrr": 0.9155190476190475
+    "recallAny1": 0.884,
+    "recallAnyK": 0.982,
+    "recallAny10": 0.988,
+    "recallK": 0.9252000000000002,
+    "mrr": 0.9201999999999998
   },
   "分题型": {
     "knowledge-update": {
       "n": 78,
-      "recallAny1": 0.9743589743589743,
+      "recallAny1": 0.9871794871794872,
       "recallAnyK": 1,
       "recallAny10": 1,
-      "recallK": 0.9871794871794872,
-      "mrr": 0.9871794871794872
+      "recallK": 0.9935897435897436,
+      "mrr": 0.9935897435897436
     },
     "multi-session": {
       "n": 133,
       "recallAny1": 0.8796992481203008,
-      "recallAnyK": 0.9699248120300752,
+      "recallAnyK": 0.9849624060150376,
       "recallAny10": 0.9849624060150376,
-      "recallK": 0.8525062656641603,
-      "mrr": 0.9187969924812031
+      "recallK": 0.8596491228070176,
+      "mrr": 0.9199248120300753
     },
     "single-session-assistant": {
       "n": 56,
@@ -44,11 +44,11 @@
     },
     "single-session-preference": {
       "n": 30,
-      "recallAny1": 0.4,
-      "recallAnyK": 0.8666666666666667,
+      "recallAny1": 0.4666666666666667,
+      "recallAnyK": 0.9,
       "recallAny10": 0.9,
-      "recallK": 0.8666666666666667,
-      "mrr": 0.5827777777777777
+      "recallK": 0.9,
+      "mrr": 0.6272222222222221
     },
     "single-session-user": {
       "n": 70,
@@ -56,15 +56,15 @@
       "recallAnyK": 1,
       "recallAny10": 1,
       "recallK": 1,
-      "mrr": 0.9497619047619048
+      "mrr": 0.9504761904761905
     },
     "temporal-reasoning": {
       "n": 133,
       "recallAny1": 0.849624060150376,
-      "recallAnyK": 0.9624060150375939,
-      "recallAny10": 0.9774436090225563,
-      "recallK": 0.8661654135338347,
-      "mrr": 0.8916756176154673
+      "recallAnyK": 0.9699248120300752,
+      "recallAny10": 0.9924812030075187,
+      "recallK": 0.8854636591478698,
+      "mrr": 0.8939849624060151
     }
   },
   "逐题": [
@@ -825,7 +825,7 @@
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.2
+      "rr": 0.25
     },
     {
       "question_id": "f4f1d8a4_abs",
@@ -855,10 +855,10 @@
       "sessions": 47,
       "gold": 4,
       "hit1": false,
-      "hitK": false,
+      "hitK": true,
       "hit10": true,
-      "recallK": 0,
-      "rr": 0.16666666666666666
+      "recallK": 0.25,
+      "rr": 0.2
     },
     {
       "question_id": "gpt4_59c863d7",
@@ -1056,7 +1056,7 @@
       "hitK": true,
       "hit10": true,
       "recallK": 0.25,
-      "rr": 0.25
+      "rr": 0.3333333333333333
     },
     {
       "question_id": "80ec1f4f",
@@ -1275,7 +1275,7 @@
       "hit1": true,
       "hitK": true,
       "hit10": true,
-      "recallK": 0.4,
+      "recallK": 0.6,
       "rr": 1
     },
     {
@@ -1525,11 +1525,11 @@
       "question_type": "single-session-preference",
       "sessions": 50,
       "gold": 1,
-      "hit1": false,
+      "hit1": true,
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.5
+      "rr": 1
     },
     {
       "question_id": "06878be2",
@@ -1540,7 +1540,7 @@
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.25
+      "rr": 0.5
     },
     {
       "question_id": "75832dbd",
@@ -1548,10 +1548,10 @@
       "sessions": 48,
       "gold": 1,
       "hit1": false,
-      "hitK": false,
+      "hitK": true,
       "hit10": true,
-      "recallK": 0,
-      "rr": 0.16666666666666666
+      "recallK": 1,
+      "rr": 0.25
     },
     {
       "question_id": "0edc2aef",
@@ -1723,11 +1723,11 @@
       "question_type": "single-session-preference",
       "sessions": 53,
       "gold": 1,
-      "hit1": false,
+      "hit1": true,
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.5
+      "rr": 1
     },
     {
       "question_id": "75f70248",
@@ -1856,10 +1856,10 @@
       "sessions": 49,
       "gold": 2,
       "hit1": false,
-      "hitK": false,
+      "hitK": true,
       "hit10": true,
-      "recallK": 0,
-      "rr": 0.16666666666666666
+      "recallK": 0.5,
+      "rr": 0.2
     },
     {
       "question_id": "2311e44b",
@@ -2881,7 +2881,7 @@
       "hit1": true,
       "hitK": true,
       "hit10": true,
-      "recallK": 0.5,
+      "recallK": 0.6666666666666666,
       "rr": 1
     },
     {
@@ -3242,10 +3242,10 @@
       "sessions": 51,
       "gold": 1,
       "hit1": false,
-      "hitK": false,
+      "hitK": true,
       "hit10": true,
-      "recallK": 0,
-      "rr": 0.14285714285714285
+      "recallK": 1,
+      "rr": 0.25
     },
     {
       "question_id": "b46e15ee",
@@ -3266,7 +3266,7 @@
       "hit1": false,
       "hitK": true,
       "hit10": true,
-      "recallK": 0.4,
+      "recallK": 0.6,
       "rr": 0.5
     },
     {
@@ -3320,9 +3320,9 @@
       "gold": 2,
       "hit1": false,
       "hitK": false,
-      "hit10": false,
+      "hit10": true,
       "recallK": 0,
-      "rr": 0
+      "rr": 0.1
     },
     {
       "question_id": "gpt4_468eb064",
@@ -3351,11 +3351,11 @@
       "question_type": "temporal-reasoning",
       "sessions": 53,
       "gold": 2,
-      "hit1": false,
+      "hit1": true,
       "hitK": true,
       "hit10": true,
       "recallK": 0.5,
-      "rr": 0.5
+      "rr": 1
     },
     {
       "question_id": "eac54add",
@@ -3364,9 +3364,9 @@
       "gold": 2,
       "hit1": false,
       "hitK": false,
-      "hit10": false,
+      "hit10": true,
       "recallK": 0,
-      "rr": 0
+      "rr": 0.1
     },
     {
       "question_id": "4dfccbf8",
@@ -3552,7 +3552,7 @@
       "hit1": true,
       "hitK": true,
       "hit10": true,
-      "recallK": 0.8,
+      "recallK": 1,
       "rr": 1
     },
     {
@@ -3992,7 +3992,7 @@
       "hit1": true,
       "hitK": true,
       "hit10": true,
-      "recallK": 0.5,
+      "recallK": 1,
       "rr": 1
     },
     {
@@ -4088,11 +4088,11 @@
       "question_type": "temporal-reasoning",
       "sessions": 49,
       "gold": 2,
-      "hit1": true,
+      "hit1": false,
       "hitK": true,
       "hit10": true,
-      "recallK": 0.5,
-      "rr": 1
+      "recallK": 1,
+      "rr": 0.5
     },
     {
       "question_id": "6a1eabeb",
@@ -4762,7 +4762,7 @@
       "hit1": false,
       "hitK": true,
       "hit10": true,
-      "recallK": 0.5,
+      "recallK": 1,
       "rr": 0.5
     },
     {
@@ -4792,11 +4792,11 @@
       "question_type": "knowledge-update",
       "sessions": 48,
       "gold": 2,
-      "hit1": false,
+      "hit1": true,
       "hitK": true,
       "hit10": true,
       "recallK": 1,
-      "rr": 0.5
+      "rr": 1
     },
     {
       "question_id": "ba61f0b9",
