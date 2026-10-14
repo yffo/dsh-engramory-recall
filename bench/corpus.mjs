@@ -44,13 +44,13 @@ export const DOMAINS = [
 export const EVENTS = [
   { key: 'crash', zh: '进程退出', colloquial: '崩了', en: 'crash', symptom: '日志末尾只有一行栈，退出码 1', symptomEn: 'the process exits with code 1 and a single stack line', signal: '退出码', guard: '退出码断言' },
   { key: 'slow', zh: '响应变慢', colloquial: '慢得没法用', en: 'latency', symptom: 'P95 从 200ms 涨到 4s', symptomEn: 'P95 climbs from 200ms to 4s', signal: '耗时直方图', guard: '耗时上限' },
-  { key: 'wrong', zh: '结果不对', colloquial: '数算错了', en: 'wrong-result', symptom: '同一输入两次跑出不同结果', symptomEn: 'the same input yields two different results', signal: '校验和', guard: '结果快照' },
-  { key: 'install', zh: '安装失败', colloquial: '装不上', en: 'install-failed', symptom: '报 peer dependency 冲突', symptomEn: 'a peer dependency conflict is reported', signal: '安装日志', guard: '安装冒烟' },
-  { key: 'loss', zh: '数据丢失', colloquial: '东西没了', en: 'data-loss', symptom: '重启后记录少了一半', symptomEn: 'half the records are gone after restart', signal: '行数对账', guard: '行数对账' },
+  { key: 'wrong', zh: '结果不对', colloquial: '数算错了', en: 'wrong result', symptom: '同一输入两次跑出不同结果', symptomEn: 'the same input yields two different results', signal: '校验和', guard: '结果快照' },
+  { key: 'install', zh: '安装失败', colloquial: '装不上', en: 'install failed', symptom: '报 peer dependency 冲突', symptomEn: 'a peer dependency conflict is reported', signal: '安装日志', guard: '安装冒烟' },
+  { key: 'loss', zh: '数据丢失', colloquial: '东西没了', en: 'data loss', symptom: '重启后记录少了一半', symptomEn: 'half the records are gone after restart', signal: '行数对账', guard: '行数对账' },
   { key: 'denied', zh: '权限被拒', colloquial: '没权限', en: 'forbidden', symptom: '返回 403 且审计里没有对应条目', symptomEn: 'a 403 with no matching audit entry', signal: '状态码', guard: '权限用例' },
   { key: 'leak', zh: '内存增长', colloquial: '内存一直涨', en: 'leak', symptom: '常驻集只涨不落', symptomEn: 'the resident set only grows', signal: '常驻集曲线', guard: '长跑用例' },
   { key: 'conflict', zh: '版本冲突', colloquial: '版本打架', en: 'conflict', symptom: '两个依赖要不同的大版本', symptomEn: 'two dependencies want different majors', signal: '解析树', guard: '版本区间检查' },
-  { key: 'silent', zh: '静默失效', colloquial: '悄悄不生效', en: 'silent-failure', symptom: '不报错但结果没有变化', symptomEn: 'no error, but the result never changes', signal: '结果差异', guard: '变更断言' },
+  { key: 'silent', zh: '静默失效', colloquial: '悄悄不生效', en: 'silent failure', symptom: '不报错但结果没有变化', symptomEn: 'no error, but the result never changes', signal: '结果差异', guard: '变更断言' },
   { key: 'duplicate', zh: '重复触发', colloquial: '跑了两次', en: 'duplicate', symptom: '同一条任务出现两遍', symptomEn: 'the same job runs twice', signal: '任务 id', guard: '幂等键' },
   { key: 'hang', zh: '无响应', colloquial: '卡住不动', en: 'hang', symptom: '进程还在但不再输出', symptomEn: 'the process lives but stops printing', signal: '心跳', guard: '心跳超时' },
   { key: 'config', zh: '配置不生效', colloquial: '改了没用', en: 'config', symptom: '配置文件被更高优先级的那份覆盖', symptomEn: 'a higher-priority file overrides the config', signal: '生效值', guard: '配置快照' },
@@ -85,6 +85,33 @@ const KEYS_FOR_VALUE = (() => {
 })();
 
 export const keysFor = (term) => KEYS_FOR_VALUE.get(String(term).toLowerCase()) ?? [];
+
+/**
+ * 按**词**查桥：桥值写成「install failed」这种多词短语时，笔记里在场的是 install 与 failed
+ * 两个词，而不是整串。只用整串查（keysFor）会把「桥得到」判成「桥不到」，覆盖率被低估。
+ * 判据必须对着**笔记里真实在场的词**，而不是对着我写进语料的那个字符串。
+ */
+const KEYS_FOR_TOKEN = (() => {
+  const map = new Map();
+  for (const [key, values] of SYNONYMS) {
+    for (const value of values) {
+      for (const token of String(value).toLowerCase().match(/[a-z0-9_]+/g) ?? []) {
+        if (!map.has(token)) map.set(token, []);
+        if (!map.get(token).includes(key)) map.get(token).push(key);
+      }
+    }
+  }
+  return map;
+})();
+
+/** 这个英文词（可以是多词短语）能被同义表的哪些键桥到。 */
+export function bridgesFor(term) {
+  const found = [];
+  for (const token of String(term).toLowerCase().match(/[a-z0-9_]+/g) ?? []) {
+    for (const key of KEYS_FOR_TOKEN.get(token) ?? []) if (!found.includes(key)) found.push(key);
+  }
+  return found;
+}
 
 /** 查询里的「内容单元」：中文逐字 + 拉丁词。用来判断这条查询在笔记里有没有字面落点。 */
 export function queryUnits(query) {
@@ -193,6 +220,8 @@ export function buildCorpus(options = {}) {
   const englishShare = options.englishShare ?? 0.3;
   const colloquialShare = options.colloquialShare ?? 0.2;
   const aliasShare = options.aliasShare ?? 0.2;
+  // 桥样本占比：够多才有统计意义，又不能把口语/中文两组挤没。
+  const bridgeShare = options.bridgeShare ?? 0.25;
   const rng = makeRng(seed);
   const docs = [];
   const queries = [];
@@ -203,11 +232,13 @@ export function buildCorpus(options = {}) {
     for (const e of EVENTS) {
       const idx = docs.length;
       const dice = rng();
-      // 桥样本：域词与事件词都在同义表里有桥键的单元格，强制写成英文术语体裁 ——
+      // 桥样本：域词与事件词都在同义表里有桥键的单元格 —— 抽一部分强制写成英文术语体裁，
       // 这样查询（口语键）与正文（技术词）两侧都能被构造校验，命中即为「表真的被用上了」。
-      const domainKeys = keysFor(d.en);
-      const eventKeys = keysFor(e.en);
-      const bridgeCandidate = domainKeys.length > 0 && eventKeys.length > 0;
+      // ⚠️ 必须抽样，不能「有桥就全用」：表扩容后 16/16、14/14 全覆盖，照单全收会把 224
+      // 篇全变成英文体裁，口语/中文两组直接消失 —— 那是语料设计被自己的覆盖率指标吃掉。
+      const domainKeys = bridgesFor(d.en);
+      const eventKeys = bridgesFor(e.en);
+      const bridgeCandidate = domainKeys.length > 0 && eventKeys.length > 0 && rng() < bridgeShare;
       const dialect = bridgeCandidate
         ? 'en'
         : dice < englishShare ? 'en' : dice < englishShare + colloquialShare ? 'colloquial' : 'zh';
@@ -300,6 +331,7 @@ export function buildCorpus(options = {}) {
 
   const dial = (name) => docs.filter((x) => x.dialect === name).length;
   const meta = {
+    bridgeShare,
     seed,
     notes: docs.length,
     queries: queries.length,
@@ -312,9 +344,9 @@ export function buildCorpus(options = {}) {
     bridgeDropped,
     // 同义表对这套词汇的覆盖率：表是按真实库长的，换一套词就未必有桥 —— 这个数字就是证据。
     domainWords: DOMAINS.length,
-    domainCovered: DOMAINS.filter((x) => keysFor(x.en).length > 0).length,
+    domainCovered: DOMAINS.filter((x) => bridgesFor(x.en).length > 0).length,
     eventWords: EVENTS.length,
-    eventCovered: EVENTS.filter((x) => keysFor(x.en).length > 0).length,
+    eventCovered: EVENTS.filter((x) => bridgesFor(x.en).length > 0).length,
   };
   return { docs, queries, meta };
 }

@@ -321,6 +321,85 @@ export const SYNONYMS = new Map(
     记忆库: ['engramory', 'memory', 'bm25'],
     召回: ['recall', 'search', 'bm25'],
     归档: ['archive', 'history'],
+
+    // ── 2026-10-15 第五波：通用技术口语 ────────────────────────────────
+    // 前面几波是**从这个库挖出来的**（专有名词、某个人的叫法），换一个库就大面积失效。
+    // 这一波换来源：只收**任何写中文技术笔记的人都会用的说法** ——「变慢」「装不上」
+    // 「退不回去」「改表结构」「打日志」…… 不依赖哪个库的词，别人装上也能命中。
+    // 判据没变：同一个概念的两种叫法，不是「相关的两件事」。宽词（请求/客户端/队列这些）
+    // 故意配上更专的伴词，靠 BRIDGE_WEIGHT 之外的其它词项兜住精度。
+    改表结构: ['migration', 'migrate', 'schema', 'ddl', 'alter'],
+    回填: ['backfill', 'migration'],
+    流水线: ['pipeline', 'ci', 'runner', 'workflow'],
+    自动检查: ['ci', 'pipeline', 'runner', 'lint'],
+    打日志: ['log', 'logging', 'logger'],
+    日志: ['log', 'logging'],
+    轮转: ['rotation', 'rotate', 'logrotate'],
+    抢锁: ['lock', 'mutex', 'locking'],
+    加锁: ['lock', 'mutex'],
+    死锁: ['deadlock', 'lock', 'mutex'],
+    并发: ['concurrency', 'concurrent', 'parallel', 'mutex'],
+    调接口: ['api', 'http', 'request', 'curl'],
+    请求: ['request', 'http', 'api', 'curl'],
+    重试: ['retry', 'backoff'],
+    退避: ['backoff', 'retry'],
+    限流: ['ratelimit', 'throttle', 'rate'],
+    发包: ['publish', 'npm', 'tarball'],
+    发版: ['release', 'publish', 'version', 'tag'],
+    版本号: ['version', 'semver', 'tag'],
+    自动点网页: ['automation', 'playwright', 'puppeteer', 'selector'],
+    自动化: ['automation', 'playwright', 'selenium'],
+    选择器: ['selector', 'xpath'],
+    找不着: ['search', 'ranking', 'recall', 'bm25'],
+    排序: ['ranking', 'rank', 'sort', 'bm25'],
+    命中率: ['recall', 'hit', 'precision'],
+    时区: ['timezone', 'utc'],
+    时间对不上: ['timezone', 'utc', 'offset'],
+    时间戳: ['timestamp', 'epoch', 'utc'],
+    升版本: ['upgrade', 'dependency', 'major', 'peer'],
+    升级依赖: ['upgrade', 'dependency', 'node_modules'],
+    版本打架: ['conflict', 'peer', 'dependency'],
+    大版本: ['major', 'semver', 'breaking'],
+    客户端: ['desktop', 'client', 'electron'],
+    打包产物: ['bundle', 'dist', 'artifact'],
+    镜像: ['image', 'docker', 'registry'],
+    容器: ['docker', 'container', 'pod'],
+    队列: ['queue', 'runner', 'wait'],
+    变慢: ['latency', 'slow', 'p95'],
+    响应慢: ['latency', 'slow', 'p95'],
+    慢得没法用: ['latency', 'slow', 'timeout'],
+    数算错了: ['wrong', 'mismatch', 'incorrect'],
+    结果不对: ['wrong', 'mismatch', 'incorrect'],
+    对不上: ['mismatch', 'wrong', 'inconsistent'],
+    安装失败: ['install', 'failed', 'npm'],
+    东西没了: ['loss', 'lost', 'missing', 'data loss'],
+    数据丢了: ['loss', 'lost', 'missing', 'data loss'],
+    内存一直涨: ['leak', 'rss', 'memory'],
+    泄漏: ['leak', 'leakage'],
+    版本冲突: ['conflict', 'peer', 'semver'],
+    悄悄不生效: ['silent', 'silently', 'quiet'],
+    静默失效: ['silent', 'silently', 'failure'],
+    没报错: ['silent', 'quiet'],
+    乱码: ['encoding', 'mojibake', 'utf8', 'gbk'],
+    编码: ['encoding', 'utf8', 'gbk', 'charset'],
+    退不回去: ['rollback', 'revert', 'undo'],
+    回滚: ['rollback', 'revert'],
+    跑两次: ['duplicate', 'idempotent', 'idempotency'],
+    重复触发: ['duplicate', 'idempotent'],
+    幂等: ['idempotent', 'idempotency', 'duplicate'],
+    卡住不动: ['hang', 'stuck'],
+    没响应: ['hang', 'timeout', 'unresponsive'],
+    心跳: ['heartbeat', 'ping', 'watchdog'],
+    配置不生效: ['config', 'override', 'precedence'],
+    改了没用: ['config', 'stale', 'cache'],
+    进程退出: ['crash', 'exit'],
+    退出码: ['exit', 'code', 'status'],
+    调用栈: ['stack', 'trace', 'traceback'],
+    权限被拒: ['forbidden', 'denied', '403'],
+    审计: ['audit', 'trail'],
+    落盘: ['disk', 'persist', 'write'],
+    常驻集: ['rss', 'memory', 'resident'],
+    排队: ['queue', 'runner', 'wait'],
   }),
 );
 
@@ -438,7 +517,7 @@ export function search(index, query, limit = 5) {
   // 命中同义键时，这个键自身的字面碎片降权（见 BRIDGED_FRAGMENT_WEIGHT）。
   const bridged = matchedSynonymKeys(query);
   const fragments = new Set();
-  for (const key of bridged) for (const term of tokenize(key)) fragments.add(term);
+  for (const key of bridged) for (const term of tokenize(key)) if (term !== key) fragments.add(term);
   const base = queryTerms(query);
   const extras = expandQuery(query);
   if (!base.length && !extras.length) return [];

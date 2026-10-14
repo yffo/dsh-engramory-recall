@@ -145,7 +145,7 @@ lines.push('三种查询风格：`verbatim` 抄笔记自己的写法（对照组
 lines.push('');
 lines.push('## 总览');
 lines.push('');
-lines.push('| 引擎 | 总 hit@1 | 总 hit@4 | verbatim | colloquial | keyword | MRR@4 | 672 条耗时 |');
+lines.push('| 引擎 | 总 hit@1 | 总 hit@4 | verbatim | colloquial | keyword | MRR@4 | ' + ours.rows.length + ' 条耗时 |');
 lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
 for (const run of [...runs, ...baselines]) {
   const s = run.result.byStyle;
@@ -203,7 +203,7 @@ lines.push('');
 lines.push(`⚠️ 口径边界：这组查询是从引擎自己读的那张表里长出来的，所以它证明的是「扩展管道通不通」，`);
 lines.push(`不是「表能不能猜中没见过的说法」。后者只有留出组那 ${bridgeHeld.length} 条能说一点。`);
 lines.push('');
-lines.push('### 这三种配置下，桥组的差别（同一批 11 条查询）');
+lines.push(`### 这三种配置下，桥组的差别（同一批 ${bridgeRows.length} 条查询）`);
 lines.push('');
 lines.push('| 配置 | 桥组 hit@1 | 总 hit@1 | 怎么读 |');
 lines.push('| --- | --- | --- | --- |');
@@ -213,15 +213,24 @@ for (const run of [runs[0], runs[4], runs[5]]) {
   lines.push(`| ${run.name} | ${pct(agg.hit1)} | ${pct(total)} | ${run.name === runs[0].name ? '本插件当前实现' : run.detail} |`);
 }
 lines.push('');
-lines.push('⚠️ 这里有一个**明确了取舍**：把桥打回 0.5（改动前的行为）总 hit@1 反而高 1 个点，而桥组掉到 90.9%（在修「碎片压桥」之前实测是 27.3%）。');
-lines.push('原因是合成语料里绝大多数查询**本来就有字面落点**，总命中率被它们主导；桥组那 11 条是唯一「字面为零」的场景，');
-lines.push('也正是「换一种说法还找得回来吗」的答案所在。所以这里选择牺牲 1 个点的总分，换桥真正接通 —— 而不是让桥静默失效。');
+{
+  const flat = runs.find((r) => r.detail && r.detail.includes('BRIDGE_WEIGHT 1 → 0.5'));
+  const flatBridge = flat ? groupAgg(flat.result.rows.filter((r) => r.query.style === 'bridge')).hit1 : 0;
+  const gap = flat ? (flat.result.hit1 - ours.hit1) * 100 : 0;
+  lines.push(`⚠️ 这里有一个**明确了取舍**：把桥打回 0.5（改动前的行为）总 hit@1 ${gap >= 0 ? '反而高' : '低'} ${Math.abs(gap).toFixed(1)} 个点，而桥组掉到 ${pct(flatBridge)}。`);
+  lines.push(`原因是合成语料里绝大多数查询**本来就有字面落点**，总命中率被它们主导；桥组那 ${bridgeRows.length} 条是唯一「字面为零」的场景，`);
+  lines.push('也正是「换一种说法还找得回来吗」的答案所在。所以这里选择牺牲一点总分，换桥真正接通 —— 而不是让桥静默失效。');
+  lines.push(`（历史值：修「碎片压桥」之前，同一组桥查询只有 27.3% —— 那次是查询自己的字面碎片按 1.0 计权，把 0.5 的桥压住了。）`);
+}
 lines.push('');
 lines.push('### 桥的供给面（这才是瓶颈）');
 lines.push('');
 const colloquialOnly = ours.rows.filter((r) => r.query.style === 'colloquial');
 const noLiteral = colloquialOnly.filter((r) => literalOverlap(r.query.q, docById.get(r.query.gold)) === 0);
-lines.push(`- 同义表覆盖：域词 **${meta.domainCovered}/${meta.domainWords}**、事件词 **${meta.eventCovered}/${meta.eventWords}** —— 表是照着真实库长的，换一套词汇就大面积没有桥。`);
+lines.push(`- 同义表覆盖：域词 **${meta.domainCovered}/${meta.domainWords}**、事件词 **${meta.eventCovered}/${meta.eventWords}**。`);
+lines.push(`  覆盖率有两层来源，口径必须分开说：前四波键是**从某个真实库挖出来的**（专有名词、个人叫法），换一套词汇就大面积失效；`);
+lines.push(`  第五波是**通用技术口语**（「变慢」「退不回去」「改表结构」这类任何写中文技术笔记的人都会用的说法），不依赖具体某个库。`);
+lines.push(`  所以这张表不是通用词典、也不是某个库的私货 —— 两半各自有适用的场景，覆盖率只说明「这一套词汇有没有桥」。`);
 lines.push(`- 构造桥样本时被丢弃 ${meta.bridgeDropped.length} 组：口语键里带的字面碎片在笔记里已经出现，够不上「纯桥」的资格（例如 ${meta.bridgeDropped.slice(0, 2).join('；')}）。`);
 lines.push(`- 口语风格的 ${colloquialOnly.length} 条查询里，字面重叠为 0 的只有 **${noLiteral.length}** 条 —— 也就是说这批「口语查询」绝大多数仍能靠字面碎片碰到笔记，真正需要跨说法/跨语言的只有那几条。`);
 lines.push('');
@@ -287,7 +296,7 @@ if (wantCheck) {
     console.error('并让 CHANGELOG 说清为什么 —— 数字不该在我们不知情的时候变。');
     process.exit(1);
   }
-  console.log(`\n✓ 基准数字全在容差内：${Object.keys(exp.metrics).length} 项指标 + ${Object.keys(exp.groups ?? {}).length} 个必满分分组。`);
+  console.log(`\n✓ 基准数字全在容差内：${Object.keys(exp.metrics).length} 项指标 + ${Object.keys(exp.groups ?? {}).length} 个分组（各自的容差写在 expectations.json 里）。`);
 }
 
 if (ours.hit1 + 1e-9 < bestBaseline.result.hit1) {
