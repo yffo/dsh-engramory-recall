@@ -685,6 +685,7 @@ Settings → Trusted Publisher → GitHub Actions 要填四个字段，一个都
 | `ENEEDAUTH need auth ... npm adduser` | npm 把 OIDC 交换的失败**全吞掉**（`lib/utils/oidc.js` 只写一行 verbose 就返回 undefined），所以「没绑定」和「字段不符」长得一模一样 | 看预检步的 `交换接口 HTTP …`（见下）；或给 publish 加 `--loglevel verbose`，日志里会出现 `Failed token exchange request with body message: …` |
 | `交换接口 HTTP 404` + `OIDC token exchange error - package not found` | 这个包在 npm 上**没有任何 Trusted Publisher 绑定**（注意它不说「没绑定」，说的是「包找不到」——registry 惯用的模糊话术） | 去 Settings → Trusted Publisher → GitHub Actions 绑上那四个字段 |
 | `交换接口 HTTP 401` + `OIDC token exchange error - unauthorized` | id-token 本身没拿到或被拒（`permissions: id-token: write` 缺失、或请求里带的是假 token） | 检查 workflow 的 `permissions` |
+| `交换接口 HTTP 201` + `{"token": …}` | **这就是成功** —— registry 用 `201 Created` 表示新建了一个临时 token（不是 200）。预检的判据是「回包里有没有 `token`」，不是 HTTP 码 | 什么都不用做，往后走 |
 
 工作流里那步「**预检 OIDC 交换**」就是为这张表服务的：它自己发一次与 `npm publish` 内部完全相同的
 交换请求（`POST /-/npm/v1/oidc/token/exchange/package/<name>`），把 registry 的原话打印出来，

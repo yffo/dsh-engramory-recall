@@ -105,8 +105,11 @@ jobs:
           status="$(curl -sS -o "$body" -w '%{http_code}' -X POST -H "Authorization: Bearer ${id_token}" \
             "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${name}")"
           echo "交换接口 HTTP ${status}"
+          # 判据是「回包里有没有 token」，不是 HTTP 码：成功是 **201 Created**（不是 200），
+          # 第一次写成 `!= 200` 就把一次成功判成了失败 —— 记在这里。
           node -e 'const fs=require("fs");const raw=fs.readFileSync(process.argv[1],"utf8").trim();let j;try{j=JSON.parse(raw)}catch{console.log("registry 的原始回复：",raw.slice(0,300)||"(空)");process.exit(0)}console.log("registry 说：",j.token?"拿到临时 token（绑定有效）":(j.message||JSON.stringify(j).slice(0,300)))' "$body"
-          if [ "$status" != "200" ]; then
+          got="$(node -e 'const fs=require("fs");const raw=fs.readFileSync(process.argv[1],"utf8").trim();let j=null;try{j=JSON.parse(raw)}catch{}process.stdout.write(j&&typeof j.token==="string"&&j.token?"yes":"no")' "$body")"
+          if [ "$got" != "yes" ]; then
             echo "::error::OIDC 交换没成（HTTP ${status}）—— 先去 npm 包 Settings → Trusted Publisher 绑定：user=yffo / repo=dsh-engramory-recall / workflow=release.yml / environment 留空"
             exit 1
           fi
