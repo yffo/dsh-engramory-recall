@@ -3,6 +3,18 @@
 本项目的所有重要变更都记在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.1] — 2026-10-15
+
+### 修复
+
+- **通过 `engramory-recall-mcp` 命令调用时服务器不回包**（0.8.0 的 bug）：npm 装出来的 bin 是
+  符号链接，Node 默认解析真实路径，于是「这个文件是被当程序跑的吗」那句
+  `import.meta.url === pathToFileURL(process.argv[1])` 比对为 false，进程安静地读 stdin、
+  永不回包 —— 用户只会看到「服务器没反应」，既不报错也不退出。
+  改为两边都取 `realpath` 再比。
+- `test/mcp.test.mjs` 补一条回归：把服务器软链成 `engramory-recall-mcp` 再起进程
+  （npm 的 bin 就是这个形状），确认 initialize 与检索都正常。
+
 ## [0.8.0] — 2026-10-15
 
 ### 新增

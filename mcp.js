@@ -16,11 +16,11 @@
  * 用法：`node mcp.js [--store <路径>]`，或者看 README 里各宿主的配置片段。
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { buildIndex, search } from './bm25.js';
 import { countLines, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES, measureIndex } from './index-guard.js';
@@ -371,7 +371,23 @@ export async function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * 「这个文件是被当程序跑的吗」不能只比 URL 字符串：npm 装出来的 bin 是个符号链接
+ * （`node_modules/.bin/engramory-recall-mcp`），Node 默认解析真实路径，
+ * `import.meta.url` 是真实路径、`process.argv[1]` 是链接路径 —— 一比就 false，
+ * 进程会安静地读 stdin 永不回包（0.8.0 就是这么坏的，用户只会看到「服务器没反应」）。
+ * 所以两边都取 realpath 再比。
+ */
+function isEntryPoint(entry) {
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return import.meta.url === pathToFileURL(entry).href;
+  }
+}
+
+if (isEntryPoint(process.argv[1])) {
   main().then(
     (code) => {
       process.exitCode = code;

@@ -4,7 +4,7 @@
 // 和「参数解析 / 退出码 / 只读边界」——那些只有真起进程才量得到。
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -58,8 +58,8 @@ function makeStore() {
   return dir;
 }
 
-function startServer(store) {
-  const child = spawn(process.execPath, [serverPath, '--store', store], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
+function startServer(store, entry = serverPath) {
+  const child = spawn(process.execPath, [entry, '--store', store], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
   const stderr = [];
   const stdoutFrames = [];
   createInterface({ input: child.stderr }).on('line', (line) => stderr.push(line));
@@ -280,4 +280,22 @@ test('MCP：日志只走 stderr；--print-config 与 --version 是纯文本', as
   const help = await run(['--help']);
   assert.equal(help.code, 0);
   assert.match(help.stdout, /ENGRAMORY_STORE/);
+});
+
+test('MCP：通过符号链接调用也要能起来（npm 的 bin 就是链接）', async () => {
+  const store = makeStore();
+  const binDir = mkdtempSync(join(tmpdir(), 'mcp-bin-'));
+  const link = join(binDir, 'engramory-recall-mcp');
+  symlinkSync(serverPath, link);
+  const server = startServer(store, link);
+  try {
+    const reply = await server.request('initialize', { protocolVersion: '2025-06-18' });
+    assert.equal(reply.result.serverInfo.name, 'dsh-engramory-recall');
+    const search = await server.request('tools/call', { name: 'engramory_search', arguments: { query: 'stdio' } });
+    assert.equal(search.result.isError, false);
+  } finally {
+    await server.close();
+    rmSync(store, { recursive: true, force: true });
+    rmSync(binDir, { recursive: true, force: true });
+  }
 });
