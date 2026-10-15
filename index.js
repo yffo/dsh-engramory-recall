@@ -185,12 +185,22 @@ const DEFAULTS = {
    */
   semanticPool: 50,
   /**
-   * 融合方式：`rrf`（默认）= 词面与提供方各一票，少赚不赔；`trust` = 提供方的顺序即最终顺序，
-   * 天花板最高（理想提供方 86.6% vs 词面 50.4%），但提供方不靠谱时会比纯词面更差 ——
-   * 实测：坏向量 trust 5.6% / rrf 19.4%（真库），真模型 trust 72.2% / rrf 86.1%。
-   * 结论：默认 rrf，量过端点再换 trust。见 semantic.js 文件头与 README「语义接缝」小节。
+   * 融合方式：
+   * · `rrf`（默认）= 词面与提供方各一票，少赚不赔，什么端点都拖不垮；
+   * · `guarded` = 把握度门槛（**量过端点的推荐档**）：只准提供方的头名插到最前，且必须已在输出窗口里
+   *   （只换次序、不换人 ⇒ hit@4 与纯词面恒等），分差还要过 `semanticGuard` × 池内分数跨度。
+   *   174 条真库卷子实测（池 10 / 窗口 4）：智谱 76.4%、本机 qwen3-embedding:0.6b 75.9%，都高于
+   *   rrf（74.7% / 68.4%）；垃圾提供方下它只赔「插错队」那一格（54.6% / 91.4%，rrf 是 34.5%/78.7%）；
+   * · `trust` = 提供方的顺序即最终顺序，天花板最高（理想提供方 86.6% vs 词面 50.4%），但提供方
+   *   不靠谱时比纯词面更差 —— 实测：坏向量 11.5%、两个真端点 58~60%，都不如 rrf。
+   * 结论：没量过端点用 rrf；量过、确认它确实更准，用 guarded。见 semantic.js 文件头与 README。
    */
   semanticFusion: 'rrf',
+  /**
+   * `guarded` 融合的把握度门槛：提供方的头名要赢词面头名「池内分数跨度的这个比例」才准插队。
+   * 实测（2026-10-15，174 条真库卷子、两个真端点）0.4~0.6 是一片平台，默认 0.5 —— 见 README「语义接缝」。
+   */
+  semanticGuard: 0.5,
   // 只有 `semanticProvider: 'host-embed'` 用得上：指定复用哪条 DSH 路由（留空 = 当前默认模型的路由）。
   semanticHostRoute: '',
 };
@@ -387,6 +397,7 @@ export function apply(ctx, config = {}) {
               timeoutMs: settings.semanticTimeoutMs,
               pool: settings.semanticPool,
               fusion: settings.semanticFusion,
+              guard: settings.semanticGuard,
               hostRoute: settings.semanticHostRoute,
             },
             runtime: llmRuntime(),

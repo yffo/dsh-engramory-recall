@@ -11,7 +11,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { buildIndex } from '../bm25.js';
-import { describeSeam, mergeRRF, resolveProviderPath, semanticSearch, withTimeout } from '../semantic.js';
+import { DEFAULT_GUARD, describeSeam, guardedOrder, mergeRRF, resolveProviderPath, semanticSearch, withTimeout } from '../semantic.js';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -329,4 +329,132 @@ test('语义接缝：池子宽度有默认值与上限（配置写坏了也只�
   } finally {
     c.cleanup();
   }
+});
+
+// —— 把握度门槛（guarded）：只准「窗口内部换次序」，不准「从池子里换人」 ——
+// 两条数字锚定 `npm run bench:guard`（174 条真库卷子、两个真端点）：
+//   · 有把握才动 + 不换人 ⇒ 比 rrf 多赚 1.7~7.5 个 hit@1，且 hit@4 与纯词面**恒等**（集合不变）；
+//   · 最坏情况（分数全换成假分数）rrf 掉到 34.5%/78.7%、trust 10.9%/37.9%，guarded 是 54.6%/91.4% ——
+//     它只赔「插错队」的那一格，不会把窗口里的人换掉。
+
+test('语义接缝：guarded 把窗口内的头名提到最前，集合一个不多一个不少', async () => {
+  const c = providerCase(
+    'guarded-promote',
+    `export const name = 'scored-reranker';
+     // c 的分差 0.8、池内跨度 0.85 → 过 0.5 的门槛
+     export function rerank() {
+       return [
+         { id: 'c.md', score: 0.9 },
+         { id: 'b.md', score: 0.2 },
+         { id: 'a.md', score: 0.1 },
+         { id: 'd.md', score: 0.05 },
+       ];
+     }
+    `,
+  );
+  const calls = [];
+  try {
+    const plain = await semanticSearch({ index, query: '随便', limit: 3, searchFn: scriptedSearch(calls), config: {} });
+    const guarded = await semanticSearch({
+      index,
+      query: '随便',
+      limit: 3,
+      searchFn: scriptedSearch(calls),
+      config: { provider: c.file, pool: 4, fusion: 'guarded', timeoutMs: 5000 },
+    });
+    assert.deepEqual(ids(plain), ['a.md', 'b.md', 'c.md'], '纯词面：a→b→c');
+    assert.deepEqual(ids(guarded), ['c.md', 'a.md', 'b.md'], 'guarded：c 有把握 → 提到最前，其余保持词面次序');
+    assert.deepEqual(
+      [...ids(guarded)].sort(),
+      [...ids(plain)].sort(),
+      '不换人：窗口里的集合与纯词面完全相同（这就是 hit@4 与词面恒等的由来）',
+    );
+    assert.equal(guarded.fusion, 'guarded');
+    assert.equal(guarded.promoted, true);
+    assert.equal(guarded.guardReason, 'promoted');
+    assert.equal(guarded.guard, DEFAULT_GUARD);
+    assert.match(guarded.message, /把握/);
+  } finally {
+    c.cleanup();
+  }
+});
+
+test('语义接缝：guarded 的三种「不动」（分差不够 / 头名在窗口外 / 提供方没给分）', async () => {
+  const cases = [
+    {
+      name: 'guarded-lowmargin',
+      body: `export const name = 'wishy-washy';
+        // 分差 0.05，跨度 0.25 → 过不了 0.5 的门槛
+        export function rerank() {
+          return [
+            { id: 'c.md', score: 0.25 },
+            { id: 'a.md', score: 0.2 },
+            { id: 'b.md', score: 0.1 },
+            { id: 'd.md', score: 0.0 },
+          ];
+        }`,
+      limit: 3,
+      reason: 'low-margin',
+      why: '分差不够就没把握：保持词面顺序',
+    },
+    {
+      name: 'guarded-outside',
+      body: `export const name = 'outsider-lover';
+        // d 的分差很大，但它不在 limit=2 的窗口里 —— 从池子里换人正是 hit@4 塌方的来源
+        export function rerank() {
+          return [
+            { id: 'd.md', score: 0.9 },
+            { id: 'a.md', score: 0.1 },
+            { id: 'b.md', score: 0.2 },
+            { id: 'c.md', score: 0.0 },
+          ];
+        }`,
+      limit: 2,
+      reason: 'out-of-window',
+      why: '窗口外的人再高分也不换人',
+    },
+    {
+      name: 'guarded-noscores',
+      body: `export const name = 'bare-ids';
+        export function rerank() { return ['c.md', 'a.md', 'b.md']; }`,
+      limit: 3,
+      reason: 'no-scores',
+      why: '只给文件名不给分 → 没有把握可言，不动',
+    },
+  ];
+  for (const [i, item] of cases.entries()) {
+    const c = providerCase(item.name, item.body);
+    try {
+      const calls = [];
+      const result = await semanticSearch({
+        index,
+        query: '随便',
+        limit: item.limit,
+        searchFn: scriptedSearch(calls),
+        config: { provider: c.file, pool: 4, fusion: 'guarded', timeoutMs: 5000 },
+      });
+      assert.deepEqual(ids(result), POOL_ORDER.slice(0, item.limit), `${item.why}（用例 ${i + 1}）`);
+      assert.equal(result.promoted, false, `${item.why}：promoted 必须是 false`);
+      assert.equal(result.guardReason, item.reason, `${item.why}：原因要如实报出来（便于排查提供方）`);
+      assert.equal(result.used, true, '提供方确实被问过 —— used 说的是「接缝跑没跑」，不是「顺序变没变」');
+    } finally {
+      c.cleanup();
+    }
+  }
+});
+
+test('语义接缝：guarded 的门槛比例可调，写坏的值回默认', () => {
+  const pool = POOL_ORDER.map((id, i) => ({ id, score: 10 - i }));
+  const ranking = {
+    ids: ['c.md', 'a.md', 'b.md', 'd.md'],
+    scores: [0.9, 0.1, 0.2, 0.05], // 头名分差 0.8，跨度 0.85
+  };
+  assert.deepEqual(guardedOrder(pool, ranking, 0.5, 3).ids, ['c.md', 'a.md', 'b.md'], '门槛 0.5：0.8 > 0.425，放行');
+  assert.deepEqual(guardedOrder(pool, ranking, 0.99, 3).ids, ['a.md', 'b.md', 'c.md'], '门槛 0.99：0.8 < 0.8415，拦住');
+  assert.equal(guardedOrder(pool, ranking, 0.5, 3).promoted, true);
+  assert.equal(guardedOrder(pool, ranking, 0.99, 3).reason, 'low-margin');
+  assert.deepEqual(guardedOrder(pool, ranking, 0.5, 3).ids.length, 3, 'limit 之外的池成员不许混进结果');
+  // 窗口就是 pool 的前 limit 个（池子按词面顺序给的），所以「已在窗口里」= 下标 < limit
+  assert.deepEqual(guardedOrder(pool, ranking, 0, 2).ids, ['a.md', 'b.md'], 'limit=2 时 c 在窗口外，门槛给到 0 也不动');
+  assert.equal(guardedOrder(pool, ranking, 0, 2).reason, 'out-of-window');
 });

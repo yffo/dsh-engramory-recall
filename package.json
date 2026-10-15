@@ -1,6 +1,6 @@
 {
   "name": "dsh-engramory-recall",
-  "version": "0.12.9",
+  "version": "0.13.0",
   "description": "Local BM25 auto-recall, fail-closed write guard, static doctor and a memory panel for the Engramory markdown store — no network, no model, no daemon.",
   "keywords": [
     "dsh",
@@ -89,7 +89,8 @@
     "mcp:smoke": "node scripts/mcp-smoke.mjs",
     "embed:check": "node providers/openai-embeddings.mjs --check",
     "release:verify": "node scripts/verify-release.mjs",
-    "bench:probe": "node bench/probe.mjs"
+    "bench:probe": "node bench/probe.mjs",
+    "bench:guard": "node bench/guard-sweep.mjs"
   },
   "bin": {
     "engramory-recall-mcp": "mcp.js"

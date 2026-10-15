@@ -89,6 +89,9 @@ export const MAX_POOL = 200;
 /**
  * 融合模式：
  * · `rrf`（默认）= 词面与提供方各一票（等权），提供方只能往上顶、不能把词面的第 1 名挤掉；
+ * · `guarded` = **把握度门槛**：只准提供方把它的头名插到最前，而且（a）那一篇必须**已经在输出窗口里**、
+ *   （b）它要明显赢过词面头名（头名分之差 > `semanticGuard` × 池内分数跨度）；其余位置一律保持词面顺序。
+ *   因为「不换人」，窗口里的集合与纯词面完全相同 —— hit@4 与词面**恒等**，最多只在窗口内部换次序。
  * · `trust` = 提供方的顺序即最终顺序（词面只用来补满窗口）。
  *
  * **默认选 rrf 是三条实测压出来的**（`npm run bench:seam` 与 `npm run bench:embed` 可复算）：
@@ -99,9 +102,22 @@ export const MAX_POOL = 200;
  * 也就是说 trust 的收益只在「提供方比词面更准」时兑现，而噪音会**全额**转成损失；
  * rrf 的代价是天花板低一点（上面第 1 条），但坏提供方也拖不垮它。
  * 结论：默认 rrf；**量过你的端点、确认它确实更准**，再换 trust（README 有对照表）。
+ *
+ * 4. 更细的一层是 `guarded`（2026-10-15，174 条真库卷子、两个端点实测，`npm run bench:guard` 可复算）：
+ *    把「准不准」从「按谁的顺序」换成「准不准它插队」—— 只动第 1 名，且不许换人。同一张卷子
+ *    （池 10 / 窗口 4，保护集 117 条、争夺集 52 条）：
+ *    智谱 embedding-3：词面 67.2%/91.4% → rrf 74.7%/93.7% → **guarded 76.4%/91.4%**（保护集丢 2 条）；
+ *    本机 qwen3-embedding:0.6b：词面 67.2%/91.4% → rrf 68.4%/94.3% → **guarded 75.9%/91.4%**（丢 1 条）。
+ *    最坏情况（分数换成假分数 = 垃圾提供方）：rrf 34.5%/78.7%、trust 10.9%/37.9%，而 `guarded` 是
+ *    54.6%/91.4% —— hit@4 一格不掉（它就是词面那一格），掉的只是「插错队」的那 12 个点。
+ *    ⇒ `guarded` 是「少赚不赔」最接近字面兑现的一档：赚得比 rrf 多，赔的时候有硬边界。
+ *    代价：hit@4 吃不到池子里捞人的红利（允许从池里换人的形状在智谱上是 78.2%/94.3%，但垃圾端点上
+ *    hit@1 会塌到 34.5%，尺子里留了这一行做对照）。
  */
-export const FUSION_MODES = ['rrf', 'trust'];
+export const FUSION_MODES = ['rrf', 'trust', 'guarded'];
 export const DEFAULT_FUSION = 'rrf';
+/** `guarded` 的把握度门槛：分差要超过「池内提供方分数跨度」的这个比例才准插队（实测 0.4~0.6 是平台）。 */
+export const DEFAULT_GUARD = 0.5;
 
 /** 配置里能写的提供方：空 = 关闭；`host-llm` = 走宿主模型（llm.js）；其余当本地模块路径。 */
 export function describeSeam(config = {}) {
@@ -127,6 +143,49 @@ export function poolLimit(config = {}, limit = 5) {
 export function fusionMode(config = {}) {
   const want = String(config.fusion ?? '').trim().toLowerCase();
   return FUSION_MODES.includes(want) ? want : DEFAULT_FUSION;
+}
+
+/** `guarded` 的门槛比例：0 = 只要高一点点就准插队（发神经）；给了非数或负数回默认。 */
+export function guardRatio(config = {}) {
+  const want = Number(config.guard);
+  return Number.isFinite(want) && want >= 0 ? Math.min(1, want) : DEFAULT_GUARD;
+}
+
+/**
+ * 把握度门槛（`guarded` 的核心，导出给尺子与测试复用）：
+ * 只可能把提供方的**头名**提到最前，而且它必须**已经在输出窗口里** —— 也就是只允许窗口内部重排，
+ * 绝不用池子里的生面孔把窗口里的人换掉（换人会让「词面本来答对的题」连人带分一起掉出窗口）。
+ * 门槛 = 它的头名分 − 词面头名分 > ratio ×（它给出的分数跨度）。
+ * 提供方没给分、分是平的、头名在窗口外、词面头名不在它名单里、分差不够 —— 一律不动（保持词面顺序）。
+ */
+export function guardedOrder(pool, ranking, ratio = DEFAULT_GUARD, limit = pool.length) {
+  const base = pool.map((hit) => hit.id).slice(0, Math.max(1, limit));
+  const top = ranking?.ids?.[0];
+  if (!top || !base.length || top === base[0]) return { ids: base, promoted: false, reason: 'no-change' };
+  if (!base.includes(top)) return { ids: base, promoted: false, reason: 'out-of-window' };
+  const ids = ranking.ids;
+  const scores = ranking.scores ?? [];
+  // 注意 `Number(null)` 是 0：提供方「部分给了分、部分没给」时，null 必须当成**没有分**，
+  // 否则会凭空造出一个 0 分的参照物，把分差和跨度都算歪（这正是测试里 no-scores 那格抓出来的）。
+  const scoreOf = (id) => {
+    const i = ids.indexOf(id);
+    return i >= 0 ? asScore(scores[i]) : null;
+  };
+  const topScore = scoreOf(top);
+  const lexScore = scoreOf(base[0]);
+  if (topScore === null || lexScore === null) return { ids: base, promoted: false, reason: 'no-scores' };
+  const values = ids.map((_, i) => asScore(scores[i])).filter((v) => v !== null);
+  const spread = values.length ? Math.max(...values) - Math.min(...values) : 0;
+  if (!(spread > 0)) return { ids: base, promoted: false, reason: 'flat-scores' };
+  if (topScore - lexScore <= ratio * spread) return { ids: base, promoted: false, reason: 'low-margin' };
+  return { ids: [top, ...base.filter((id) => id !== top)], promoted: true, reason: 'promoted' };
+}
+
+/** 提供方给的分数：非有限值 / 没给（null、undefined）一律当「没有分」。 */
+function asScore(value) {
+  if (value === null || value === undefined) return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
 }
 
 function expandHome(value) {
@@ -387,6 +446,7 @@ function normalizeRanking(raw, docs) {
   const known = new Set(docs.map((doc) => doc.id));
   const seen = new Set();
   const ids = [];
+  const scores = [];
   let dropped = 0;
   const rows = Array.isArray(raw) ? raw : [];
   for (const row of rows) {
@@ -399,8 +459,11 @@ function normalizeRanking(raw, docs) {
     if (seen.has(id)) continue;
     seen.add(id);
     ids.push(id);
+    // 分数只有 `guarded` 用得上：提供方只给文件名（没有分）时这里就是 null，门槛直接不动。
+    const score = typeof row === 'string' ? NaN : Number(row?.score);
+    scores.push(Number.isFinite(score) ? score : null);
   }
-  return { ids, dropped };
+  return { ids, scores, dropped };
 }
 
 /** 改写结果的宽松解析（同样导出给尺子复用：解析口径不一致，数字就不可比）。 */
@@ -472,8 +535,14 @@ export async function semanticSearch(options = {}) {
       }
       const byId = new Map(pool.map((hit) => [hit.id, hit]));
       const fusion = fusionMode(config);
+      const guard = guardRatio(config);
       let order;
-      if (fusion === 'trust') {
+      let guarded = null;
+      if (fusion === 'guarded') {
+        // 把握度门槛：只动第 1 名，而且要有把握；没把握就原样交回词面顺序。
+        guarded = guardedOrder(pool, ranking, guard, limit);
+        order = guarded.ids;
+      } else if (fusion === 'trust') {
         // 提供方说了算：它给过分的按它的顺序走，剩下的坑用词面顺序补满。
         order = [...ranking.ids, ...pool.map((hit) => hit.id).filter((id) => !ranking.ids.includes(id))].slice(0, limit);
       } else {
@@ -482,16 +551,22 @@ export async function semanticSearch(options = {}) {
       const hits = order.map((id) => byId.get(id)).filter(Boolean);
       // 提供方编造的、池子里没有的文件名 —— 如实报数，别假装融合了。
       const missing = order.filter((id) => !byId.has(id)).length;
+      const message = fusion === 'trust'
+        ? `已按 ${provider.name} 的顺序取前 ${hits.length} 条（池 ${pool.length}，Trusted 融合）`
+        : fusion === 'guarded'
+          ? (guarded?.promoted
+            ? `已按 ${provider.name} 的把握把它的头名提到最前（池 ${pool.length}，门槛 ${guard}）`
+            : `提供方 ${provider.name} 把握不足（池 ${pool.length}，门槛 ${guard}），保持词面顺序`)
+          : `已按 ${provider.name} 的顺序融合（RRF，池 ${pool.length}）`;
       return {
         hits,
         used: true,
         code: 'reranked',
-        message: fusion === 'trust'
-          ? `已按 ${provider.name} 的顺序取前 ${hits.length} 条（池 ${pool.length}，Trusted 融合）`
-          : `已按 ${provider.name} 的顺序融合（RRF，池 ${pool.length}）`,
+        message,
         provider: provider.name,
         fusion,
         pool: pool.length,
+        ...(fusion === 'guarded' ? { guard, promoted: Boolean(guarded?.promoted), guardReason: guarded?.reason } : {}),
         dropped: ranking.dropped,
         missing,
         ms: Date.now() - started,
