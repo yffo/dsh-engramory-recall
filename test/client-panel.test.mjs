@@ -125,6 +125,7 @@ const richUsage = () => ({
   dropped: 1,
   droppedRounds: 1,
   truncatedRounds: 2,
+  budgetUse: { n: 41, median: 0.92, p90: 1, full: 18 }, // 预算用量：抬不抬 maxChars 就看这一份
   openRate: 9 / 24,
   positions: [
     { injected: 6, opened: 5 },
@@ -226,6 +227,7 @@ test('面板：使用账页签把打开率、位置级曲线、预算、原因�
   assert.match(text, /预算与分数/);
   assert.match(text, /顶满窗口 4\/6 轮/, '窗口用满的轮数来自 perRound + maxPointers');
   assert.match(text, /缩成裸文件名 3 条/, '预算压力要写清楚');
+  assert.match(text, /预算用掉：中位 92% · p90 100% · 顶到 95% 以上 18\/41 轮/, '预算用量要能直接读出「上限够不够」');
   assert.match(text, /注入分：中位 12\.345/, '注入分要按落盘的 scores 渲染');
   assert.match(text, /为什么没注入/);
   assert.match(text, /寒暄 \/ 答话（设计如此）/, '原因码要翻成人话');

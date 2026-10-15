@@ -396,6 +396,10 @@ export function apply(ctx, config = {}) {
         injected: entry.injected,
         collapsed: entry.collapsed,
         dropped: entry.dropped,
+        // 预算压力：上限与实际用掉的字符数（老行没有这两项，汇总里不计入）
+        ...(Number.isFinite(entry.budget) && Number.isFinite(entry.spent)
+          ? { budget: entry.budget, spent: entry.spent }
+          : {}),
       });
     }
   };
@@ -925,6 +929,10 @@ export function apply(ctx, config = {}) {
         injected: shown.length,
         collapsed,
         dropped,
+        // 预算的「上限 / 用掉多少」一起落盘：不然「该不该抬 maxChars」只能靠猜 ——
+        // 只有塌缩次数，看不出是「几乎顶满」还是「富余大半」。
+        budget,
+        spent: used,
         chars: text.length,
         nudge: wantsRemember,
         sediment: wantsSediment,

@@ -116,7 +116,12 @@ export function summarizeUsage(lines, options = {}) {
     used: 0, coldOpens: 0, firstAt: 0, lastAt: 0,
     // 预算压力：collapsed = 被缩成裸文件名的那几条，dropped = 因预算整条没列出的条数
     collapsed: 0, collapsedRounds: 0, dropped: 0, droppedRounds: 0, truncatedRounds: 0,
+    // 预算用量：budget = 那一轮的上限（maxChars），spent = 实际用掉的字符数。
+    // 只看「塌缩了几条」分不出「几乎顶满」还是「富余大半」—— 抬不抬 maxChars 全靠这两个数。
+    budgetRounds: 0,
   };
+  // 预算用量的原始比例（spent / budget），逐轮收集、最后算中位/p90
+  const budgetRatios = [];
   const injections = [];
   const usedEvents = [];
   const perNote = new Map();
@@ -178,6 +183,13 @@ export function summarizeUsage(lines, options = {}) {
         stats.droppedRounds += 1;
       }
       if (collapsed > 0 || dropped > 0) stats.truncatedRounds += 1;
+      // 预算用量（0.13.13 起落盘）：老行没有这两项 ⇒ 只统计有数据的轮，不拿 0 冒充
+      const budget = Number(line?.budget);
+      const spent = Number(line?.spent);
+      if (Number.isFinite(budget) && budget > 0 && Number.isFinite(spent) && spent >= 0) {
+        stats.budgetRounds += 1;
+        budgetRatios.push(Math.min(1, spent / budget));
+      }
       injections.push({ at: ts, ids, scope: scopeOf(line) });
     }
     if (kind === 'used' && line?.id) {
@@ -256,6 +268,16 @@ export function summarizeUsage(lines, options = {}) {
     },
     // 打开得多快：lagMs = 注入到被打开之间的毫秒数（中位/p90）
     openLag: { n: lagSorted.length, median: q(lagSorted, 0.5), p90: q(lagSorted, 0.9) },
+    // 预算用掉了多少（0.13.13 起 hit 行才带 budget/spent）：mid 高 = 指针被压得难看，
+    // 该抬 maxChars；mid 低 = 抬了也白抬。full = 用掉 ≥95% 的轮数。
+    budgetUse: budgetRatios.length
+      ? {
+        n: budgetRatios.length,
+        median: q([...budgetRatios].sort((a, b) => a - b), 0.5),
+        p90: q([...budgetRatios].sort((a, b) => a - b), 0.9),
+        full: budgetRatios.filter((r) => r >= 0.95).length,
+      }
+      : { n: 0, median: 0, p90: 0, full: 0 },
     // 「为什么没注入」：按原因码计数（chitchat / too-short / duplicate / index-empty /
     // no-hits / below-min-score …）。设计性的跳过与真问题混在一起就看不出异常。
     skipReasons: toCounts(skipReasons),
@@ -432,8 +454,12 @@ export function budgetVerdict(summary) {
   const rounds = summary.injectRounds;
   const truncatedShare = summary.truncatedRounds / rounds;
   if (truncatedShare > 0.2) {
+    const use = summary.budgetUse ?? { n: 0 };
+    const detail = use.n
+      ? `；预算中位用掉 ${(use.median * 100).toFixed(0)}%、${use.full}/${use.n} 轮顶到 95% 以上`
+      : '';
     return `预算在砍内容：${(truncatedShare * 100).toFixed(0)}% 的注入轮有指针被截断`
-      + `（合计 ${summary.collapsed} 条缩成裸文件名、${summary.dropped} 条整个没列出）—— 先抬 maxChars，再谈放宽窗口`;
+      + `（合计 ${summary.collapsed} 条缩成裸文件名、${summary.dropped} 条整个没列出）${detail}—— 先抬 maxChars，再谈放宽窗口`;
   }
   if (summary.perRound.windowLimit && summary.perRound.fullRounds / rounds > 0.5) {
     return `窗口基本用满（${summary.perRound.fullRounds}/${rounds} 轮顶到 ${summary.perRound.windowLimit} 条）`

@@ -435,3 +435,32 @@ test('分数分布：注入分的中位/p10/p90 与首尾落差', () => {
   assert.ok(summary.scoreCurve, '汇总里要带上 minScore 代价曲线（面板与尺子同一份）');
   assert.ok(Array.isArray(summary.scoreCurve.points));
 });
+
+test('预算用量：只有带 budget/spent 的轮才统计，老行不拿 0 冒充', () => {
+  const summary = summarizeUsage([
+    // 五轮：用掉 95% / 80% / 50% / 100%（花超了要夹到 1）/ 没带字段的老行
+    { ts: 1, kind: 'hit', ids: ['a.md'], budget: 600, spent: 570 },
+    { ts: 2, kind: 'hit', ids: ['a.md'], budget: 600, spent: 480 },
+    { ts: 3, kind: 'hit', ids: ['a.md'], budget: 600, spent: 300 },
+    { ts: 4, kind: 'hit', ids: ['a.md'], budget: 600, spent: 700 },
+    { ts: 5, kind: 'hit', ids: ['a.md'] },
+  ]);
+  assert.equal(summary.budgetUse.n, 4, '老行（没有 budget/spent）不进分母');
+  // q() 是 nearest-rank 取低：[0.5,0.8,0.95,1] 的中位取下标 1（0.8）、p90 取下标 2（0.95）
+  assert.equal(summary.budgetUse.median, 0.8);
+  assert.equal(summary.budgetUse.p90, 0.95);
+  assert.equal(summary.budgetUse.full, 2, '570/600 与 700/600 都算「顶到 95% 以上」');
+
+  const none = summarizeUsage([{ ts: 1, kind: 'hit', ids: ['a.md'] }]);
+  assert.deepEqual(none.budgetUse, { n: 0, median: 0, p90: 0, full: 0 }, '没有数据时是干净的零，不是 NaN');
+
+  // 判据要把用量说出来：光看「截断了几轮」看不出上限是不是真的不够
+  const tight = summarizeUsage([
+    { ts: 1, kind: 'hit', ids: ['a.md'], budget: 600, spent: 590, collapsed: 2 },
+    { ts: 2, kind: 'hit', ids: ['b.md'], budget: 600, spent: 590, collapsed: 1 },
+  ]);
+  assert.match(budgetVerdict(tight), /预算在砍内容/);
+  assert.match(budgetVerdict(tight), /预算中位用掉 98%/);
+  assert.match(budgetVerdict(tight), /2\/2 轮顶到 95% 以上/);
+  assert.doesNotMatch(budgetVerdict(tight), /NaN|undefined/);
+});

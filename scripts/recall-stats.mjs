@@ -119,6 +119,14 @@ if (summary.perRound.windowLimit) {
 }
 console.log(`| 被缩成裸文件名 | ${summary.collapsed} 条（${summary.collapsedRounds} 轮） |`);
 console.log(`| 因预算整条没列出 | ${summary.dropped} 条（${summary.droppedRounds} 轮） |`);
+// 塌缩了十几条 ≠ 预算不够用：得看「上限被用掉了多少」。老行没有 budget/spent 就不冒充 0。
+const budgetUse = summary.budgetUse ?? { n: 0 };
+if (budgetUse.n) {
+  console.log(`| 预算用掉（中位 / p90） | ${(budgetUse.median * 100).toFixed(0)}% / ${(budgetUse.p90 * 100).toFixed(0)}%（${budgetUse.n} 轮有记录） |`);
+  console.log(`| 顶到 95% 以上的轮 | ${budgetUse.full}/${budgetUse.n} |`);
+} else {
+  console.log('| 预算用掉 | —（这些行没有 budget/spent：0.13.13 起才落盘） |');
+}
 console.log(`| 打开得多快（距注入） | 中位 ${summary.openLag.median ? `${(summary.openLag.median / 1000).toFixed(1)} 秒` : '—'} · p90 ${summary.openLag.p90 ? `${(summary.openLag.p90 / 1000).toFixed(1)} 秒` : '—'} |`);
 
 console.log('\n## 为什么会没注入（设计性的安静 vs 真漏）');

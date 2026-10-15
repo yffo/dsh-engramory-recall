@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { apply } from '../index.js';
-import { USAGE_FILE } from '../usage.js';
+import { USAGE_FILE, readUsage, summarizeUsage } from '../usage.js';
 
 function fixtureStore() {
   const dir = mkdtempSync(join(tmpdir(), 'engramory-wiring-'));
@@ -136,6 +136,21 @@ test('scope：落盘字段是加法 —— 老字段一个不少（面板/尺子
   assert.ok(Array.isArray(row.scores));
   assert.equal(typeof row.query, 'string');
   assert.equal(row.scope, 'main');
+});
+
+test('预算用量：hit 行落盘 budget/spent，且与 maxChars 对得上（抬不抬上限的原始证据）', async () => {
+  const dir = fixtureStore();
+  const { handler } = captureHandler({ storePath: dir, minScore: 0, maxPointers: 3, maxChars: 600 });
+  await turn(handler, {}, 'm1', '代理节点的双端口是怎么配的');
+
+  const row = roundRows(dir).at(-1);
+  assert.equal(row.budget, 600, '上限就是那一刻的 maxChars');
+  assert.ok(Number.isFinite(row.spent) && row.spent > 0, '实际用掉的字符数要落盘');
+  assert.ok(row.spent <= row.budget, '用掉的不该超过上限');
+
+  const summary = summarizeUsage(readUsage(dir));
+  assert.equal(summary.budgetUse.n, 1);
+  assert.ok(summary.budgetUse.median > 0 && summary.budgetUse.median <= 1);
 });
 
 // ── 2. 状态路由：面板与尺子的唯一数据源 ────────────────────────────────

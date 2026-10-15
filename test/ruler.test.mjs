@@ -82,3 +82,15 @@ test('--json：summary 里 usedCounted / used / openRate 三个字段同时在�
   assert.equal(parsed.summary.usedCounted, 1, '去重后的条数');
   assert.equal(parsed.summary.openRate, 0.5);
 });
+
+test('预算用量：有 budget/spent 就印出「用掉多少」，老行如实说「还没有」', () => {
+  const withFields = runRuler([
+    { ts: 1, kind: 'hit', ids: ['a.md'], scores: [5], budget: 600, spent: 570, collapsed: 1, scope: 'main', depth: 0 },
+  ]);
+  assert.match(withFields, /\| 预算用掉（中位 \/ p90） \| 95% \/ 95%（1 轮有记录） \|/);
+  assert.match(withFields, /\| 顶到 95% 以上的轮 \| 1\/1 \|/);
+
+  const legacy = runRuler([{ ts: 1, kind: 'hit', ids: ['a.md'], scores: [5], scope: 'main', depth: 0 }]);
+  assert.match(legacy, /预算用掉 \| —（这些行没有 budget\/spent：0\.13\.13 起才落盘） \|/);
+  assert.doesNotMatch(legacy, /NaN|undefined/);
+});

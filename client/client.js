@@ -478,6 +478,10 @@ window.__ModuleLoader__.load({
                 usage.scoreStats && usage.scoreStats.n
                   ? `注入分：中位 ${fmtNum(usage.scoreStats.median)} · p10 ${fmtNum(usage.scoreStats.p10)} · p90 ${fmtNum(usage.scoreStats.p90)} · 首尾落差中位 ${fmtNum(usage.scoreStats.spreadMedian)}（共 ${fmtCount(usage.scoreStats.n)} 轮）`
                   : '还没有带分数的注入记录（早期日志没有 scores 字段）。'),
+              h('div', { style: { ...S.muted, fontSize: '11.5px' } },
+                usage.budgetUse && usage.budgetUse.n
+                  ? `预算用掉：中位 ${fmtPct(usage.budgetUse.median, 0)} · p90 ${fmtPct(usage.budgetUse.p90, 0)} · 顶到 95% 以上 ${fmtCount(usage.budgetUse.full)}/${fmtCount(usage.budgetUse.n)} 轮（抬不抬 maxChars 就看这一行）`
+                  : '还没有预算用量记录（budget/spent 要 0.13.13 之后的宿主才写）。'),
 
               (usage.skipReasons && Object.keys(usage.skipReasons).length) || (usage.emptyReasons && Object.keys(usage.emptyReasons).length)
                 ? h('div', null,
