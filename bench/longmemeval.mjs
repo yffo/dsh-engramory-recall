@@ -26,6 +26,7 @@
  * 输出：一张总表 + 按题型拆的表 + 可选 --json（含逐题结果，便于别人复核我们没挑题）。
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { sessionToDoc } from './sessions.mjs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -59,16 +60,7 @@ const sha = createHash('sha256').update(raw).digest('hex').slice(0, 12);
 const all = JSON.parse(raw.toString('utf8'));
 const questions = limit ? all.slice(0, limit) : all;
 
-/** 一个 session → 一篇「笔记」。轮次按顺序拼，role 前缀保留（user/assistant 的用词分布不同）。 */
-function sessionToDoc(sessionId, turns) {
-  const lines = [];
-  for (const turn of turns) {
-    const role = turn?.role === 'assistant' ? 'Assistant' : 'User';
-    const text = String(turn?.content ?? '').trim();
-    if (text) lines.push(`${role}: ${text}`);
-  }
-  return { id: sessionId, title: '', description: '', body: lines.join('\n'), aliases: [], lines: [], mtimeMs: 0 };
-}
+// session → 笔记的映射与池宽尺子共用一份（bench/sessions.mjs）
 
 const perQuestion = [];
 let errors = 0;
