@@ -147,6 +147,8 @@ test('预算用量：hit 行落盘 budget/spent，且与 maxChars 对得上（�
   assert.equal(row.budget, 600, '上限就是那一刻的 maxChars');
   assert.ok(Number.isFinite(row.spent) && row.spent > 0, '实际用掉的字符数要落盘');
   assert.ok(row.spent <= row.budget, '用掉的不该超过上限');
+  assert.ok(Array.isArray(row.collapsedIds), '「缩掉的是哪几条」要落盘（空数组也算记过账）');
+  assert.deepEqual(row.collapsedIds, [], '这一轮没人被缩');
 
   const summary = summarizeUsage(readUsage(dir));
   assert.equal(summary.budgetUse.n, 1);
@@ -177,6 +179,7 @@ test('状态路由：usage 里带 scopes 与四句判据，且 maxPointers 会�
   assert.equal(body.usage.perRound.windowLimit, 3, 'maxPointers 要透给汇总，否则「顶满窗口」永远算不出来');
   assert.equal(typeof body.usage.verdicts.open, 'string');
   assert.equal(typeof body.usage.verdicts.curve, 'string');
+  assert.equal(typeof body.usage.verdicts.truncation, 'string', '第四句判据（截断的代价）也要能过路由到面板');
   assert.ok(Array.isArray(body.usage.scoreCurve.points));
   assert.ok(body.log.length >= 2, '内存里的召回日志也要一起回给面板');
 });

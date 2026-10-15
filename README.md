@@ -448,7 +448,7 @@ Electron 载体走 `file://` + IPC 时可能没有 webServer，那时召回照�
 
 | 行 | 什么时候写 | 关键字段 |
 | --- | --- | --- |
-| `hit` / `sediment` | 每轮注入（命中 / 只给沉淀提醒） | `ids`（**按显示顺序**）、`scores`（与 `ids` 一一对应）、`injected`、`collapsed`、`dropped`、`budget`/`spent`（该轮预算上限与实际用掉的字符数） |
+| `hit` / `sediment` | 每轮注入（命中 / 只给沉淀提醒） | `ids`（**按显示顺序**）、`scores`（与 `ids` 一一对应）、`injected`、`collapsed`、`collapsedIds`（**被缩成裸文件名的是哪几条**）、`dropped`、`budget`/`spent`（该轮预算上限与实际用掉的字符数） |
 | （轮级字段） | 上面三类「轮」的行都带 | `scope` = `main` / `subagent`（提问者；0.13.7 之前的行没有这一项，汇总里归 `unknown`） |
 | `skip` | 没去检索（寒暄 / 太短 / 与上轮重复 / 没配库路径） | `reason` = `chitchat` / `too-short` / `duplicate` / `store-not-configured` |
 | `empty` | 检索了但一条都没注入 | `reason` = `index-empty` / `no-hits` / `below-min-score`，另带 `minScore` 与 `topScore` |
@@ -477,6 +477,12 @@ npm run recall:stats -- --help                # 用法；--store / --positions /
 `collapsed`（预算不够被缩成裸文件名）与 `dropped`（整个没列出）——窗口条数够、内容却被砍，
 这两列会直接露出来。第二句判据据此给动作：截断超过两成 ⇒ **先抬 `maxChars`**；
 窗口顶满且没截断 ⇒ 再放宽只需动 `maxPointers`；两者都没有 ⇒ 窗口没顶到上限，是命中不够。
+
+**「缩掉的是哪几条」也落盘了**（0.13.15）：光有 `collapsed` 的条数只说明预算顶到上限，
+说明不了砍掉的东西有没有用 —— `collapsedIds` 让尺子能把「被缩的那几条」与「完整列出的那几条」
+分开算打开率，第三句判据直接答「抬 `maxChars` 值不值」：被缩的反而更容易被打开 ⇒ 预算确实在
+砍有用的东西；两边差不多 ⇒ 抬了也白抬。两边被打开的样本都不足 5 条时它只会说「先看形状」
+（4% 的打开率下，十几条指针里可能一条都没被打开过）。老行没有这个字段，尺子如实印「—」。
 
 **「这轮为什么没注入」也落盘了**（0.13.3）：`skip` 与 `empty` 带上了原因码，尺子把它们
 分类计数 —— 关键是分清**设计性的安静**与**真漏**：寒暄门控占大头是好事（说明门控在干活），

@@ -26,7 +26,7 @@ import { checkIndexWrite, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES } fro
 import { registerSkill, skillStatus } from './skill.js';
 import { appendAudit, readAudit, GUARD_EPOCH } from './audit.js';
 import {
-  appendUsage, readUsage, summarizeUsage, usageVerdict, budgetVerdict, reasonVerdict, scoreCurveVerdict,
+  appendUsage, readUsage, summarizeUsage, usageVerdict, budgetVerdict, reasonVerdict, scoreCurveVerdict, truncationVerdict,
   noteIdFromPath, pickInjected,
 } from './usage.js';
 import { readDocs } from './store.js';
@@ -396,6 +396,12 @@ export function apply(ctx, config = {}) {
         injected: entry.injected,
         collapsed: entry.collapsed,
         dropped: entry.dropped,
+        // 「缩的是哪几条」也要落盘：光有塌缩条数答不了「截断有没有代价」——
+        // 被缩成裸文件名的那几条后来被打开过吗？空数组也是信息（这轮谁都没被缩）；
+        // 老行完全没有这个键 ⇒ 只能算「缩过，但不知道是谁」，不许当成 0。
+        ...(Array.isArray(entry.hits) && entry.hits.length
+          ? { collapsedIds: entry.hits.filter((hit) => hit.collapsed === true).map((hit) => hit.id).filter(Boolean) }
+          : {}),
         // 预算压力：上限与实际用掉的字符数（老行没有这两项，汇总里不计入）
         ...(Number.isFinite(entry.budget) && Number.isFinite(entry.spent)
           ? { budget: entry.budget, spent: entry.spent }
@@ -1203,6 +1209,7 @@ export function apply(ctx, config = {}) {
                 verdicts: {
                   open: usageVerdict(summary),
                   budget: budgetVerdict(summary),
+                  truncation: truncationVerdict(summary),
                   reason: reasonVerdict(summary),
                   curve: scoreCurveVerdict(summary.scoreCurve),
                 },

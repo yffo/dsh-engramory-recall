@@ -92,5 +92,20 @@ test('预算用量：有 budget/spent 就印出「用掉多少」，老行如实
 
   const legacy = runRuler([{ ts: 1, kind: 'hit', ids: ['a.md'], scores: [5], scope: 'main', depth: 0 }]);
   assert.match(legacy, /预算用掉 \| —（这些行没有 budget\/spent：0\.13\.13 起才落盘） \|/);
+  assert.match(legacy, /被缩的条数 \/ 其中被打开 \| —（没有记着名单的截断轮/, '没名单时如实印「—」，不冒充 0');
   assert.doesNotMatch(legacy, /NaN|undefined/);
+});
+
+test('截断的代价：有名单时印出「被缩 vs 完整列出」两行对照，判据也跟上', () => {
+  const collapsedIds = ['c1.md', 'c2.md'];
+  const fullIds = ['f1.md', 'f2.md'];
+  const lines = [
+    { ts: 1, kind: 'hit', ids: [...collapsedIds, ...fullIds], scores: [9, 8, 7, 6], collapsed: 2, collapsedIds, budget: 600, spent: 600, scope: 'main', depth: 0 },
+    ...[...collapsedIds, ...fullIds].map((id, i) => ({ ts: 10 + i, kind: 'used', id, lagMs: 100 })),
+  ];
+  const out = runRuler(lines);
+  assert.match(out, /\| 被缩的条数 \/ 其中被打开 \| 2 \/ 2（100\.0%） \|/);
+  assert.match(out, /\| 作对照：完整列出的 \/ 其中被打开 \| 2 \/ 2（100\.0%） \|/);
+  assert.match(out, /- 被缩成裸文件名的 2 条里被打开过 2 条（100\.0%）/);
+  assert.doesNotMatch(out, /NaN|undefined/);
 });

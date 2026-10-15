@@ -25,6 +25,7 @@ import {
   readUsage,
   scoreCurveVerdict,
   summarizeUsage,
+  truncationVerdict,
   usageVerdict,
 } from '../usage.js';
 
@@ -463,4 +464,66 @@ test('预算用量：只有带 budget/spent 的轮才统计，老行不拿 0 冒
   assert.match(budgetVerdict(tight), /预算中位用掉 98%/);
   assert.match(budgetVerdict(tight), /2\/2 轮顶到 95% 以上/);
   assert.doesNotMatch(budgetVerdict(tight), /NaN|undefined/);
+});
+
+// ── 截断的代价（0.13.15） ──────────────────────────────────────────────────
+
+test('截断的代价：被缩成裸文件名的那几条，与完整列出的那些分开算打开率', () => {
+  const summary = summarizeUsage([
+    // 第 1 轮：b 被缩了；b 后来被打开（且同一轮里读了两次 ⇒ 去重只算一条）
+    { ts: 1, kind: 'hit', ids: ['a.md', 'b.md', 'c.md'], scores: [9, 8, 7], collapsed: 1, collapsedIds: ['b.md'] },
+    { ts: 2, kind: 'used', id: 'b.md', lagMs: 1000 },
+    { ts: 3, kind: 'used', id: 'b.md', lagMs: 2000 },
+    // 第 2 轮：缩的是 c，但 c 没人打开；a 完整列出、也没被打开
+    { ts: 4, kind: 'hit', ids: ['a.md', 'c.md'], scores: [5, 4], collapsed: 1, collapsedIds: ['c.md'] },
+    // 老行：缩过 2 条但没记名单 ⇒ 只能进 legacy，不许当成「没缩」
+    { ts: 5, kind: 'hit', ids: ['d.md'], scores: [3], collapsed: 2 },
+  ]);
+  assert.equal(summary.truncation.rounds, 2, '只有记了名单的轮才进对照');
+  assert.equal(summary.truncation.legacy, 1, '缩过但没记名单的老轮单独计数');
+  assert.deepEqual(summary.truncation.collapsed, { pointers: 2, opened: 1, openRate: 0.5 });
+  assert.deepEqual(summary.truncation.full, { pointers: 3, opened: 0, openRate: 0 });
+
+  const sentence = truncationVerdict(summary);
+  assert.match(sentence, /被缩成裸文件名的 2 条里被打开过 1 条（50\.0%）/);
+  assert.match(sentence, /完整列出的 3 条里 0 条（0\.0%）/);
+  assert.match(sentence, /样本太少/, '打开样本各要 5 条才敢比大小');
+  assert.match(sentence, /另有 1 轮缩过但没记下缩的是哪几条/);
+  assert.doesNotMatch(sentence, /NaN|undefined/);
+});
+
+test('截断判据：两边样本够了才比大小，被缩的更常被打开就说「有据」', () => {
+  // 被缩的 5 条全部被打开（100%），完整列出的 12 条里 5 条被打开（41.7%）⇒ 预算确实在砍有用的东西
+  const collapsedIds = ['c1.md', 'c2.md', 'c3.md', 'c4.md', 'c5.md'];
+  const fullIds = Array.from({ length: 12 }, (_, i) => `f${i + 1}.md`);
+  const lines = [{ ts: 1, kind: 'hit', ids: [...collapsedIds, ...fullIds], scores: [9, 8, 7, 6, 5, ...fullIds.map(() => 1)], collapsed: 5, collapsedIds }];
+  for (const [i, id] of [...collapsedIds, 'f1.md', 'f2.md', 'f3.md', 'f4.md', 'f5.md'].entries()) {
+    lines.push({ ts: 10 + i, kind: 'used', id, lagMs: 5 });
+  }
+  const summary = summarizeUsage(lines);
+  assert.equal(summary.truncation.collapsed.opened, 5);
+  assert.equal(summary.truncation.full.opened, 5);
+  assert.match(truncationVerdict(summary), /被缩的反而更容易被打开，预算确实在砍有用的东西：抬 maxChars 有据/);
+
+  // 反过来：被缩的 6 条里 5 条被打开（83.3%），完整列出的 6 条全被打开（100%）⇒ 抬了也白抬
+  const c2 = ['c1.md', 'c2.md', 'c3.md', 'c4.md', 'c5.md', 'c6.md'];
+  const f2 = ['f1.md', 'f2.md', 'f3.md', 'f4.md', 'f5.md', 'f6.md'];
+  const reverseLines = [{ ts: 1, kind: 'hit', ids: [...c2, ...f2], scores: [9, 8, 7, 6, 5, 4, 3, 2, 1, 1, 1, 1], collapsed: 6, collapsedIds: c2 }];
+  for (const [i, id] of [...c2.slice(0, 5), ...f2].entries()) reverseLines.push({ ts: 10 + i, kind: 'used', id, lagMs: 5 });
+  const reverse = summarizeUsage(reverseLines);
+  assert.equal(reverse.truncation.collapsed.opened, 5);
+  assert.equal(reverse.truncation.full.opened, 6);
+  assert.match(truncationVerdict(reverse), /抬 maxChars 的收益看不出来/);
+});
+
+test('截断判据：没数据时不编故事（没缩过 / 只有老行 / 顶到上限但谁都没缩）', () => {
+  assert.match(truncationVerdict(summarizeUsage([])), /还没有把指针缩成裸文件名的轮/);
+  assert.match(
+    truncationVerdict(summarizeUsage([{ ts: 1, kind: 'hit', ids: ['a.md'], scores: [1], collapsed: 2 }])),
+    /缩过 1 轮、但没记下缩的是哪几条（0\.13\.15 起才落盘）/,
+  );
+  const noneCollapsed = summarizeUsage([{ ts: 1, kind: 'hit', ids: ['a.md', 'b.md'], scores: [3, 2], collapsed: 0, collapsedIds: [] }]);
+  assert.equal(noneCollapsed.truncation.rounds, 1, '空名单也是信息：这一轮记过账、谁都没被缩');
+  assert.match(truncationVerdict(noneCollapsed), /没有指针真的被缩/);
+  for (const s of [summarizeUsage([]), noneCollapsed]) assert.doesNotMatch(truncationVerdict(s), /NaN|undefined/);
 });

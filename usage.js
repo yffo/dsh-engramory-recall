@@ -122,6 +122,10 @@ export function summarizeUsage(lines, options = {}) {
   };
   // 预算用量的原始比例（spent / budget），逐轮收集、最后算中位/p90
   const budgetRatios = [];
+  // 「缩成裸文件名的是哪几条」（0.13.15 起落盘）：截断的代价只能靠它算 ——
+  // 只记「缩了几条」的话，没法知道被缩的那几条后来有没有被打开。
+  const truncatedRounds = [];
+  let truncationLegacy = 0;
   const injections = [];
   const usedEvents = [];
   const perNote = new Map();
@@ -183,6 +187,10 @@ export function summarizeUsage(lines, options = {}) {
         stats.droppedRounds += 1;
       }
       if (collapsed > 0 || dropped > 0) stats.truncatedRounds += 1;
+      // 缩掉的是哪几条：有这个键的轮才能算「截断的代价」；老行（缩过但没记名单）只计数。
+      const collapsedIds = Array.isArray(line?.collapsedIds) ? line.collapsedIds.map(String).filter(Boolean) : null;
+      if (collapsedIds) truncatedRounds.push({ at: ts, ids, collapsedIds });
+      else if (collapsed > 0) truncationLegacy += 1;
       // 预算用量（0.13.13 起落盘）：老行没有这两项 ⇒ 只统计有数据的轮，不拿 0 冒充
       const budget = Number(line?.budget);
       const spent = Number(line?.spent);
@@ -215,6 +223,8 @@ export function summarizeUsage(lines, options = {}) {
   // 而分母 pointers 是注入**条数**，量纲不同 —— 不去重的话 20 条指针被读 30 次会算出打开率
   // 150%，判据还会反过来说「打开率偏高：窗口可以放宽」，正好把结论说反。
   const countedUsed = new Set();
+  // 「哪一轮注入的哪一条被打开过」——位置级、分账、截断代价都用这一份归属。
+  const openedPairs = new Set();
   let usedCounted = 0;
   for (const ev of usedEvents) {
     let position = -1;
@@ -229,6 +239,7 @@ export function summarizeUsage(lines, options = {}) {
     }
     const key = owner ? `${owner.at}\u0000${ev.id}` : null;
     if (key) {
+      openedPairs.add(key);
       if (countedUsed.has(key)) continue;
       countedUsed.add(key);
       scopes[owner.scope].used += 1;
@@ -240,6 +251,25 @@ export function summarizeUsage(lines, options = {}) {
   }
 
   const notes = [...perNote.values()].sort((a, b) => b.injected - a.injected || b.lastAt - a.lastAt);
+  // 截断的代价：被缩成裸文件名的那几条，后来被打开过吗？——「缩了多少条」答不了这个，
+  // 所以 0.13.15 起把「缩掉的是谁」也落盘，这里按名单把两撮分开各算打开率。
+  const truncation = {
+    rounds: truncatedRounds.length,
+    legacy: truncationLegacy,
+    collapsed: { pointers: 0, opened: 0, openRate: 0 },
+    full: { pointers: 0, opened: 0, openRate: 0 },
+  };
+  for (const round of truncatedRounds) {
+    const names = new Set(round.collapsedIds);
+    for (const id of round.ids) {
+      const side = names.has(id) ? truncation.collapsed : truncation.full;
+      side.pointers += 1;
+      if (openedPairs.has(`${round.at}\u0000${id}`)) side.opened += 1;
+    }
+  }
+  for (const side of [truncation.collapsed, truncation.full]) {
+    side.openRate = side.pointers ? side.opened / side.pointers : 0;
+  }
   const sizes = [...roundSizes].sort((a, b) => a - b);
   const lagSorted = [...lags].sort((a, b) => a - b);
   const q = (arr, p) => (arr.length ? arr[Math.min(arr.length - 1, Math.floor(p * (arr.length - 1)))] : 0);
@@ -284,6 +314,8 @@ export function summarizeUsage(lines, options = {}) {
     emptyReasons: toCounts(emptyReasons),
     // 「把 minScore 抬高会付出什么」——分数光有统计量没用，得能算成代价才可决策
     scoreCurve: minScoreCurve(lines, options),
+    // 截断的代价：被缩成裸文件名的那些后来有没有被打开（0.13.15 起落盘 collapsedIds）
+    truncation,
     // 注进来的分有多高、第 1 条比最后一条高多少 —— 校准 minScore 与窗口宽度的依据
     scoreStats: {
       n: topScores.length,
@@ -466,6 +498,39 @@ export function budgetVerdict(summary) {
       + '，且几乎没有被预算砍掉 —— 想再放宽只需动 maxPointers，maxChars 还够';
   }
   return `预算没有明显压力（${summary.truncatedRounds}/${rounds} 轮被截断）——窗口没顶到上限，是命中不够或 minScore 挡住了`;
+}
+
+/**
+ * 第四句判据：预算把指针缩成裸文件名，到底伤不伤？
+ * 「缩了 N 条」只说明预算顶到上限了，不说明砍掉的东西有没有用 —— 这里比的是
+ * 「被缩的那几条后来被打开过吗」与「完整列出的那几条被打开过吗」。两边都要
+ * 攒够被打开的样本（各 5 条）才敢比大小，否则只说形状。
+ * @param {ReturnType<typeof summarizeUsage>} summary
+ */
+export function truncationVerdict(summary) {
+  const t = summary?.truncation;
+  if (!t || typeof t !== 'object') return '还没有截断记录可看';
+  const legacyNote = t.legacy
+    ? `；另有 ${t.legacy} 轮缩过但没记下缩的是哪几条（0.13.15 起才落盘）`
+    : '';
+  if (!t.rounds) {
+    return t.legacy
+      ? `缩过 ${t.legacy} 轮、但没记下缩的是哪几条（0.13.15 起才落盘）——「缩掉的有没有被用上」还答不了`
+      : '还没有把指针缩成裸文件名的轮（预算没顶到过上限）';
+  }
+  if (!t.collapsed.pointers) {
+    return `记了名单的 ${t.rounds} 轮里没有指针真的被缩（顶到上限也没缩到谁）${legacyNote}`;
+  }
+  const c = t.collapsed;
+  const f = t.full;
+  const pct = (n) => `${(n * 100).toFixed(1)}%`;
+  const detail = `被缩成裸文件名的 ${c.pointers} 条里被打开过 ${c.opened} 条（${pct(c.openRate)}），`
+    + `完整列出的 ${f.pointers} 条里 ${f.opened} 条（${pct(f.openRate)}）`;
+  if (c.opened < 5 || f.opened < 5) return `${detail} —— 打开的样本太少（两边各要 5 条），先看形状${legacyNote}`;
+  if (c.openRate > f.openRate) {
+    return `${detail} —— 被缩的反而更容易被打开，预算确实在砍有用的东西：抬 maxChars 有据${legacyNote}`;
+  }
+  return `${detail} —— 被缩的并不比完整列出的更容易被打开：抬 maxChars 的收益看不出来${legacyNote}`;
 }
 
 /** 原因码 → 人话。统计里出现没列过的码时原样显示（别把新码藏起来）。 */

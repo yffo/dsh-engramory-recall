@@ -136,6 +136,8 @@ const richUsage = () => ({
   droppedRounds: 1,
   truncatedRounds: 2,
   budgetUse: { n: 41, median: 0.92, p90: 1, full: 18 }, // 预算用量：抬不抬 maxChars 就看这一份
+  // 截断的代价（0.13.15）：被缩成裸文件名的那几条后来被打开过吗
+  truncation: { rounds: 5, legacy: 12, collapsed: { pointers: 17, opened: 3, openRate: 3 / 17 }, full: { pointers: 30, opened: 2, openRate: 2 / 30 } },
   openRate: 9 / 24,
   positions: [
     { injected: 6, opened: 5 },
@@ -173,6 +175,7 @@ const richUsage = () => ({
   verdicts: {
     open: '打开率 37.5% 在中间档',
     budget: '窗口基本用满',
+    truncation: '被缩成裸文件名的 17 条里被打开过 3 条（17.6%），完整列出的 30 条里 2 条（6.7%）',
     reason: '跳过以寒暄为主',
     curve: '被打开过的指针只有 0 条 —— 曲线只能看形状',
   },
@@ -238,6 +241,9 @@ test('面板：使用账页签把打开率、位置级曲线、预算、原因�
   assert.match(text, /顶满窗口 4\/6 轮/, '窗口用满的轮数来自 perRound + maxPointers');
   assert.match(text, /缩成裸文件名 3 条/, '预算压力要写清楚');
   assert.match(text, /预算用掉：中位 92% · p90 100% · 顶到 95% 以上 18\/41 轮/, '预算用量要能直接读出「上限够不够」');
+  assert.match(text, /截断的代价：被缩的 17 条里被打开 3（17\.6%）/, '截断的代价也要能直接读：被缩的那几条后来被打开过吗');
+  assert.match(text, /完整列出的 30 条里 2（6\.7%）/, '要有「完整列出」那一撮作对照');
+  assert.match(text, /· 被缩成裸文件名的 17 条里被打开过 3 条（17\.6%）/, '第四句判据（截断的代价）要出现在面板上');
   assert.match(text, /注入分：中位 12\.345/, '注入分要按落盘的 scores 渲染');
   assert.match(text, /为什么没注入/);
   assert.match(text, /寒暄 \/ 答话（设计如此）/, '原因码要翻成人话');

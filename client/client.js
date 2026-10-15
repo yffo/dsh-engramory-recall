@@ -419,7 +419,7 @@ window.__ModuleLoader__.load({
               })(),
 
               h('div', { style: { fontSize: '11.5px', marginTop: '10px' } },
-                [usage.verdicts && usage.verdicts.open, usage.verdicts && usage.verdicts.budget, usage.verdicts && usage.verdicts.reason, usage.verdicts && usage.verdicts.curve]
+                [usage.verdicts && usage.verdicts.open, usage.verdicts && usage.verdicts.budget, usage.verdicts && usage.verdicts.truncation, usage.verdicts && usage.verdicts.reason, usage.verdicts && usage.verdicts.curve]
                   .filter(Boolean)
                   .map((v, i) => h('div', { key: i, style: S.muted }, `· ${v}`))),
 
@@ -482,6 +482,11 @@ window.__ModuleLoader__.load({
                 usage.budgetUse && usage.budgetUse.n
                   ? `预算用掉：中位 ${fmtPct(usage.budgetUse.median, 0)} · p90 ${fmtPct(usage.budgetUse.p90, 0)} · 顶到 95% 以上 ${fmtCount(usage.budgetUse.full)}/${fmtCount(usage.budgetUse.n)} 轮（抬不抬 maxChars 就看这一行）`
                   : '还没有预算用量记录（budget/spent 要 0.13.13 之后的宿主才写）。'),
+              h('div', { style: { ...S.muted, fontSize: '11.5px' } },
+                // 截断的代价：被缩成裸文件名的那几条后来被打开过吗（0.13.15 起落盘 collapsedIds）
+                usage.truncation && usage.truncation.rounds
+                  ? `截断的代价：被缩的 ${fmtCount(usage.truncation.collapsed.pointers, ' 条')}里被打开 ${fmtCount(usage.truncation.collapsed.opened)}（${fmtPct(usage.truncation.collapsed.openRate ?? 0, 1)}）· 完整列出的 ${fmtCount(usage.truncation.full.pointers, ' 条')}里 ${fmtCount(usage.truncation.full.opened)}（${fmtPct(usage.truncation.full.openRate ?? 0, 1)}）`
+                  : '还没有「缩掉的是哪几条」的记录（collapsedIds 要 0.13.15 之后的宿主才写）——所以「抬 maxChars 值不值」还答不了。'),
 
               (usage.skipReasons && Object.keys(usage.skipReasons).length) || (usage.emptyReasons && Object.keys(usage.emptyReasons).length)
                 ? h('div', null,

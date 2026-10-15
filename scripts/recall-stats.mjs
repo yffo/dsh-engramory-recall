@@ -18,7 +18,7 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { budgetVerdict, readUsage, reasonVerdict, scoreCurveVerdict, summarizeUsage, usageVerdict, USAGE_FILE } from '../usage.js';
+import { budgetVerdict, readUsage, reasonVerdict, scoreCurveVerdict, summarizeUsage, truncationVerdict, usageVerdict, USAGE_FILE } from '../usage.js';
 
 const argv = process.argv.slice(2);
 const USAGE = `用法：node scripts/recall-stats.mjs [选项]
@@ -181,6 +181,15 @@ if (budgetUse.n) {
 } else {
   console.log('| 预算用掉 | —（这些行没有 budget/spent：0.13.13 起才落盘） |');
 }
+// 截断的代价：光知道「缩了 17 条」决定不了抬不抬 maxChars，得看那几条后来有没有被打开。
+const truncation = summary.truncation ?? { rounds: 0, legacy: 0, collapsed: { pointers: 0, opened: 0 }, full: { pointers: 0, opened: 0 } };
+if (truncation.rounds) {
+  const pctOf = (side) => (side.pointers ? `${((side.opened / side.pointers) * 100).toFixed(1)}%` : '—');
+  console.log(`| 被缩的条数 / 其中被打开 | ${truncation.collapsed.pointers} / ${truncation.collapsed.opened}（${pctOf(truncation.collapsed)}） |`);
+  console.log(`| 作对照：完整列出的 / 其中被打开 | ${truncation.full.pointers} / ${truncation.full.opened}（${pctOf(truncation.full)}） |`);
+} else {
+  console.log(`| 被缩的条数 / 其中被打开 | —（没有记着名单的截断轮${truncation.legacy ? `；另有 ${truncation.legacy} 轮缩过但没记名单` : ''}：0.13.15 起才落盘） |`);
+}
 console.log(`| 打开得多快（距注入） | 中位 ${summary.openLag.median ? `${(summary.openLag.median / 1000).toFixed(1)} 秒` : '—'} · p90 ${summary.openLag.p90 ? `${(summary.openLag.p90 / 1000).toFixed(1)} 秒` : '—'} |`);
 
 console.log('\n## 为什么会没注入（设计性的安静 vs 真漏）');
@@ -215,6 +224,7 @@ console.log(`- ${scoreCurveVerdict(curve)}`);
 console.log('\n## 判据');
 console.log(`- ${usageVerdict(summary)}`);
 console.log(`- ${budgetVerdict(summary)}`);
+console.log(`- ${truncationVerdict(summary)}`);
 console.log(`- ${reasonVerdict(summary)}`);
 
 if (summary.neverOpened.length) {
