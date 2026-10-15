@@ -115,7 +115,8 @@ const richUsage = () => ({
   dedupeRounds: 0,
   sedimentRounds: 0,
   denyRounds: 0,
-  used: 9,
+  used: 12, // 原始打开次数（同一轮里反复读会重复计）
+  usedCounted: 9, // 去重后的条数 —— openRate 的分子就是这个（9/24 = 37.5%）
   coldOpens: 2,
   firstAt: Date.now() - 60000,
   lastAt: Date.now(),
@@ -219,6 +220,7 @@ test('面板：使用账页签把打开率、位置级曲线、预算、原因�
   assert.match(text, /注入指针/, '应当有四张卡片的第一张');
   assert.match(text, /打开率/);
   assert.match(text, /37\.5%/, '打开率应当按百分比渲染');
+  assert.match(text, /9 条被 read\/edit（去重后；共 12 次）/, '卡片上的条数要与打开率同口径：去重后的条数 + 原始次数');
   assert.match(text, /位置级曲线/);
   assert.match(text, /6\/5|5\/6/, '位置级曲线应当有「打开/注入」的分数');
   assert.match(text, /预算与分数/);

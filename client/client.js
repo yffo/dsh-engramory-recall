@@ -389,7 +389,7 @@ window.__ModuleLoader__.load({
                   label: '打开率',
                   // 缺字段（老宿主）按 0 显示，NaN 这种脏值给「—」—— 不假装 0%（0.13.9）。
                   value: fmtPct(usage.openRate ?? 0, 1),
-                  hint: `${fmtCount(usage.used)} 条被 read/edit`,
+                  hint: `${fmtCount(usage.usedCounted ?? usage.used)} 条被 read/edit（去重后；共 ${fmtCount(usage.used)} 次）`,
                 }),
                 h(Stat, {
                   label: '注入过的笔记',

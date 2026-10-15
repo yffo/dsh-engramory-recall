@@ -79,8 +79,11 @@ console.log(`| 拒写轮 | ${summary.denyRounds} |`);
 console.log('\n## 分子：后来被打开了多少');
 console.log('| 指标 | 值 |');
 console.log('| --- | --- |');
-console.log(`| 注入后被打开 | ${summary.used} |`);
-console.log(`| **打开率** | **${pct(summary.used, summary.pointers)}** |`);
+// 分子用**去重后**的条数（同一条指针在同一轮里被反复读只算一次），与判据同一个口径：
+// `summary.used` 是原始 used 行数（打开**次数**），拿它当分子会印出两套互相打架的打开率。
+console.log(`| 注入后被打开 | ${summary.usedCounted ?? summary.used} |`);
+console.log(`| **打开率** | **${pct(summary.usedCounted ?? summary.used, summary.pointers)}** |`);
+console.log(`| 打开次数（未去重，同一轮重复读会重复计） | ${summary.used} |`);
 console.log(`| 没注入也打开（对照） | ${summary.coldOpens} |`);
 console.log(`| 被注入过的不同笔记 | ${summary.uniqueNotes} |`);
 
