@@ -192,6 +192,29 @@ describe('索引闸门：edit 要按替换后的结果算', () => {
   });
 });
 
+describe('索引闸门：edit 传不出可还原的参数时（诚实打折，但别把路堵死）', () => {
+  it('没有 old_string 就无法预测结果：索引没超限时放行（skipped: unmeasurable）', () => {
+    const store = makeStore();
+    const filePath = path.join(store, 'MEMORY.md');
+    writeFileSync(filePath, lines(10));
+    const r = check({ storePath: store, filePath, tool: 'edit', oldString: undefined, newString: 'x' });
+    assert.equal(r.ok, true);
+    assert.equal(r.skipped, 'unmeasurable', '还原不出结果时要说清楚「这次没量」');
+  });
+
+  it('索引**已经**超限而这次编辑又还原不出来 → 拒绝盲改，并给出出口（缩小的重写永远放行）', () => {
+    const store = makeStore();
+    const filePath = path.join(store, 'MEMORY.md');
+    writeFileSync(filePath, lines(400)); // 已经 400 行，远超 200
+    const r = check({ storePath: store, filePath, tool: 'edit', oldString: '', newString: lines(401) });
+    assert.equal(r.ok, false, '已经超限的索引不许再盲改 —— 结果不可预测时不能赌它不会更大');
+    assert.match(r.reason, /拒绝盲改索引/);
+    assert.match(r.reason, /当前已超上限/);
+    assert.match(r.reason, /超过 200 行|200/, '理由里要带上真实数字');
+    assert.match(r.reason, /缩小的重写永远放行/, '只说「先压缩」而不说怎么压，等于把路堵死');
+  });
+});
+
 describe('索引闸门：量尺本身', () => {
   it('countLines 末尾换行不敏感', () => {
     assert.equal(countLines(''), 0);

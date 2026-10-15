@@ -463,8 +463,15 @@ Electron 载体走 `file://` + IPC 时可能没有 webServer，那时召回照�
 ```bash
 npm run recall:stats                          # 打开率、位置级曲线、预算与分数、原因分布、minScore 代价曲线、四句判据
 npm run recall:stats -- --max-pointers 5      # 多算一句「窗口用满了几轮」
-npm run recall:stats -- --json                # 机器可读（--store / --positions / --limit 可调）
+npm run recall:stats -- --json                # 机器可读（带 exists：区分「没落盘」与「路径写错」）
+npm run recall:stats -- --help                # 用法；--store / --positions / --limit 都在这里
 ```
+
+**参数不静默改口径**（0.13.14）：`--limit 5` 会收到下限 10、`--positions 0` 会回落默认 5 ——
+但**都会在 stderr 说一句按什么算的**，stdout 仍是干净的报告（`--json` 时仍是纯 JSON）。
+`--store ''` 直接退出 2，而不是悄悄去读默认库（过去会静默回落到 `~/memory/engramory`：
+想读一个临时目录却读到线上账本，是最坏的那类「悄悄」）。不认识的选项也会点一句 ——
+`--strore` 打错时，最怕的就是它一声不吭地给你看别人的账本。
 
 **预算那一节容易被忽略，但它才是「窗口调宽了、字跟上了吗」的答案**：注入行里带着
 `collapsed`（预算不够被缩成裸文件名）与 `dropped`（整个没列出）——窗口条数够、内容却被砍，
@@ -1009,6 +1016,9 @@ ollama serve                           # 桌面 App 会自动起；装完 App �
 
 三条纪律：密钥**只在这四步里过一遍**，不进返回值、不进日志、不进错误信息；凭据**每次检索现解析**
 （宿主规范：不许跨操作缓存）；MCP 那种没有宿主的场景会明确报 `no-host` 并提示改用本地模块提供方。
+`host-llm` 还有第三种走不通的情形：运行时与默认模型都在、但 `ctx.get('llm')` 拿不到带 `stream()`
+的服务 —— 报 `no-llm`（0.13.14 修：此前这里读的是路由对象上的 `route.llm`，而路由只带
+provider/model 两个名字，于是真宿主里这条路恒 `TypeError` 再降级，JSON 抽取那段根本没跑到过）。
 
 
 

@@ -5,13 +5,15 @@
 //  - 失败的两个来源（终止 chunk / 抛异常）都被归一成带 code 的错误，且 detectConflicts 永不抛；
 //  - 模型编出来的文件名进不了 findings —— 检测结果必须能对上真实文件。
 //
-// 覆盖率自检（llm.js 的真实数字；跑之前必须先按「默认关闭」用例里的说明把 ?fresh= 查询串临时去掉）：
+// 覆盖率自检（llm.js 的真实数字，直接跑即可）：
 //   node --test --experimental-test-coverage test/llm.test.mjs
-import test from 'node:test';
+// 注：需要「全新模块实例」的用例走的是**临时副本**（改路径，不加查询串）—— 见 freshLlm()。
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   MAX_CALLS,
   MAX_NOTE_CHARS,
@@ -30,6 +32,20 @@ import {
 } from '../llm.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/** 每个测试文件一份临时副本目录（after 里清），副本按需 import —— 改路径而不是加查询串。 */
+let freshDir;
+after(() => {
+  if (freshDir) rmSync(freshDir, { recursive: true, force: true });
+});
+/** llm.js 的**全新模块实例**：拷一份到临时目录再 import（不用 `?query=` 绕缓存，理由见用例注释）。 */
+function freshLlm() {
+  if (!freshDir) {
+    freshDir = mkdtempSync(join(tmpdir(), 'llm-fresh-'));
+    copyFileSync(resolve(root, 'llm.js'), join(freshDir, 'llm.js'));
+  }
+  return import(pathToFileURL(join(freshDir, 'llm.js')).href);
+}
 const PLAIN = { provider: 'p', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: '…' }] }] };
 
 /** 假 LLM：按调用次序播放脚本，并记录每次 stream 收到的 options —— 「发了几次、发了什么」全靠它断言。 */
@@ -638,16 +654,12 @@ test('默认关闭：import 模块本身不发任何调用、不读 ctx（重新
   const ctx = fakeCtx({ llm: fakeLlm(textPlay('绝不该被调用')) });
   // ⚠️ 这个查询串只为一件事：拿到一份「没被上面几十个用例改过状态」的全新模块实例，重新求值一次顶层。
   //
-  // 但它会让覆盖率报告**失真**，而且失真得很吓人：node 的 --experimental-test-coverage 以
-  // fileURLToPath(url) 作键（查询串被丢掉），于是 llm.js 被统计成两条 script —— 这一份只求值了顶层、
-  // 一个函数都没执行，它把函数计数直接抹成 0%（行覆盖率也被拖到 ~37%）。去掉查询串后的真实数字是
-  // 99%+ 行 / 100% 函数，所以「函数 0%」是记账怪癖，不是真缺口。
-  //
-  // 为什么不干脆删掉：这个用例要断言的正是「import 阶段零副作用」，必须有一个没被别的用例碰过的
-  // 模块实例（上面那些用例会调 stream、塞 ctx、改 options）；复用上面那份 import 就测不到这件事。
-  // 保留它，代价只是别拿默认报告的数字当真 —— 要看真实覆盖率先把 ?fresh= 临时去掉再跑：
-  //   node --test --experimental-test-coverage test/llm.test.mjs
-  const fresh = await import(`../llm.js?fresh=${Date.now()}`);
+  // 拿「全新模块实例」的手法：把 llm.js **拷到临时文件**再 import（新路径 = 新实例）。
+  // 别用 `?fresh=` 查询串 —— 那会让覆盖率报告失真，而且失真得很吓人：node 的
+  // --experimental-test-coverage 以 fileURLToPath(url) 作键（查询串被丢掉），于是 llm.js 被统计成
+  // 两条 script，其中「只求值了顶层、一个函数都没执行」的那份把函数计数抹成 0%、行覆盖拖到 ~37%。
+  // 改路径之后两个实例天然是两个文件，报告里 llm.js 就是真数字（99%+ 行 / 100% 函数）。
+  const fresh = await freshLlm();
   assert.equal(ctx.getCalls, 0, 'import 阶段不许碰 ctx');
   assert.equal(ctx.agentDefaultModel, undefined);
   for (const name of ['getLlm', 'resolveRoute', 'collectText', 'summarizeNote', 'detectConflicts']) {

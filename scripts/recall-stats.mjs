@@ -21,15 +21,66 @@ import { join } from 'node:path';
 import { budgetVerdict, readUsage, reasonVerdict, scoreCurveVerdict, summarizeUsage, usageVerdict, USAGE_FILE } from '../usage.js';
 
 const argv = process.argv.slice(2);
-const opt = (name, fallback) => {
+const USAGE = `用法：node scripts/recall-stats.mjs [选项]
+
+  --store <目录>      记忆库目录（默认 ~/memory/engramory）
+  --positions <N>     位置级曲线看几条（正整数，默认 5）
+  --limit <N>         最多读日志末尾几行（正整数、下限 10，默认 2000）
+  --max-pointers <N>  注入窗口上限（给了才算「窗口用满了几轮」）
+  --json              输出 JSON（stdout 只有 JSON，提示走 stderr）
+  --help              看这份用法
+`;
+if (argv.includes('--help') || argv.includes('-h')) {
+  process.stdout.write(USAGE);
+  process.exit(0);
+}
+
+/** 提示一律走 stderr：stdout 是报告本身（`--json` 时还得是能被 JSON.parse 的纯数据）。 */
+const note = (msg) => process.stderr.write(`[recall-stats] ${msg}\n`);
+
+/** 参数取值：只认「紧跟其后的那一个」，并区分「没给」与「给了但是空的」。 */
+const opt = (name) => {
   const i = argv.indexOf(name);
-  return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
+  return i >= 0 ? { given: true, value: argv[i + 1] ?? '' } : { given: false, value: '' };
 };
+
+const KNOWN = new Set(['--store', '--positions', '--limit', '--max-pointers', '--json', '--help', '-h']);
+for (const arg of argv) {
+  if (arg.startsWith('-') && !KNOWN.has(arg)) note(`不认识的参数：${arg}（--help 看用法）——已忽略`);
+}
+
+/**
+ * 数值选项：给了就必须是正整数。给坏了**不静默吞掉**，而是说清楚并按什么算的
+ * （尺子是给人做判断用的，一个悄悄改掉的输入会让人对不上自己敲的命令）。
+ */
+function numOpt(name, fallback, { min = 1 } = {}) {
+  const { given, value } = opt(name);
+  if (!given) return fallback;
+  const n = Number(value);
+  if (!value || !Number.isFinite(n) || n <= 0) {
+    note(`${name} 需要一个正整数（收到 ${JSON.stringify(value)}）——按默认 ${fallback} 算`);
+    return fallback;
+  }
+  const floored = Math.floor(n);
+  if (floored !== n) note(`${name} ${n} 取整成 ${floored}`);
+  if (floored < min) {
+    note(`${name} ${floored} 低于下限 ${min}——按下限 ${min} 算（样本太少时百分比没有意义）`);
+    return min;
+  }
+  return floored;
+}
+
 const HOME = homedir();
 const expandHome = (p) => (p === '~' || p.startsWith('~/') ? join(HOME, p.slice(2)) : p);
-const STORE = expandHome(opt('--store', '~/memory/engramory'));
-const POSITIONS = Math.max(1, Math.floor(Number(opt('--positions', '5'))) || 5);
-const LIMIT = Math.max(10, Number(opt('--limit', '2000')) || 2000);
+const storeOpt = opt('--store');
+if (storeOpt.given && !storeOpt.value) {
+  // 过去这里是静默回落到真账本 —— 想读一个临时目录却读到线上数据，是最坏的那类「悄悄」。
+  note('--store 需要一个目录（收到空值）。想用默认库就别给这个参数。');
+  process.exit(2);
+}
+const STORE = expandHome(storeOpt.given ? storeOpt.value : '~/memory/engramory');
+const POSITIONS = numOpt('--positions', 5);
+const LIMIT = numOpt('--limit', 2000, { min: 10 });
 const wantJson = argv.includes('--json');
 /** 原因码 → 人话（与 usage.js 的 reasonVerdict 用同一套口径）。 */
 const REASON_LABELS = {
@@ -46,20 +97,23 @@ const REASON_LABELS = {
 const reasonLabel = (code) => REASON_LABELS[code] ?? code;
 
 // 窗口上限只用于「用满了几轮」这一句；不给就不算（--max-pointers 5）
-const MAX_POINTERS = Math.max(0, Number(opt('--max-pointers', '0')) || 0);
+const maxPointersOpt = opt('--max-pointers');
+const MAX_POINTERS = maxPointersOpt.given ? Math.max(0, Math.floor(Number(maxPointersOpt.value)) || 0) : 0;
 
 const lines = readUsage(STORE, LIMIT);
 const summary = summarizeUsage(lines, { positions: POSITIONS, neverOpenedLimit: 12, maxPointers: MAX_POINTERS });
 const stamp = (ms) => (ms ? new Date(ms).toLocaleString('zh-CN', { hour12: false }) : '—');
 const pct = (part, whole) => (whole ? `${((part / whole) * 100).toFixed(1)}%` : '—');
 
+const LEDGER = join(STORE, USAGE_FILE);
 if (wantJson) {
-  console.log(JSON.stringify({ store: STORE, file: join(STORE, USAGE_FILE), lines: lines.length, summary }, null, 2));
+  // exists：区分「账本还没落盘」与「路径写错了」——此前两者都是 lines: 0，只能靠人再去 ls。
+  console.log(JSON.stringify({ store: STORE, file: LEDGER, exists: existsSync(LEDGER), lines: lines.length, summary }, null, 2));
   process.exit(0);
 }
 
-console.log(`召回日志：${join(STORE, USAGE_FILE)}`);
-if (!existsSync(join(STORE, USAGE_FILE))) {
+console.log(`召回日志：${LEDGER}`);
+if (!existsSync(LEDGER)) {
   console.log('\n还没有这份日志。它是 0.13.1 起才落的盘，而且要有**用户轮**才会写入——');
   console.log('先在 DSH 里聊几句（每轮自动召回都会记一行），再回来跑这把尺子。');
   process.exit(0);

@@ -19,6 +19,10 @@ const pending = [];
  */
 const recorded = [];
 
+/** 轮询那段 effect 的开关与 cleanup 收集（默认关：不让它去 fetch）。 */
+let runEffects = false;
+const effectCleanups = [];
+
 /** 极小的 React 桩：够 client.js 用（9 个 useState、1 个 useRef、1 个 useEffect）。 */
 function stubReact() {
   return {
@@ -34,7 +38,13 @@ function stubReact() {
     useRef(initial) {
       return { current: initial };
     },
-    useEffect() {},
+    // effect 默认不执行（不联网）。要测轮询那一段时把 runEffects 打开：
+    // 桩没有调度器，所以直接在渲染时同步跑一次，cleanup 收进 effectCleanups 供断言。
+    useEffect(fn) {
+      if (!runEffects) return;
+      const cleanup = fn();
+      if (typeof cleanup === 'function') effectCleanups.push(cleanup);
+    },
   };
 }
 
@@ -266,6 +276,84 @@ test('面板：还没有注入记录时说清楚账本落在哪，不显示 0% �
   assert.match(text, /还没有注入记录/);
   assert.match(text, /\.engramory-recall\.jsonl/);
   assert.doesNotMatch(text, /0\.0%/, '没有指针时不该显示打开率');
+});
+
+test('面板：轮询拿到宿主 state 就 setState 并清错，卸载时清掉定时器', async () => {
+  const realFetch = globalThis.fetch;
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  const urls = [];
+  let timerMs = null;
+  let cleared = null;
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    return { ok: true, status: 200, json: async () => fakeState(richUsage()) };
+  };
+  globalThis.setInterval = (_fn, ms) => { timerMs = ms; return 7; };
+  globalThis.clearInterval = (id) => { cleared = id; };
+  runEffects = true;
+  effectCleanups.length = 0;
+  try {
+    await render(fakeState(richUsage()));
+    await new Promise((resolve) => setImmediate(resolve)); // 让 fetch 的 then 跑完
+    assert.equal(urls.length, 1, '挂载时拉一次状态');
+    assert.equal(urls[0], '/api/engramory-recall/state', '拉的就是宿主那条只读路由');
+    assert.equal(timerMs, 3000, '之后每 3 秒轮询一次');
+    assert.ok(
+      recorded.some((v) => v && typeof v === 'object' && v.usage),
+      '成功的响应要交给 setState（面板靠它重画）',
+    );
+    assert.ok(recorded.includes(null), '成功之后要把上一次的错误清掉');
+    assert.equal(effectCleanups.length, 1, 'effect 要返回 cleanup');
+    effectCleanups[0]();
+    assert.equal(cleared, 7, '卸载时必须清掉轮询定时器（否则刷新页面会攒下一堆）');
+  } finally {
+    globalThis.fetch = realFetch;
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+    runEffects = false;
+    effectCleanups.length = 0;
+  }
+});
+
+test('面板：轮询撞上 HTTP 500 或网络错误时把错误记下来（不白屏、不抛出去）', async () => {
+  const realFetch = globalThis.fetch;
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = () => 7;
+  globalThis.clearInterval = () => {};
+  runEffects = true;
+  effectCleanups.length = 0;
+  try {
+    globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
+    await render(fakeState(richUsage()));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(recorded.includes('HTTP 500'), '非 2xx 要记成「HTTP 500」这样能看懂的话');
+
+    recorded.length = 0;
+    globalThis.fetch = async () => { throw new Error('boom'); };
+    await render(fakeState(richUsage()));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(recorded.includes('boom'), '网络层抛错也要变成面板上的一行字');
+  } finally {
+    globalThis.fetch = realFetch;
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+    runEffects = false;
+    effectCleanups.length = 0;
+  }
+});
+
+test('面板：宿主给的数字是字符串就认，是垃圾就画「—」，绝不显示 NaN', async () => {
+  const asStrings = await render(fakeState({ ...richUsage(), pointers: '24', openRate: '0.5' }));
+  assert.match(asStrings, /24/, '字符串数字要认（宿主 JSON 里偶尔会是字符串）');
+  assert.match(asStrings, /50/, '打开率同样按数字处理');
+
+  const garbage = await render(
+    fakeState({ ...richUsage(), pointers: 'abc', openRate: Number.MAX_SAFE_INTEGER + 10 }),
+  );
+  assert.doesNotMatch(garbage, /NaN|Infinity|undefined/, '垃圾数字只能画「—」');
+  assert.match(garbage, /—/, '不可信的数字要有兜底符号');
 });
 
 test('面板：usage 缺字段（半截数据）也不抛异常', async () => {

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.14
+
+**`host-llm` 这条接缝从落地那天起就没跑通过：它去路由对象上找 `llm`，而路由只有两个名字。**
+
+- **修（真 bug，子代理写语义接缝测试时挖出来的）**：`semantic.js` 的 `expand` 过去写 `route.llm.stream(options)`，可 `route` 出自 `llm.js` 的 `resolveRoute()` —— 只回 `{ provider, model }`，**没有 `llm`**。于是真宿主里这条路的每一次改写都在 `TypeError` 里结束，被归一成 `llm-error` 后降级回词面；`hostLlmExpand` 里那段 JSON 抽取（`[` 到 `]`）从来没有机会执行。改为从运行时取真服务：`module.getLlm(runtime.ctx)`（`llm.js:80` 早就有这个出口）。附带新增第三种「宿在这条路走不通」的码：`no-llm`（运行时在、默认模型也在，但 `ctx.get('llm')` 拿不到带 `stream()` 的服务）—— 过去这种情况要在一次 `TypeError` 之后才看得出来。
+- **参考提供方两处「静默」改成明说**：① `cosine()` 遇到维度不一致会用 `Math.min` 截到短的那条 ⇒ 查询 `[1,0]` 对候选 `[1,0,99]` 与 `[1,0,0]` 都是 1.0 分，多出来的那一维被静默丢掉（换过模型、或缓存里混着旧向量时才会发生，而失真的排序看起来完全正常）；现在维度不等当场抛，消息带两个维度与最可能的原因。② 纯空白查询过去原样送出去（真 OpenAI 对 `''` 回 400）；`snippet`/`title`/`id` 都空的笔记也会送出一个 `''` —— 一条空笔记能把**整批**（含正常笔记）一起拖去降级。现在空查询当场抛、不发请求，空文本的笔记不进请求体但**结果里不少一条**（拿 0 分）。
+- **尺子（`npm run recall:stats`）不再静默改口径**：`--store ''` 直接退出 2（过去静默回落到真账本 `~/memory/engramory` —— 想读一个临时目录却读到线上账本）；`--limit 5` 仍收回下限 10、`--positions 0` 仍回落默认 5，但**都会在 stderr 说一句按什么算的**（stdout 保持干净，`--json` 仍是纯 JSON）；未知选项点一句（`--strore` 打错时最怕它一声不吭地给你看别人的账本）；新增 `--help` / `-h` 用法输出（且不读账本）；`--json` 新增 `exists`，用来区分「账本还没落盘」与「路径写错」。
+- **测试：581 → 652 例**。新增 `test/semantic-edges.test.mjs` 12、`test/embed-provider-edges.test.mjs` 31、`test/ruler-cli.test.mjs` 17、`test/degradation.test.mjs` 6（拷贝一份包到临时目录、把指定依赖换成会抛的桩，专测「崩溃降级」那几条路：状态路由崩了仍 200 且带 crashed 字段、doctor 崩了仍出体检结果、归档抛异常仍记 deny 行）；`test/wiring-paths.test.mjs` +1、`test/index-guard.test.mjs` +2、`test/client-panel.test.mjs` +3。
+- **覆盖率：把「用 `?query=` 绕 ESM 缓存」的写法统一改成临时副本。** Node 的 `--test --experimental-test-coverage` 以 `fileURLToPath(url)`（丢掉查询串）作键，于是同一份源码被合并成两条 script，那条「只跑过顶层」的副本把数字抹花：`llm.js` 曾被记成 37% 行 / **0% 函数**，`providers/openai-embeddings.mjs` 曾被记成 57% 行 —— 都是假的。改成本文拷一份到临时目录再 import（新路径 = 新实例）之后，报告里就是真数字：`llm.js` 100/99.48/100、`providers/openai-embeddings.mjs` 99.75/78.43/100（`test/llm.test.mjs`、`test/embed-provider-edges.test.mjs` 已改，`test/client-panel.test.mjs` 的同款写法不失真、保留并注明原因）。
+
 ## 0.13.13
 
 **「截断了 24% 的轮」看不出上限够不够：日志里没有「用掉了多少预算」。**

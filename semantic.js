@@ -290,10 +290,22 @@ export async function loadProvider(config = {}, deps = {}) {
       const module = await import('./llm.js');
       const route = module.resolveRoute(runtime.ctx, runtime.config);
       if (!route) return { ok: false, code: 'no-route', message: '宿主没有可用的默认模型，语义接缝降级', seam };
+      // 路由（provider/model 名字）与 llm 服务是两样东西：resolveRoute 只回名字，真正能 stream 的
+      // 是 ctx.get('llm')。过去这里写成 `route.llm.stream` ⇒ 真宿主里恒 TypeError（被归一成 llm-error
+      // 后降级），JSON 抽取那段永远到不了 —— 2026-10-16 由子代理测试发现，此处改回真服务。
+      const llm = module.getLlm(runtime.ctx);
+      if (!llm || typeof llm.stream !== 'function') {
+        return {
+          ok: false,
+          code: 'no-llm',
+          message: '宿主 llm 服务不可用（ctx.get("llm") 拿不到 stream），语义接缝降级',
+          seam,
+        };
+      }
       const provider = {
         name: HOST_LLM,
         kind: 'expand',
-        expand: ({ query, signal }) => hostLlmExpand(module, route, query, config, signal),
+        expand: ({ query, signal }) => hostLlmExpand(module, llm, route, query, config, signal),
       };
       return { ok: true, provider, kind: 'expand', code: 'host-llm', message: seam.message, seam };
     }
@@ -378,10 +390,10 @@ export function hostLlmPrompt(query) {
 }
 
 /** 宿主模型的「扩展」实现：问模型要几句别的说法，别的什么都不做。 */
-async function hostLlmExpand(module, route, query, config, signal) {
+async function hostLlmExpand(module, llm, route, query, config, signal) {
   const prompt = hostLlmPrompt(query);
   const result = await module.collectText(
-    { stream: (options) => route.llm.stream(options) },
+    llm,
     {
       provider: route.provider,
       model: route.model,

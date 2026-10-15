@@ -263,7 +263,16 @@ function cosine(a, b) {
   let dot = 0;
   let na = 0;
   let nb = 0;
-  const n = Math.min(a.length, b.length);
+  // 维度不一致**必须当场说**：过去用 Math.min 截到短的那条，于是 [1,0] 对 [1,0,99] 与
+  // [1,0,0] 都是 1.0 分（多的那维被静默喂了狗），只有换过模型/缓存里混了旧向量时才会发生 ——
+  // 那种排序失真看起来完全正常，与本模块顶部「失败一律 throw」的纪律也相左。
+  if (a.length !== b.length) {
+    throw new Error(
+      `向量维度不一致（${a.length} vs ${b.length}）：多半是换了 embedding 模型、或缓存里混着旧模型算的向量；`
+        + '清掉缓存或把模型/维度改回去，别让排序悄悄按截断后的维度算',
+    );
+  }
+  const n = a.length;
   for (let i = 0; i < n; i += 1) {
     dot += a[i] * b[i];
     na += a[i] * a[i];
@@ -287,10 +296,28 @@ export async function rerankWith(cfg, { query, docs, signal } = {}) {
   }
   const list = Array.isArray(docs) ? docs : [];
   if (!list.length) return [];
-  const vectors = await embedTexts(cfg, [cfg.queryPrefix + String(query ?? ''), ...list.map((doc) => textOf(doc, cfg))], signal);
+  const q = `${cfg.queryPrefix}${String(query ?? '')}`.trim();
+  if (!q) throw new Error('查询是空的（去掉空白后没有可嵌入的内容）——空文本没有相似度可言，别发出去挨一个 400');
+  // 空文本（snippet/title/id 都空、又没配 docPrefix）不进请求体：真 OpenAI 对 '' 回 400，
+  // 一条空笔记就能把**整批**（含正常笔记）一起拖去降级。它们留在结果里、拿 0 分。
+  const texts = list.map((doc) => textOf(doc, cfg));
+  const slots = [];
+  const sendable = [];
+  for (const text of texts) {
+    if (text.trim()) {
+      slots.push(sendable.length + 1); // 0 号位是查询向量
+      sendable.push(text);
+    } else {
+      slots.push(0); // 不发；结果里给 0 分
+    }
+  }
+  const vectors = sendable.length ? await embedTexts(cfg, [q, ...sendable], signal) : [];
   const queryVector = vectors[0];
   return list
-    .map((doc, index) => ({ id: doc.id, score: cosine(queryVector, vectors[index + 1]) }))
+    .map((doc, index) => ({
+      id: doc.id,
+      score: queryVector && slots[index] ? cosine(queryVector, vectors[slots[index]]) : 0,
+    }))
     .sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id)));
 }
 
