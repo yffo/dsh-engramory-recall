@@ -1,10 +1,12 @@
 /**
  * 索引上限闸门的测试。
  *
- * 这套用例的存在理由：`checkIndexWrite` 是**融合自 dsh-engramory** 的逻辑（见
- * `index-guard.js` 文件头）。搬过来的代码最危险的失效方式不是报错，而是**语义悄悄变了**
- * —— 尤其是「缩小的重写永远放行」那条例外，它看着像后门，实际是唯一的出路：索引一旦
- * 超限，若不做例外，任何写入都被拒，就没有任何一次写入能让它降下来，闸门会把自己锁死。
+ * 这套用例测的是**判定语义**本身（闸门拦什么、放什么、为什么），逐条输入输出与
+ * 「改写前实现」的全等比对在 `test/index-guard-equivalence.test.mjs`，这里不重复。
+ *
+ * 为什么要单独测「缩小的重写永远放行」：它是全套逻辑里最像后门、也最不能删的一条例外
+ * —— 索引一旦超限，若不做例外，任何写入都被拒，就没有任何一次写入能让它降下来，
+ * 闸门会把自己锁死。
  */
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -221,8 +223,8 @@ describe('索引闸门：量尺本身', () => {
     assert.equal(countLines('a'), 1);
     assert.equal(countLines('a\n'), 1, '末尾那一个换行不另算一行');
     assert.equal(countLines('a\nb'), 2);
-    // 空行是行：三个换行 = 三行空白。这与 dsh-engramory 的算法逐字一致，
-    // 两边算出来的数必须一样，否则同一个索引在两次检查里会有两个高度。
+    // 空行是行：三个换行 = 三行空白。这个口径必须与 mcp.js 报给用户的数字、
+    // scripts/check-recall-wiring.mjs 的自检口径一致，否则同一份索引会有两个高度。
     assert.equal(countLines('\n\n\n'), 3);
   });
 

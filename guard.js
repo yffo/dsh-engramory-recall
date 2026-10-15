@@ -18,13 +18,13 @@
  */
 import path from 'node:path';
 
-/** 四类事实（AGENTS.md 的 Engramory 纪律）。 */
+/** 四类事实（本仓库 Format v1 的约定，口径与 Engramory 协议一致）。 */
 export const MEMORY_KINDS = ['user', 'feedback', 'project', 'reference'];
 
 /** 笔记文件名：<kind>-<slug>.md；slug 只允许小写字母/数字/连字符。 */
 export const NOTE_FILE_RE = /^(user|feedback|project|reference)-[a-z0-9][a-z0-9-]*\.md$/;
 
-/** 索引文件名：内容是指针列表，不受笔记规则约束（另有 dsh-engramory 的行数/字节守卫）。 */
+/** 索引文件名：内容是指针列表，不受笔记规则约束（行数/字节上限由 `index-guard.js` 单独把关）。 */
 export const INDEX_FILE = 'MEMORY.md';
 
 /**

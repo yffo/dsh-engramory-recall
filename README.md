@@ -4,8 +4,11 @@
 > 装上这个插件：相关的老笔记会在**每一轮自己浮上来**（最多 4 条提醒、总共不超过 480 字），
 > 不用你再手动投喂。
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的**本地记忆插件**。记忆库就是一份
-[Engramory](https://github.com/tinqiao-oss/engramory) 格式的普通 markdown 文件夹（默认 `~/memory/engramory`）。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的**本地记忆插件**。记忆库就是一份普通 markdown 文件夹（默认 `~/memory/engramory`），
+布局遵循本仓库自己维护并冻结的 **Format v1**（[`docs/format.md`](docs/format.md)）—— 它**借鉴**了
+[Engramory 协议](https://github.com/tinqiao-oss/engramory)（MIT）「一事一文 + 索引当小抄 + 索引有硬上限」的路子，
+规范文本与实现都在这边：**检索、注入、账本、写入闸门、归档、体检、面板、MCP 全部自研**，与上游没有共享代码
+（借用部分的版权与出处见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)）。
 全部用 `node:` 内置模块实现：**零第三方依赖、零网络、默认零模型调用、零常驻进程**。
 
 ## 这是什么
@@ -222,11 +225,13 @@ npm run probe       # 召回质量探针：3 组 query + 三道对照，跑在�
 
 | 文档 | 什么时候看 |
 |---|---|
+| [docs/format.md](docs/format.md) | **格式规范（Format v1）**：目录长什么样、一篇笔记有哪些字段、上限与治理、与上游规范的差异 |
 | [docs/how-it-works.md](docs/how-it-works.md) | 想弄清它内部到底怎么跑、每个旋钮什么意思（含完整配置表）、代价对照 |
 | [docs/measuring.md](docs/measuring.md) | 想看数字：四条选型否决线、跟同类插件的对照、三把可复算的尺子。公开数据集 LongMemEval-S 500 题上 RecallAny@1 **89.2%**（教科书 BM25 同口径 86.2%），合成基准 hit@1 50.4% vs 43.2% |
 | [docs/limits.md](docs/limits.md) | **最该读的一份**：底线、真正的短板、路线图，以及十四条被实测证伪的路 |
 | [docs/release.md](docs/release.md) | 安装 / 卸载的坑、测试与自检的全部命令、发版流程与发布排错表、别的宿主用 MCP |
 | [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么 |
+| [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) | 与上游 Engramory 协议的关系、借用与对齐范围、上游许可原文 |
 
 ## 📄 License
 

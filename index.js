@@ -65,7 +65,7 @@ const DEFAULTS = {
    * 根因：库里唯一那批「老」笔记（31.6 天）恰好是 feedback-collaboration-and-safety-rules、
    * user-profile-and-preferences 这类**基础事实**，本就该被频繁召回，衰减它们纯属误伤。
    * 灵枢能安全用衰减，是因为它的 protected_floor 依赖人工 importance 字段给重要节点设下界
-   * （`importance × 乘子 ≥ 0.70`），Engramory 笔记没有这个字段，照抄半衰期只会误伤。
+   * （`importance × 乘子 ≥ 0.70`），我们的笔记没有这个字段，硬套半衰期只会误伤。
    *
    * 结论：代码留着（一行配置可开），等库里真出现半年以上的跨度再调成 90 复测。
    */
@@ -136,9 +136,9 @@ const DEFAULTS = {
   /**
    * 索引上限闸门：`MEMORY.md` 长过这里就拒绝写入（缩小的重写永远放行）。
    *
-   * **融合自 `dsh-engramory` v0.2.5**，逻辑逐条搬进了 `index-guard.js`。吸收它的理由：
-   * 本插件要做完整的记忆系统，不该把「索引上限」留在外部依赖里 —— 那个插件一共只做
-   * 两件事（本闸门 + 注册 `engramory` 技能），两件都收进来之后它就可以退场了。
+   * 判定口径（200 行 / 25KB、只拒绝增长）沿用 Engramory 协议（MIT，见 `THIRD-PARTY-NOTICES.md`），
+   * 实现是我们自己写的（`index-guard.js`）。自己实现而不是当外部依赖，是因为本插件要做完整的
+   * 记忆系统：索引上限是召回正确性的边界，不该落在别人的包里。
    *
    * 路径不必配置：本插件知道库在哪，索引固定是 `<storePath>/MEMORY.md`。
    * 这比让人手钉一个绝对路径更不容易错（原插件正是为此加了 `indexPath` 配置项，
@@ -149,8 +149,8 @@ const DEFAULTS = {
   /**
    * 注册 `engramory` 技能（写入纪律的正文）。默认开。
    *
-   * 同样融合自 `dsh-engramory`（正文与 description/whenToUse 逐字保留它的措辞）。
-   * 两者同时装着时会注册同名技能 —— 内容一致，谁赢都一样；注册处包了 try/catch，
+   * 纪律与上游 Engramory 协议一致（MIT，见 `THIRD-PARTY-NOTICES.md`），措辞是本仓库自己的。
+   * 与上游插件同时装着时会注册同名技能 —— 两者纪律一致，谁赢都一样；注册处包了 try/catch，
    * 万一注册表对重名是抛错而非覆盖，不会因为一个技能名把宿主拖崩。
    */
   registerSkill: true,
@@ -674,7 +674,7 @@ export function apply(ctx, config = {}) {
         if (!filePath) return undefined;
         const isWrite = toolName === 'write';
         // 笔记文件规则先判；命中索引文件时它返回 skipped:'index'，此时改由索引上限闸门
-        // 接手（融合自 dsh-engramory，逻辑在 index-guard.js，文件头写明了为什么这么设计）。
+        // 接管索引上限（逻辑在 index-guard.js，文件头写明了为什么这么设计）。
         let verdict = checkMemoryWrite({
           filePath: String(filePath),
           storePath: settings.storePath,
@@ -736,7 +736,7 @@ export function apply(ctx, config = {}) {
   }
 
   // ── 注册 engramory 技能（写入纪律的正文）──────────────────────────────
-  // 融合自 dsh-engramory：正文与 description/whenToUse 逐字保留它的措辞。
+  // 纪律与上游 Engramory 协议一致，措辞为本仓库自己的（见 THIRD-PARTY-NOTICES.md）。
   // 收进来的理由与索引闸门相同 —— 本插件要做完整的记忆系统，纪律这一层不能留在外部。
   registerSkill(ctx, {
     registerSkill: settings.registerSkill !== false,

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.14.0
+
+**「自立」：仅有的两处逐字移植变成我们自己的实现；格式规范收归本仓库并冻结为 Format v1。**
+
+这一版改的是「这套东西到底是谁的」，功能行为一个字节都没变 —— 而且是**证出来**没变，不是嘴上说没变。
+
+- **`index-guard.js` 重写（171 → 237 行）**：索引上限闸门从「逐字移植上游 `dsh-engramory` v0.2.5」改成我们自己的实现。公开接口（`DEFAULT_MAX_INDEX_LINES` / `DEFAULT_MAX_INDEX_BYTES` / `countLines` / `measureIndex` / `checkIndexWrite`）与判定口径完全不变：**200 行 / 25 600 字节谁先到算谁**、**只拒绝增长**（缩小的重写永远放行，否则越限索引会把自己锁死）、字节判据取**原始 buffer**（有损 decode 会把真增长算成缩小）、行数对**末尾换行不敏感**、只治理库根 `MEMORY.md`（basename 大小写不敏感）。内部函数按自己的结构重命名（`simulateEdit→applyReplacement`、`readRaw→readBytes`、`verdict→judgeAgainstCaps`、`targetsIndex→locate`），返回形状与文案属**被锁行为**，一并保留。
+- **等价性黄金测试（新增 `test/index-guard-equivalence.test.mjs` + `test/fixtures/`）**：48 条矩阵输入先喂给**改写前的实现**（`git show 821872a:index-guard.js` 导出的基线），把 `ok` / `skipped` / `reason` 全文 / `message` 全文 / `countLines` / `measureIndex` 全等结果固化成快照（含矩阵指纹防漂移），再让现在的实现逐条复现 —— **48 条全等**，另加「判定跑完文件字节不许变」的副作用断言。矩阵覆盖 200 / 201 行边界、25 600 / 25 601 字节边界、205→203 缩小重写放行、等于上一版放行、越限继续增长拒绝、`oldString→newString` 换成更长/更短/等长/不存在/为空、CRLF、单独 CR、BOM、末尾换行、空文件、文件不存在、坏 UTF-8、`memory.md` 小写名、库外同名、非索引文件、未配置库、10 万字符单行、中文多字节。判定分布 21 拒 : 27 放行，`skipped` 七种取值全覆盖。
+- **`skill.js` 重写（200 → 203 行，正文 88 → 103 行）**：`engramory` 技能的 `description` / `whenToUse` / 正文改成我们自己的措辞与章节结构（新增 `## Which turns count` 边界节），**18 条纪律一条不少**（问候不算任务、只读工作算任务、手里有材料不算非任务、绝不按长度判断、显式召回、回忆会过期、写前两道闸、先查重再写、一事一文 + frontmatter、`Why:`/`How to apply:` 与一条指针、只记 settled 事实、至多一条活笔记、就地更新不许日期序列、收尾是判断不是写入、不许逐轮流水与刷时间戳、Sync 五步并报账、上限真拒绝 + 缩小放行、绝不写凭据），末尾照旧写清本插件自己新增的行为（自动召回 / 沉淀提醒 / 本地索引与检索 / 写入闸门与面板）。技能名与注册方式不变，注册行为逐字未动。
+- **`test/skill.test.mjs` 18 → 34 例**：一条纪律一条断言（对照表见本次改动说明）。顺手修掉 `test/recall.test.mjs` 里一条**锚死旧正文断行**的断言（`/a greeting,\s+an\s+acknowledgement/` → 断言「纪律在场」），并实测记录一件事：注册那层 `try/catch` **只兜得住同步路径** —— 注册表晚于本插件激活（延迟回调）时抛错会浮出来，两条用例分别钉住这两面。
+- **规范与署名收口**：新增 [`docs/format.md`](docs/format.md)（**Format v1**：目录布局、frontmatter 字段表、索引一行指针写法、上限与治理、**与上游规范的差异表**、版本与迁移）与 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)（与上游 Engramory 协议的关系、借用与对齐范围、上游 MIT 许可原文）。README 改口为「布局遵循本仓库自己维护并冻结的 Format v1，借鉴了 Engramory 风格」，文档表补上这两份；`package.json` 的描述改口、`files` 收进 `THIRD-PARTY-NOTICES.md`。
+- 全仓清理「融合自 / 照抄 / 逐字来自」表述（`index.js`、`guard.js`、`bm25.js`、`docs/how-it-works.md`），改成「口径来自 Engramory 协议（MIT），实现与措辞是本仓库自己的」。
+- 测试：**664 → 734 例**（等价性 54 例 + 技能 16 例）。覆盖率：`index-guard.js` 行 100.00 / 分支 98.46 / 函数 100.00，`skill.js` 100 / 100 / 100；`npm run check` 与 `npm run bench:check`（8 项指标 + 2 个分组全在容差内）均通过。
+
+
 ## 0.13.16
 
 **面板从「一大屏等宽字」改成给人看的一页；README 从 1333 行收到 233 行。**

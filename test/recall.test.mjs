@@ -565,14 +565,17 @@ test('写入闸门：索引文件改由索引上限闸门接手（融合自 dsh-
   }
 });
 
-test('融合进来的 engramory 技能会真的注册到宿主', () => {
+test('engramory 技能会真的注册到宿主（正文纪律在场）', () => {
   const dir = fixtureStore();
   try {
     const { skills } = captureHandler({ storePath: dir });
     assert.equal(skills.length, 1, 'apply() 应当注册恰好一个技能');
     assert.equal(skills[0].name, 'engramory');
     assert.match(skills[0].content, /curated file-based memory/);
-    assert.match(skills[0].content, /a greeting,\s+an\s+acknowledgement/);
+    // 断言「纪律在场」，不是断言某一句原文：措辞会改，纪律不该丢。
+    assert.match(skills[0].content, /greeting/i);
+    assert.match(skills[0].content, /acknowledgement/i);
+    assert.match(skills[0].content, /MEMORY\.md/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -39,6 +39,30 @@
 表里的「未核实」是故意留的：没读源码也没实测过的格子就空着。一份对比表最坏的失败方式不是漏项，
 而是把猜测写成事实。
 
+### 2026-10 的货架（补记：真正会撞上的对手）
+
+上面那张表是选型期的老对手。现在（2026-10-16 抓取）真正会撞上的是这些 —— 数据来自 npm registry、
+GitHub API 与各家官方 README/文档：
+
+| 方案 | 存储 / 出网 | 记忆怎么进模型 | 写入治理 | 可观测 | 依赖 |
+|---|---|---|---|---|---|
+| **本插件** | 本地 markdown；零出网 | 检索后按预算注入（`maxPointers` / `maxChars`） | fail-closed 闸门 + 索引上限拒绝增长 + 写入审计 + 可逆归档 | **账本 + 5 句判据 + 代价曲线 + 预算用量**（可复算） | 零（全 `node:` 内置） |
+| `@fooxe/dsh-memory`（周 5 131） | 本地纯 markdown；零出网 | `ctx.systemPrompt` 常驻 | 守卫数字与本插件**一字不差**（200 行 / 25 KB / 500 条 + 密钥拒写）、原子写、防路径穿越 | 面板带**实时护栏仪表**（行数 / KB / 文件数） | 零 |
+| `claude-mem`（101 030★ / npm 6.8 万/月） | 本地 SQLite + Chroma 向量；压缩要 LLM provider | 钩子静默注入 + 4 个 MCP 工具渐进披露 | `<private>` 标签 + 正则脱敏；**无回滚** | telemetry 报 `tokens_injected` / `tokens_saved_vs_naive` / 成本（是**用量与估算**，不是「哪条被用上」） | Bun + Chroma + 模型 |
+| `mem0`（67 238★，含官方 DSH 插件） | 托管服务端；需 API key | 插件在请求组装时召回，首轮注入 ≤5 条 | ADD-only 累积、**无回滚**、记忆失败 **fail-open** | 平台 Dashboard（Analytics） | 云端 + 模型 |
+| `Letta`（25 156★） | 本地 git 仓库（MemFS）+ 模型 provider | `system/` 下的记忆文件每轮进系统提示 | **回滚最强**：每次编辑一个 commit、重组前自动备份、可选先审后写 | `/doctor` 审计 token 与重复 | docker / 模型 |
+| `agent-memory`（3 743★，MIT） | 本地 markdown 真源 + SQLite 可删缓存 | 根 `MEMORY.md` 唯一常驻注入 | hook 信任审查、只读默认；无回滚 API | `mem trace` / provenance / measurement ledger（**全网唯一沾到我们这一格**） | 零（CLI 为主，无面板） |
+
+三条结论：
+
+1. **「索引上限做成拒绝写入」不再是独家** —— `@fooxe/dsh-memory` 用的是同一组数字，
+   `dsh-engramory` 自己也有单调否决的守卫。这一条从现在起只能当「及格线」，不能当卖点。
+2. **仍然少见的是「注入 → 被用上」的可复算账本**：全网只有 `agent-memory`（trace + provenance +
+   内部 ledger）沾到边，其余全是**用量与节省的估算**（`claude-mem` 报 tokens、`mem0` 报 Dashboard
+   分析、`Memori` 报年省金额）。本插件的账本是**逐轮逐条**的，并被面板与尺子复算成人话。
+3. **写入可逆这一格，Letta 是最强的一档**（git 版本历史）。我们的可逆归档（整段搬家 + 备份 +
+   两段式 + 可再分层）方向对，但它靠的是 git 的通用能力 —— 这一条我们也只能当及格线。
+
 ### 有几件事不是本插件独有的
 
 写清楚这些，省得读者以为独家：**零模型调用**至少有四家同类做了（`thoth-mem`、

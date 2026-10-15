@@ -1,0 +1,500 @@
+{
+  "$comment": "这份快照取自移植版实现（index-guard.js 的 HEAD 版本，commit 821872ac888b92625656448901a1eaa8a6db71d），用来证明重写是行为等价的：每条的 ok/skipped/reason/countLines/measureIndex/文件字节都与旧实现逐字节相同。矩阵在 test/fixtures/index-guard-matrix.mjs，用例逐个说明见每条 note。注意：这里锁的是「判定结果」，不锁代码结构与注释 —— 重写后函数名、结构、行数都可以不同，结果必须一样。这份快照锁不住的风险（重生成脚本 /tmp/ig-equiv/generate.mjs 不随仓库提交）：改写前实现的「未测分支」如果被一起搬错，新旧两边会以同样的方式错，快照看不出来；矩阵没覆盖的输入维度（比如自定义 maxLines/maxBytes 的极端值）同理。",
+  "sourceCommit": "821872ac888b92625656448901a1eaa8a6db71d",
+  "generatedBy": "/tmp/ig-equiv/generate.mjs（一次性对拍脚本，不提交）",
+  "caseCount": 48,
+  "defaults": {
+    "maxLines": 200,
+    "maxBytes": 25600
+  },
+  "cases": {
+    "lines-200-exactly": {
+      "note": "刚好 200 行放行（上限是「超过」才拒，等于不算超）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 200,
+      "measureIndex": null,
+      "fileAfterCallBytes": 0
+    },
+    "lines-201-reject": {
+      "note": "201 行被拒 —— 行数这一维的越界点",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（201 行 > 200）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 201,
+      "measureIndex": "201 行 > 200",
+      "fileAfterCallBytes": 0
+    },
+    "bytes-25600-exactly": {
+      "note": "单行正好 25600 字节放行（字节上限是「>」，等于放行）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 1,
+      "measureIndex": null,
+      "fileAfterCallBytes": 0
+    },
+    "bytes-25601-reject": {
+      "note": "单行 25601 字节被拒 —— 字节这一维的越界点",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（25601 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 1,
+      "measureIndex": "25601 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "lines-245-bytes-under": {
+      "note": "行数超（245 行）但字节没超：只报行数那一维",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（245 行 > 200）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 245,
+      "measureIndex": "245 行 > 200",
+      "fileAfterCallBytes": 0
+    },
+    "bytes-25800-lines-200": {
+      "note": "正好 200 行但 25800 字节：只报字节那一维",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（31354 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 200,
+      "measureIndex": "31354 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "shrink-205-to-203-over-limit": {
+      "note": "当前 205 行已超限，重写成 203 行（仍然超限）必须放行 —— 否则索引锁死",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 203,
+      "measureIndex": "203 行 > 200",
+      "fileAfterCallBytes": 5929
+    },
+    "grow-205-to-202-from-205": {
+      "note": "当前 205 行，写 202 行：虽然仍超限但确实变小 → 放行；对照上一条的方向性",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 202,
+      "measureIndex": "202 行 > 200",
+      "fileAfterCallBytes": 5929
+    },
+    "same-size-205-from-205": {
+      "note": "与当前一模一样（205 行）：不算增长，放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 205,
+      "measureIndex": "205 行 > 200",
+      "fileAfterCallBytes": 5929
+    },
+    "grow-205-to-206": {
+      "note": "越限文件继续长大（205 → 206 行）必须被拒",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（206 行 > 200）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 206,
+      "measureIndex": "206 行 > 200",
+      "fileAfterCallBytes": 5929
+    },
+    "byte-shrink-25800-to-25600": {
+      "note": "行数不变（200）、字节从 25800 缩到 25600：字节那一维只拦增长，放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 200,
+      "measureIndex": "31354 字节 > 25600",
+      "fileAfterCallBytes": 31354
+    },
+    "byte-shrink-25800-to-25700-still-over": {
+      "note": "行数不变（200）、字节 25800 → 25700（即超限），仍然放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（31454 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 200,
+      "measureIndex": "31454 字节 > 25600",
+      "fileAfterCallBytes": 31354
+    },
+    "byte-grow-25800-to-25900": {
+      "note": "越限文件继续长胖（+100 字节）：被拒",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（31654 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 200,
+      "measureIndex": "31654 字节 > 25600",
+      "fileAfterCallBytes": 31354
+    },
+    "file-absent-oversized": {
+      "note": "库里还没有索引时写一份超限的：直接拒（没有「变小」可言）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（999 行 > 200，29749 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 999,
+      "measureIndex": "999 行 > 200，29749 字节 > 25600",
+      "fileAfterCallBytes": null
+    },
+    "file-absent-small": {
+      "note": "库里还没有索引时写一份正常的：放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 1,
+      "measureIndex": null,
+      "fileAfterCallBytes": null
+    },
+    "single-huge-line": {
+      "note": "一行 10 万字符：行数没超但字节爆表 → 拒（且行数那一维不出现）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（100000 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 1,
+      "measureIndex": "100000 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "utf8-multibyte-under-cap": {
+      "note": "多字节正文：字节按 utf8 算（一个中文字 3 字节），100 行中文仍在上限内 → 放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 100,
+      "measureIndex": null,
+      "fileAfterCallBytes": 0
+    },
+    "utf8-multibyte-over-cap": {
+      "note": "800 行中文（约 40KB）：行数与字节两维都超 → 理由里两维都出现",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（800 行 > 200，35999 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 800,
+      "measureIndex": "800 行 > 200，35999 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "edit-grow-over-line-cap": {
+      "note": "edit 把一段换成更长的：模拟出 205 行 → 拒（判的是替换后的结果）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（205 行 > 200）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "fileAfterCallBytes": 5779
+    },
+    "edit-shrink-huge": {
+      "note": "edit 把 400 行里的前 300 行换成一行：缩小 → 放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": true,
+      "fileAfterCallBytes": 37354
+    },
+    "edit-line-count-unchanged-byte-shrink": {
+      "note": "edit 逐行变短：行数从 400 降到 399、字节也变小 → 放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": true,
+      "fileAfterCallBytes": 37354
+    },
+    "edit-append-tiny-to-huge": {
+      "note": "给 400 行的索引追加一小段（+1 行）：即使只长一点也拒",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（401 行 > 200，37372 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "fileAfterCallBytes": 37354
+    },
+    "edit-old-string-missing": {
+      "note": "old_string 找不到：真实工具会报错不改文件，所以按「当前内容」判 → 已超限即拒",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": true,
+      "fileAfterCallBytes": 37354
+    },
+    "edit-old-string-ambiguous": {
+      "note": "old_string 出现多次：工具同样什么都不改，按当前内容判 → 已超限即拒",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": true,
+      "fileAfterCallBytes": 37354
+    },
+    "edit-new-string-missing": {
+      "note": "new_string 缺失按空串算（= 删除该片段）：真缩小 → 放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": true,
+      "fileAfterCallBytes": 5779
+    },
+    "edit-unmeasurable-over-limit": {
+      "note": "old_string 是空串（形状不认）且索引已超限 → 拒绝盲改，理由里带出口",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": false,
+      "reason": "拒绝盲改索引：MEMORY.md 当前已超上限（400 行 > 200，37354 字节 > 25600），而这次编辑的结果无法从参数还原。请改用整篇重写来压缩：**缩小的重写永远放行**（哪怕仍然超限）。把过长的行改成「一句钩子 + 链接」、合并重复项、把冷笔记归档 —— 索引是目录，超限之后的部分会被静默地不再被召回。",
+      "fileAfterCallBytes": 37354
+    },
+    "edit-unmeasurable-not-over": {
+      "note": "old_string 不是字符串且索引没超限 → 放行并标 skipped: unmeasurable",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": true,
+      "skipped": "unmeasurable",
+      "fileAfterCallBytes": 31
+    },
+    "edit-current-file-absent": {
+      "note": "edit 但当前文件读不到 → skipped: no-current（不替工具预判）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "edit",
+      "ok": true,
+      "skipped": "no-current",
+      "fileAfterCallBytes": null
+    },
+    "crlf-201-reject": {
+      "note": "CRLF 正文：行数按 \\n 数（201 行照样拒），\\r 只进字节数",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（201 行 > 200）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 201,
+      "measureIndex": "201 行 > 200",
+      "fileAfterCallBytes": 0
+    },
+    "cr-only-500-lines": {
+      "note": "纯 CR 换行：不是 \\n，500 个「行」在行数口径里只是 1 行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 1,
+      "measureIndex": null,
+      "fileAfterCallBytes": 0
+    },
+    "crlf-shrink-over-limit": {
+      "note": "当前是 LF 的 25800 字节，重写成 CRLF 但只有 300 行：字节变小 → 放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（300 行 > 200）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 300,
+      "measureIndex": "300 行 > 200",
+      "fileAfterCallBytes": 31354
+    },
+    "bom-pushes-over-bytes": {
+      "note": "BOM 占 3 字节，把正好 25600 字节的正文顶成 25603 → 拒（字节那一维）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（25603 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 1,
+      "measureIndex": "25603 字节 > 25600",
+      "fileAfterCallBytes": 25600
+    },
+    "bom-removed-shrinks": {
+      "note": "当前文件带 BOM（25603 字节），重写时去掉 BOM（25600）→ 变小，放行",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 1,
+      "measureIndex": null,
+      "fileAfterCallBytes": 25603
+    },
+    "trailing-newline-ignored": {
+      "note": "200 行 + 末尾换行：行数仍是 200（末尾那一个换行不另算一行）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 200,
+      "measureIndex": null,
+      "fileAfterCallBytes": 0
+    },
+    "trailing-newline-201-still-rejected": {
+      "note": "201 行 + 末尾换行：仍然拒（末尾敏感会把它算成 202，那是另一个口径）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（201 行 > 200）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 201,
+      "measureIndex": "201 行 > 200",
+      "fileAfterCallBytes": 0
+    },
+    "empty-file-empty-write": {
+      "note": "空文件写空内容：放行（没超限）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 0,
+      "measureIndex": null,
+      "fileAfterCallBytes": 0
+    },
+    "empty-file-implicit-missing": {
+      "note": "文件字段缺省 = 不存在：写空内容放行（第一次写入就是空索引）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "countLines": 0,
+      "measureIndex": null,
+      "fileAfterCallBytes": null
+    },
+    "empty-file-huge-write": {
+      "note": "空文件（真实存在但 0 字节）写一份超限：拒",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（300 行 > 200）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 300,
+      "measureIndex": "300 行 > 200",
+      "fileAfterCallBytes": 0
+    },
+    "lowercase-memory-md-oversized": {
+      "note": "小写 memory.md 就是那份索引（macOS/Windows 上同一个文件），照样拒",
+      "file": "store/memory.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 memory.md 顶过上限（999 行 > 200，29749 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 999,
+      "measureIndex": "999 行 > 200，29749 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "outside-store-same-name": {
+      "note": "库外同名的 MEMORY.md 不归它管 → skipped: outside-store",
+      "file": "outside/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "skipped": "outside-store",
+      "countLines": 999,
+      "measureIndex": "999 行 > 200，29749 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "other-file-in-store": {
+      "note": "库根目录下的笔记文件（与索引同目录，但不是索引）不归上限管 → skipped: not-index",
+      "file": "store/project-x.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "skipped": "not-index",
+      "countLines": 999,
+      "measureIndex": "999 行 > 200，29749 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "nested-file-in-store": {
+      "note": "库内子目录里的同名文件：不在库根目录上，同样不归它管 → skipped: outside-store",
+      "file": "store/nested/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "skipped": "outside-store",
+      "countLines": 999,
+      "measureIndex": "999 行 > 200，29749 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "no-store-configured": {
+      "note": "没配库（storePath 空）→ skipped: not-configured",
+      "file": "outside/MEMORY.md",
+      "storePath": "",
+      "tool": "write",
+      "ok": true,
+      "skipped": "not-configured",
+      "countLines": 999,
+      "measureIndex": "999 行 > 200，29749 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "store-path-with-trailing-space": {
+      "note": "storePath 末尾带空格（`store ` 解析出来是另一个目录）：trim 之后才落在真正的库根目录上 → 该拒的照样拒",
+      "file": "store/MEMORY.md",
+      "storePath": "/store ",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（999 行 > 200，29749 字节 > 25600）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 999,
+      "measureIndex": "999 行 > 200，29749 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "relative-file-path": {
+      "note": "相对 filePath 按进程 cwd 解析（宿主传的是绝对路径，这条只钉住既有口径）",
+      "file": "outside/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "skipped": "outside-store",
+      "countLines": 999,
+      "measureIndex": "999 行 > 200，29749 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "unknown-tool": {
+      "note": "既不是 write 也不是 edit 的工具调用 → skipped: not-a-write",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "read",
+      "ok": true,
+      "skipped": "not-a-write",
+      "countLines": 999,
+      "measureIndex": "999 行 > 200，29749 字节 > 25600",
+      "fileAfterCallBytes": 0
+    },
+    "write-without-content": {
+      "note": "write 没带 content → skipped: no-content（不猜内容）",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": true,
+      "skipped": "no-content",
+      "fileAfterCallBytes": 0
+    },
+    "custom-caps": {
+      "note": "自定义上限（5 行 / 1024 字节）：6 行就该拒 —— 上限参数真的被用了",
+      "file": "store/MEMORY.md",
+      "storePath": "/store",
+      "tool": "write",
+      "ok": false,
+      "reason": "拒绝写入记忆库：这次写入会把索引 MEMORY.md 顶过上限（6 行 > 5）。索引每次会话都要读、而宿主只读前面那么多，超限的部分会被静默地不再被召回。请先压缩再写：把细节挪进各自的笔记文件、合并重复、归档冷笔记，每行保持「一句短钩子 + 链接」。**缩小的重写永远放行**，可以一步一步压。",
+      "countLines": 6,
+      "measureIndex": "6 行 > 5",
+      "fileAfterCallBytes": 0
+    }
+  }
+}

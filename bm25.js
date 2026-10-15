@@ -156,7 +156,7 @@ const PHRASE_BONUS = 0;
 const QUERY_TERM_CAP = 24;
 
 /**
- * freshness 衰减：照抄灵枢 `rust/src/freshness.rs` 的口径（半衰期 30 天）。
+ * freshness 衰减：口径参考灵枢（`rust/src/freshness.rs`，半衰期 30 天），实现与调参是我们自己的。
  *
  * 它解决的是我们此前完全没有的一维：**同样匹配强度下，新的记忆该排在旧的前面**。
  * 原式 `decay = exp(-gamma × Δt)`，`gamma = ln2 / 半衰期`，Δt 按天，floor 到 SCORE_FLOOR。

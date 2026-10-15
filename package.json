@@ -1,7 +1,7 @@
 {
   "name": "dsh-engramory-recall",
-  "version": "0.13.16",
-  "description": "Local BM25 auto-recall, fail-closed write guard, static doctor and a memory panel for the Engramory markdown store — no network, no model, no daemon.",
+  "version": "0.14.0",
+  "description": "Local BM25 auto-recall, fail-closed write guard, static doctor, account-keeping ledger and a memory panel for a local markdown memory store (Format v1) — no network, no model, no daemon, no dependencies.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -59,6 +59,7 @@
     "mcp.js",
     "providers/openai-embeddings.mjs",
     "CHANGELOG.md",
+    "THIRD-PARTY-NOTICES.md",
     "cordis.patch.yml",
     "README.md",
     "docs/",
