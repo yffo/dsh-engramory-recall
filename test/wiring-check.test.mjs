@@ -15,6 +15,10 @@ import test from 'node:test';
  */
 const PKG_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
+/** patchEdit 里要往「被检仓库」写东西（例如放一个假提供方），用它拿到那个目录。 */
+let lastRepoDir = '';
+const fxRepoDir = () => lastRepoDir;
+
 function makeFixture({ patchEdit, pkgEdit } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'wiring-check-'));
   const repo = join(home, 'repo');
@@ -28,6 +32,7 @@ function makeFixture({ patchEdit, pkgEdit } = {}) {
   writeFileSync(join(store, 'MEMORY.md'), '# 索引\n');
   writeFileSync(join(store, 'reference-x.md'), '---\nname: x\n---\n正文\n');
 
+  lastRepoDir = repo;
   const patchPath = join(repo, 'cordis.patch.yml');
   let patch = readFileSync(patchPath, 'utf8').replace('~/memory/engramory', store);
   if (patchEdit) patch = patchEdit(patch, store);
@@ -90,6 +95,53 @@ test('库路径不存在：必须变红（空库会把召回率静默地变成 0
     const { code, out } = run(fx);
     assert.equal(code, 1, out);
     assert.match(out, /不存在/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('语义接缝：配了真提供方就活体探一次（假提供方也能证明这条路是通的）', () => {
+  const fx = makeFixture({
+    patchEdit: (p) => {
+      // 假提供方写在被检仓库里，用相对路径指它 —— 走的是和真提供方一样的 loadProvider 路径。
+      writeFileSync(
+        join(fxRepoDir(p), 'fake-provider.mjs'),
+        "export const name = 'fake' ;\nexport function rerank({ docs }) { return docs.map((d) => d.id).reverse(); }\n",
+      );
+      return p.replace(
+        '        enabled: true',
+        `        enabled: true\n        semanticProvider: '${join(fxRepoDir(p), 'fake-provider.mjs')}'\n        semanticPool: 3`,
+      );
+    },
+  });
+  try {
+    const { out } = run(fx);
+    assert.match(out, /2b\) 语义接缝/);
+    assert.match(out, /接缝活着：.*fake-provider\.mjs 真的答了/, out);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('语义接缝：配了但提供方不存在，要说清是哪一种坏法（不是一句“配置错误”）', () => {
+  const fx = makeFixture({
+    patchEdit: (p) => p.replace('        enabled: true', "        enabled: true\n        semanticProvider: './nope-provider.mjs'"),
+  });
+  try {
+    const { out } = run(fx);
+    assert.match(out, /接缝配了但这次用不上：code=not-found/, out);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('语义接缝：相对路径要提醒（脚本的 cwd 与 App 的 cwd 不一定一样）', () => {
+  const fx = makeFixture({
+    patchEdit: (p) => p.replace('        enabled: true', "        enabled: true\n        semanticProvider: './fake-provider.mjs'"),
+  });
+  try {
+    const { out } = run(fx);
+    assert.match(out, /按\*\*进程 cwd\*\*\s*解析/, out);
   } finally {
     fx.cleanup();
   }

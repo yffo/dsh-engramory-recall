@@ -161,8 +161,10 @@ if (!ourRow) {
   if (!readKeys.has('storePath')) warn('index.js 里已经读不到 storePath 了（键被改名？），而 patch 还在配它');
 }
 
+let profileOverride = null;
 if (existsSync(profilePatchPath)) {
   const override = parseRows(readFileSync(profilePatchPath, 'utf8')).find((row) => row.name === PLUGIN_NAME || row.id === 'engramory-recall');
+  profileOverride = override ?? null;
   if (override) {
     const unknown = override.keys.filter((key) => !readKeys.has(key));
     unknown.length
@@ -172,6 +174,90 @@ if (existsSync(profilePatchPath)) {
     notes.push('profile patch 没有覆盖我们这一行：配置全部来自插件自带的默认值（升级时不会失配，但也无法按 profile 定制）');
   }
 }
+
+// ── 2b. 语义接缝：配没配、活没活、跑的是不是旧代码 ────────────────────────
+//
+// 这一节做三件脚本能做、而读代码看不出来的事：
+//   1. 用「patch 整段替换」的真实语义算出**生效配置**（profile 覆盖存在就整段用它，缺的键落回 DEFAULTS）；
+//   2. 配了真提供方就真发一次请求 —— 用的是内置的 3 条假文档，**不碰你的真库**；
+//   3. 比一下仓库代码的 mtime 与 DSH 进程的启动时间：Node 会缓存 ESM 模块，
+//      改了代码不重启 App 的话，App 里跑的还是旧模块（配置会热重载，代码不会）。
+console.log('\n2b) 语义接缝');
+const seamDefaults = (() => {
+  const block = indexSource.match(/const DEFAULTS = \{([\s\S]*?)\n\};/);
+  const out = {};
+  for (const key of ['semanticProvider', 'semanticTimeoutMs', 'semanticPool', 'semanticFusion', 'semanticHostRoute']) {
+    const m = block?.[1]?.match(new RegExp(`^ {2}${key}:\\s*(.+?),?$`, 'm'));
+    const raw = m ? m[1].trim().replace(/^["']|["']$/g, '').replace(/\/\/.*$/, '').trim() : undefined;
+    out[key] = raw === undefined || raw === '' ? undefined : (Number.isFinite(Number(raw)) && raw !== '' ? Number(raw) : raw);
+  }
+  return out;
+})();
+// 生效配置：bundle 那行被 profile 覆盖时是**整段替换**，所以存在覆盖就只认覆盖里的键。
+const effective = { ...seamDefaults, ...((profileOverride ?? ourRow)?.config ?? {}) };
+const seamProvider = String(effective.semanticProvider ?? '').trim();
+
+if (!seamProvider) {
+  notes.push('语义接缝没开（semanticProvider 空）—— 按需检索走纯词面，这是默认值不是故障');
+} else if (seamProvider === 'host-llm') {
+  notes.push('语义接缝配的是 host-llm（宿主模型做查询改写）—— 只能在 App 内验证，脚本没有 ctx');
+} else if (seamProvider === 'host-embed') {
+  notes.push('语义接缝配的是 host-embed（复用 DSH 里那条路由）—— 只能在 App 内验证，脚本读不到 DSH 的设置与凭据');
+} else {
+  const seamMod = await import(pathToFileURL(join(pluginDir, 'semantic.js')).href);
+  const { buildIndex } = await import(pathToFileURL(join(pluginDir, 'bm25.js')).href);
+  const FIXTURE_NOTE = '本地记忆库的检索只在这台机器上跑';
+  const docs = [
+    { id: 'reference-npm-publish.md', title: '把插件发到 npm', description: '发版三步与 token 的坑', body: `${FIXTURE_NOTE}。npm publish 之前先 npm test。`, aliases: [], mtimeMs: 0 },
+    { id: 'project-pipeline.md', title: '构建流水线', description: 'CI 上跑什么', body: `${FIXTURE_NOTE}。推 tag 之后 CI 跑测试与基准自检。`, aliases: [], mtimeMs: 0 },
+    { id: 'user-preferences.md', title: '表达偏好', description: '说话方式', body: `${FIXTURE_NOTE}。中文、简短直接，不用客套填充。`, aliases: [], mtimeMs: 0 },
+  ];
+  if (seamProvider.startsWith('.')) {
+    warn(`提供方写的是相对路径（${seamProvider}）—— 它按**进程 cwd** 解析，脚本的 cwd 与 App 的 cwd 不一定一样；改用绝对路径或包名（如 dsh-engramory-recall/providers/openai-embeddings）`);
+  }
+  const started = Date.now();
+  const result = await seamMod.semanticSearch({
+    index: buildIndex(docs),
+    query: '怎么把包发到 npm',
+    limit: 2,
+    config: {
+      provider: seamProvider,
+      timeoutMs: Number(effective.semanticTimeoutMs) || 5000,
+      pool: Number(effective.semanticPool) || undefined,
+      fusion: effective.semanticFusion,
+      hostRoute: effective.semanticHostRoute,
+    },
+  });
+  const ms = Date.now() - started;
+  if (result.used) {
+    ok(`接缝活着：${seamProvider} 真的答了 —— ${ms}ms，code=${result.code}，池 ${result.pool ?? '?'}，融合 ${result.fusion}`);
+  } else {
+    warn(`接缝配了但这次用不上：code=${result.code}（${ms}ms）—— ${result.message}`);
+  }
+}
+
+// 旧代码检测：仓库里 index.js / semantic.js 比 DSH 进程还新 = App 里跑的是旧模块。
+try {
+  const newest = Math.max(
+    statSync(join(PKG_DIR, 'index.js')).mtimeMs,
+    statSync(join(PKG_DIR, 'semantic.js')).mtimeMs,
+    statSync(join(PKG_DIR, 'providers', 'openai-embeddings.mjs')).mtimeMs,
+  );
+  const ps = spawnSync('ps', ['-axo', 'lstart=,command='], { encoding: 'utf8' });
+  const appLine = String(ps.stdout ?? '')
+    .split('\n')
+    .find((l) => /DeepSeek Harness\.app\/Contents\/MacOS\/DeepSeek Harness(\s|$)/.test(l) || /dsh\s+web/.test(l));
+  const startedAt = appLine ? Date.parse(appLine.trim().slice(0, 24)) : NaN;
+  if (Number.isFinite(startedAt) && newest > startedAt + 1000) {
+    const msg = `DSH 进程比仓库代码旧（进程 ${new Date(startedAt).toLocaleTimeString()}，代码 ${new Date(newest).toLocaleTimeString()}）—— Node 会缓存 ESM：App 里跑的还是旧模块`;
+    // 接缝开着 = 你正指望新代码在 App 里生效，这时它是**要处理的问题**；
+    // 接缝没开（干净安装 / 没配语义）时新代码晚一轮生效无所谓，只提醒不判红。
+    if (seamProvider) warn(`${msg}，你没重启 App 之前接缝那截新代码不会跑（配置会热重载，代码不会）`);
+    else notes.push(`${msg}；语义接缝没开，这次不影响召回，重启 App 后新代码才生效`);
+  } else if (Number.isFinite(startedAt)) {
+    ok('DSH 进程比仓库代码新 —— App 里跑的就是当前这份代码');
+  }
+} catch { /* 拿不到进程信息就安静跳过：这不是配置问题 */ }
 
 // ── 3. 库路径真的指到东西了吗 ─────────────────────────────────────────────
 console.log('\n3) 记忆库');
