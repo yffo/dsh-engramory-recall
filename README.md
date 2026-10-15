@@ -1137,6 +1137,7 @@ npm run bench:check       # 合成基准 + 和 bench/expectations.json 对账（
 npm run bench:bridges     # 同义表覆盖率尺子：死值、覆盖、使用面、逐键消融（--ablate / --json / --store）
 npm run bench:seam        # 语义接缝的代价与天花板（四种坏提供方 + 作弊上界 + 融合模式对照）
 npm run bench:guard       # 把握度门槛（guarded）的尺子：保护集/争夺集拆开看，--fake-cos 量垃圾提供方
+                          #   （首次要先 `--collect` 打真端点采一次数，之后离线复扫不花 API 钱）
 npm run bench:ceiling     # 池宽天花板：任一提供方在公开数据集上的上界 + 每查询要发多少东西
 npm run bench:embed       # embeddings 接缝：--fake 量管线与代价 / --real 用真端点量质量（--store 才上真库）
 npm run bench:probe       # 探针卷子本身：174 条真 query 的词面名次分布、保护区/争夺区、池内召回上界（--json）
