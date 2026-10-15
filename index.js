@@ -292,7 +292,12 @@ export function apply(ctx, config = {}) {
       'Search the local Engramory markdown memory store with BM25 (offline, read-only). ' +
       'Use it when the automatic recall did not surface what you need — for example before ' +
       'answering a question about past decisions, pitfalls or user preferences. It returns ' +
-      'matching note filenames with a matched snippet and a score; open the ones you need with read.',
+      'matching note filenames with a matched snippet and a score; open the ones you need with read. ' +
+      // 这条不是文风，是量出来的：模型改写融合净赔，而「换措辞再搜一次」的收益=改写里最好那条
+      // （真库探针 80.6% vs 词面 72.2%）。措辞敏感是 BM25 的本性，所以交给调用方换词最划算。
+      'It matches wording, not meaning: if it misses, rephrase the query in your own words and ' +
+      'search once more (synonyms, the term in English, the wording a note would use) — cheaper and ' +
+      'more effective than expecting one phrasing to land.',
     parameters: {
       type: 'object',
       properties: {
@@ -373,7 +378,7 @@ export function apply(ctx, config = {}) {
         hits,
         note: hits.length
           ? '用 read 打开需要的文件；正文在笔记里，不在这个结果里'
-          : '没有命中：换关键词再试（中文可以换相邻词）',
+          : '没有命中：换个说法再搜一次（同义词、术语的英文写法、笔记里可能用的那个词）—— 它只认措辞不认意思',
         semantic: { used: result.used, code: result.code, message: result.message },
       };
     },
