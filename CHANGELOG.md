@@ -1,3 +1,17 @@
+# Changelog
+
+## 0.13.9
+
+**面板与 MCP 两层的测试补厚，外加「半截数据不再把面板整片打白」。**
+
+- **面板渲染层**（`client/client.js`）：行覆盖 61% → 98%（函数 53% → 93%）；`test/client-panel.test.mjs` 10 → 59 例 —— 七个页签、笔记过滤、日志折叠、归档动作与 POST 契约、以及一整组「脏数据不许抛」的用例。
+- **MCP 服务器层**（`mcp.js`）：行覆盖 95.8% → 99.5%、分支 61% → 94.7%、函数 100%；`test/mcp-protocol.test.mjs` 10 → 28 例 —— 协议帧与通知、stdio 主循环（含超 64 行排队）、bin 入口与符号链接、离线语义降级。
+- **面板不再因脏数据白屏**：`positions` / `neverOpened` / `plan.historyFiles` / `state.log` / `state.notes` / `audit.findings` / `writeAudit.entries` / `archive.plans` / `archive.skipped` / `scoreCurve.points` 统一过 `objsOnly`（非数组当空、元素不是对象就滤掉），`finding.files` 过 `strsOnly`。过去 `state.log` 或 `writeAudit.entries` 里混进一个 `null`，七个页签会一起白屏。
+- **显示层净化**：进面板的数字统一过 `finiteNum` / `fmtNum` / `fmtCount` / `fmtPct` / `fmtSecs`（非有限数、超出安全整数 → `—`）；半截字段不再印出 `undefined 字符` / `undefined 轮` / `undefined 行`；`state.config` 整块缺失时写「配置未回显」，缺字段印 `—`，只有真的 falsy 才 `off` —— **「关」与「不知道」分开了**。
+- **位置级曲线行标签**改取桶自己的 `position`（过去用过滤后的下标，缺桶时会张冠李戴）。
+- 测试总数 414 → 481；`npm test` 全绿。
+- 顺带核验（只是补用例，不是修复）：MCP 的 `engramory_read` 越界防线在 basename + 后缀那道检查上，`../x.md` / `/etc/passwd` / `%2Fetc%2Fpasswd` / `%00` 全被拒。
+
 ## 0.13.8
 
 **测试面铺到总装与协议层：267 → 414 例；子代理顺手挖出并修掉四处真问题。**
