@@ -102,7 +102,9 @@ export function pickInjected(id, injectedAt) {
  * @param {{positions?: number, neverOpenedLimit?: number}} [options]
  */
 export function summarizeUsage(lines, options = {}) {
-  const maxPositions = Math.max(1, Number(options.positions) || 8);
+  // 必须取整：小数（如 --positions 2.5）会让 Array.from({length: 2.5}) 只建 2 格，
+  // 后面的 i < maxPositions 却能走到 2 —— 越界写入直接 TypeError。
+  const maxPositions = Math.max(1, Math.floor(Number(options.positions)) || 8);
   const neverLimit = Math.max(1, Number(options.neverOpenedLimit) || 12);
   // 窗口上限（maxPointers）只用来算「窗口用满了几轮」；不知道就不算，别瞎猜。
   const windowLimit = Math.max(0, Number(options.maxPointers) || 0);
@@ -197,6 +199,11 @@ export function summarizeUsage(lines, options = {}) {
       perNote.set(id, rec);
     });
   }
+  // 去重：同一轮注入里，同一条指针被读三次只算「打开过一个指针」。`used` 行记的是打开**次数**，
+  // 而分母 pointers 是注入**条数**，量纲不同 —— 不去重的话 20 条指针被读 30 次会算出打开率
+  // 150%，判据还会反过来说「打开率偏高：窗口可以放宽」，正好把结论说反。
+  const countedUsed = new Set();
+  let usedCounted = 0;
   for (const ev of usedEvents) {
     let position = -1;
     let owner = null;
@@ -208,10 +215,16 @@ export function summarizeUsage(lines, options = {}) {
         owner = inj;
       }
     }
-    if (owner) scopes[owner.scope].used += 1;
+    const key = owner ? `${owner.at}\u0000${ev.id}` : null;
+    if (key) {
+      if (countedUsed.has(key)) continue;
+      countedUsed.add(key);
+      scopes[owner.scope].used += 1;
+      usedCounted += 1;
+    }
     if (position >= 0 && position < maxPositions) positions[position].opened += 1;
     const rec = perNote.get(ev.id);
-    if (rec) rec.opened += 1;
+    if (rec) rec.opened += 1;   // 没找到注入过它的那一轮 = 冷启动打开，照旧记账
   }
 
   const notes = [...perNote.values()].sort((a, b) => b.injected - a.injected || b.lastAt - a.lastAt);
@@ -220,7 +233,9 @@ export function summarizeUsage(lines, options = {}) {
   const q = (arr, p) => (arr.length ? arr[Math.min(arr.length - 1, Math.floor(p * (arr.length - 1)))] : 0);
   return {
     ...stats,
-    openRate: stats.pointers ? stats.used / stats.pointers : 0,
+    // 分子是**去重后**的打开条数（openRate ≤ 1 恒成立）；stats.used 仍是原始 used 行数。
+    openRate: stats.pointers ? usedCounted / stats.pointers : 0,
+    usedCounted,
     // 按提问者拆开的同一笔账：主对话轮才是「这套召回到底有没有用」的判据，
     // 委派轮的指针几乎注定不会被打开（unknown = 升级前写的老行）。
     scopes: Object.fromEntries(

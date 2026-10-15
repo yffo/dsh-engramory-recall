@@ -65,8 +65,13 @@ export function readDocs(storePath) {
     } catch {
       continue;
     }
-    bytes += Buffer.byteLength(text);
-    if (bytes > MAX_BYTES) break;
+    const fileBytes = Buffer.byteLength(text);
+    // 单篇就超过总上限：跳过它，而不是 break —— break 会让它后面（以及它自己）的所有笔记
+    // 一篇都读不到，症状是「库里 69 篇笔记，索引却是空的」，而原因只是有一篇大文件排在最前。
+    if (fileBytes > MAX_BYTES) continue;
+    // 总量到顶：排序在后面的干脆不读了（这才是 break 的本来意图）。
+    if (bytes + fileBytes > MAX_BYTES) break;
+    bytes += fileBytes;
     const { title, description, body, aliases } = splitNote(text);
     const filePath = join(storePath, file);
     if (Buffer.byteLength(body) <= SECTION_BYTES) {
@@ -98,7 +103,9 @@ export function readDocs(storePath) {
 
 /** 解析 frontmatter 与正文；frontmatter 只取 name/description，不做 YAML 依赖。 */
 export function splitNote(text) {
-  const raw = String(text ?? '');
+  // 入口统一：去 BOM（记事本另存为 UTF-8 会带）、CRLF/CR 归一成 LF。
+  // 不归一的话 \r 会混进标题与词项、BOM 会让 frontmatter 整段被当成正文喂进索引。
+  const raw = String(text ?? '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
   let front = '';
   let body = raw;
   if (raw.startsWith('---')) {
@@ -193,7 +200,10 @@ export function chunkBody(body, limit = SECTION_BYTES) {
  */
 export function corpusFingerprint(docs) {
   const h = createHash('sha256');
-  for (const d of [...docs].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+  // 长笔记会切成多桶（同一 id 多个文档），所以比较器必须是**全序**：只比 id 是不够的 ——
+  // 相等时返回常量 1 会让排序结果依赖输入顺序，于是「同一份语料换个顺序」得到不同指纹，
+  // A/B 对比就会把一次顺序抖动误判成「语料变了」。第二键用 seq。
+  for (const d of [...docs].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : (a.seq ?? 0) - (b.seq ?? 0)))) {
     // ⚠️ 这里必须覆盖**所有喂进索引的字段**，而不只是正文。
     // 第一版只哈希了 id + body，于是「只改 aliases」时指纹纹丝不动 —— 而 aliases 是会
     // 被 `bm25.js` 计两遍、实打实影响排序的。结果就是探针一边说「语料没变、这次是可信

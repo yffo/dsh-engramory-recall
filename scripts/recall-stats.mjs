@@ -28,7 +28,7 @@ const opt = (name, fallback) => {
 const HOME = homedir();
 const expandHome = (p) => (p === '~' || p.startsWith('~/') ? join(HOME, p.slice(2)) : p);
 const STORE = expandHome(opt('--store', '~/memory/engramory'));
-const POSITIONS = Math.max(1, Number(opt('--positions', '5')) || 5);
+const POSITIONS = Math.max(1, Math.floor(Number(opt('--positions', '5'))) || 5);
 const LIMIT = Math.max(10, Number(opt('--limit', '2000')) || 2000);
 const wantJson = argv.includes('--json');
 /** 原因码 → 人话（与 usage.js 的 reasonVerdict 用同一套口径）。 */

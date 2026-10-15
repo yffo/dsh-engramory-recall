@@ -288,24 +288,26 @@ export async function handleMessage(session, message) {
     return notification ? null : fail(id, -32600, 'Invalid Request：method 必须是字符串。');
   }
   if (method.startsWith('notifications/')) return null;
+  // 协议规定「通知」不回包：已知方法也要按 id 判断一次，否则会写出没有 id 的响应帧。
+  const reply = (result) => (notification ? null : ok(id, result));
   try {
     switch (method) {
       case 'initialize':
-        return ok(id, initializeResult(message.params));
+        return reply(initializeResult(message.params));
       case 'ping':
-        return ok(id, {});
+        return reply({});
       case 'tools/list':
-        return ok(id, { tools: TOOLS });
+        return reply({ tools: TOOLS });
       case 'tools/call':
-        return ok(id, await callTool(session, message.params));
+        return reply(await callTool(session, message.params));
       case 'resources/list':
-        return ok(id, listResources(session));
+        return reply(listResources(session));
       case 'resources/templates/list':
-        return ok(id, { resourceTemplates: [RESOURCE_TEMPLATE] });
+        return reply({ resourceTemplates: [RESOURCE_TEMPLATE] });
       case 'resources/read':
-        return ok(id, readResource(session, message.params));
+        return reply(readResource(session, message.params));
       case 'prompts/list':
-        return ok(id, { prompts: [] });
+        return reply({ prompts: [] });
       default:
         if (notification) return null;
         return fail(id, -32601, `Method not found: ${method}`);

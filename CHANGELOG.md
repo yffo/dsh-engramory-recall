@@ -1,3 +1,38 @@
+## 0.13.8
+
+**测试面铺到总装与协议层：267 → 414 例；子代理顺手挖出并修掉四处真问题。**
+
+- **新增 6 个测试文件 / 146 例**：`test/bm25.test.mjs`（43：分词口径、同义桥、IDF 方向、
+  长度归一按整篇算、衰减地板、boost 夹紧）、`test/store.test.mjs`（51：frontmatter 解析、
+  长笔记切桶、索引缓存、写入读回）、`test/audit.test.mjs`（12：JSONL 转义与坏行、轮转上限）、
+  `test/usage-fuzz.test.mjs`（15：8 轮 × 240 行脏数据，只验账目恒等式、不验实现细节）、
+  `test/mcp-protocol.test.mjs`（10：JSON-RPC 帧与 stdio 主循环）、
+  `test/wiring-paths.test.mjs`（10：真跑 `apply()` 的注入路径与状态路由）。
+  `test/client-panel.test.mjs` +5（七个页签各渲染一次、过滤器命中/不命中、展开态、宿主不可用）。
+- **加固 1（store.js）**：`splitNote()` 入口归一 CRLF/CR → LF 并去掉 BOM。过去记事本「另存为
+  UTF-8」带 BOM 的笔记，frontmatter 会被整段当正文喂进索引（description / aliases 全丢）；
+  CRLF 笔记的 `\r` 会跟着进词项与 snippet。
+- **加固 2（mcp.js）**：`handleMessage()` 对「通知」（没有 id 的帧）不再回包 —— 过去已知方法
+  也会回一帧没有 id 的响应，协议上不合规（客户端只能自己忽略）。
+- **加固 3（bm25.js）**：`clip()` 按码元截断时不再切出半个代理对（snippet 里的 emoji 会变乱码）；
+  同时把分词注释写实：**相邻双字为主、孤立单字才留** —— 单字查不出四字以上连写（`代理节点`
+  里没有 `代`），这是已知盲区，目前只靠同义表兜。
+- **加固 4（子代理写测试时挖出来的，都已修 + 补用例）**：
+  ① `store.js` 单篇笔记 >4MB 时过去是 `break` —— 它后面（以及它自己）的笔记一篇都读不到，
+  症状是「库里 69 篇，索引却是空的」；改成跳过该篇，只有**累计**超上限才停读。
+  ② `corpusFingerprint()` 的排序比较器对相等 id 恒返回 1（长笔记切桶就是同 id 多文档），
+  于是同一份语料换个顺序就得到不同指纹 —— 会让 A/B 对比把顺序抖动误判成「语料变了」；
+  改成按 `seq` 补齐的全序。
+  ③ `summarizeUsage({positions: 2.5})` 直接 TypeError（`Array.from({length: 2.5})` 只建 2 格、
+  循环却能写到下标 2）；`Math.floor` 兜住，尺子的 `--positions` 同样取整。
+  ④ **打开率的分母和分子量纲不同**：`used` 行是打开**次数**、`pointers` 是注入**条数**，
+  20 条指针被读 30 次就印「打开率 150% / 偏高，窗口可以放宽」—— 结论正好说反。现在按
+  (注入轮, 指针) 去重，`openRate = usedCounted / pointers` 恒 ≤ 1，原始行数仍留在 `used` 里。
+
+- 另修了三处**测试自己的错**：audit 的 JSONL 转义断言搞错了行序、store 切桶 fixture 没过 6KB
+  阈值、MCP 的临时库 helper 忘了 `await`（用例跑到一半库就被删，症状是「第一次调用好好的、
+  后面几次说库是空的」）。
+
 ## 0.13.7
 
 **打开率的分母按「谁在问」拆开：委派轮不再冒充主对话轮。**

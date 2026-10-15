@@ -3,7 +3,8 @@
  *
  * 设计取舍（与 Engramory 的既有口径一致）：
  *   - 零依赖、零出网、零模型：不引入 embedding，不下载模型，不做语义近似。
- *   - 中文用「单字 + 相邻双字」切分（和 memview 的检索口径相同），够用且可解释。
+ *   - 中文按「相邻双字」切分（和 memview 的检索口径相同），孤立单字（被标点隔开的那种）也留；
+ *     ⚠️ 因此**单个汉字查不出四字以上的连写**（`代理节点` 里没有 `代`）：单字查询只能靠同义表兜。
  *   - 英文词元再按连字符/斜杠/点拆一层：`html-ppt` 若整体成一个词元，查询里的 `ppt`
  *     就永远匹配不上（2026-10-14 实测「ppt 传上去样式全没了」漏召回的根因）。
  *   - 同义扩展：中文口语（「飞书」「连不上」）与笔记里的英文写法（feishu / ENOTFOUND）
@@ -418,7 +419,7 @@ export const SYNONYMS = new Map(
   }),
 );
 
-/** 中英混排分词：英文/数字按连续词元，汉字拆单字并补相邻双字。 */
+/** 中英混排分词：英文/数字按连续词元；汉字按**相邻双字**切，被标点/空格隔开的孤立单字也留下。 */
 export function tokenize(text) {
   const s = String(text ?? '').toLowerCase();
   const out = [];
@@ -691,5 +692,10 @@ function bestLine(doc, matched) {
 
 export function clip(text, max) {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim();
-  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+  if (s.length <= max) return s;
+  let cut = Math.max(0, max - 1);
+  // 别把代理对切成半个（snippet 里的 emoji 会变成乱码）：切点前是高代理就往前让一位。
+  const before = s.charCodeAt(cut - 1);
+  if (cut > 0 && before >= 0xd800 && before <= 0xdbff) cut -= 1;
+  return `${s.slice(0, cut)}…`;
 }

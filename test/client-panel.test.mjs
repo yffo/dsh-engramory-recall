@@ -181,6 +181,20 @@ async function render(state) {
 }
 
 let componentRef = null;
+/** 最近一次渲染的树：桩不会递归渲染函数组件，需要断言子组件 props 时用它。 */
+let lastTree = null;
+
+/** 从渲染树里挑出某个函数组件的节点（按组件名匹配）。 */
+function nodesOfType(node, name, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    for (const child of node) nodesOfType(child, name, out);
+    return out;
+  }
+  if (typeof node.type === 'function' && node.type.name === name) out.push(node);
+  nodesOfType(node.children, name, out);
+  return out;
+}
 async function renderWith(values) {
   // 桩与组件只建一次（bundle 只能 import 一次），每次渲染只换「预设值队列」：
   // 这样多次渲染复用同一个 factory 闭包，useState 仍然能拿到本轮想要的宿主 state。
@@ -188,6 +202,7 @@ async function renderWith(values) {
   pending.push(...values);
   componentRef = await loadPanel();
   const tree = componentRef();
+  lastTree = tree;
   return textsOf(tree).join(' | ');
 }
 
@@ -245,4 +260,106 @@ test('面板：usage 缺字段（半截数据）也不抛异常', async () => {
   const text = await render(fakeState({ pointers: 3, openRate: 0 }));
   assert.match(text, /注入指针/);
   assert.doesNotMatch(text, /NaN|undefined/, '半截数据不该渲染出 NaN/undefined');
+});
+
+/** 渲染指定页签：`useState` 的预设值按钩子序摆（第 4 个是 tab、第 5 是展开项、第 6 是过滤器）。 */
+async function renderTab(tab, state, extra = {}) {
+  return renderWith([state, null, Date.now(), tab, extra.expanded ?? -1, extra.filter ?? '', extra.busy ?? '', extra.results ?? {}, extra.bulk ?? null]);
+}
+
+const richLogEntry = () => ({
+  at: Date.now(),
+  kind: 'hit',
+  query: '代理节点怎么配',
+  reason: '命中 2 篇',
+  injected: 2,
+  hits: [{ id: 'a.md', score: 12.5, bytes: 800, section: '代理' }],
+});
+
+const richState = () => {
+  const state = fakeState(richUsage());
+  state.log = [richLogEntry()];
+  state.audit = {
+    summary: { notes: 3, bySeverity: { error: 1, warn: 2, info: 3 } },
+    findings: [
+      { severity: 'info', code: 'note-short', message: '这条是提示', files: ['c.md'] },
+      { severity: 'error', code: 'index-too-long', message: '索引超过 200 行', files: ['MEMORY.md'] },
+    ],
+  };
+  state.writeAudit = {
+    epoch: 'guard-v1',
+    entries: [
+      { ts: Date.now(), tool: 'write', file: 'MEMORY.md', verdict: 'deny', reason: '索引 201 行', bytes: 10 },
+      { ts: Date.now(), tool: 'edit', file: 'reference-x.md', verdict: 'allow', reason: '库内正常写入', bytes: 5 },
+    ],
+  };
+  state.archive = {
+    plans: [{ file: 'MEMORY.md', bytes: 30000, batchCount: 3, freshCount: 2, existingCount: 1, historyFiles: ['MEMORY-history.md'], keptBytes: 8000, savedBytes: 22000 }],
+    skipped: [{ file: 'y.md', reason: '还不到门槛' }],
+    crashed: null,
+  };
+  state.index = { lines: 201, bytes: 26000, text: '# Memory Index\n- [A](a.md)' };
+  return state;
+};
+
+test('面板：七个页签每一个都渲染得出内容（渲染期抛异常＝整页空白，只有人肉看得见）', async () => {
+  const state = richState();
+  const seen = {};
+  for (const tab of ['log', 'usage', 'notes', 'audit', 'writes', 'index', 'archive']) {
+    seen[tab] = await renderTab(tab, state);
+    assert.ok(seen[tab].length > 20, `${tab} 页签不该是空的`);
+  }
+  assert.match(seen.log, /召回日志/, '日志页签的标签要在');
+  assert.match(seen.usage, /注入指针/);
+  assert.match(seen.notes, /a\.md/);
+  // 体检：严重性排序后结论在前，findings 的 code / message / files 都要给出来
+  assert.match(seen.audit, /索引超过 200 行/);
+  assert.match(seen.audit, /index-too-long/);
+  assert.match(seen.audit, /MEMORY\.md/);
+  // 写入审计：一行摘要 + 逐条工具/结果
+  assert.match(seen.writes, /规则版本 guard-v1 · 共 2 条 · 拦截 1 条/);
+  assert.match(seen.writes, /reference-x\.md/);
+  // 索引原文：内容照抄，不做净化（面板是只读窗口）
+  assert.match(seen.index, /Memory Index/);
+  // 归档：说清「不删内容」的机制 + 跳过项的原因
+  assert.match(seen.archive, /归档不删内容/);
+  assert.match(seen.archive, /还不到门槛/);
+});
+
+test('面板：体检页签把 error 排在 info 前面，findings 为空时不留空白', async () => {
+  const state = richState();
+  const text = await renderTab('audit', state);
+  assert.ok(text.indexOf('索引超过 200 行') < text.indexOf('这条是提示'), 'error 要在 info 前面');
+
+  state.audit = { summary: { notes: 1, bySeverity: {} }, findings: [] };
+  const empty = await renderTab('audit', state);
+  assert.ok(empty.length > 10, '没有 findings 也要有结论行，不能是一片空白');
+});
+
+test('面板：笔记页签的过滤器真的在过滤（输入什么就只看得到什么）', async () => {
+  const state = richState();
+  const hit = await renderTab('notes', state, { filter: 'a' });
+  assert.match(hit, /a\.md/);
+  const miss = await renderTab('notes', state, { filter: 'zzz-查不到' });
+  assert.doesNotMatch(miss, /a\.md/);
+});
+
+test('面板：日志条目拿得到「展开/收起」与整条数据（函数组件由桩按 props 断言）', async () => {
+  const state = richState();
+  await renderTab('log', state, { expanded: -1 });
+  const collapsed = nodesOfType(lastTree, 'LogEntry');
+  assert.equal(collapsed.length, 1, '一条日志应当渲染一个 LogEntry');
+  assert.equal(collapsed[0].props.expanded, false);
+  assert.equal(collapsed[0].props.entry.query, '代理节点怎么配');
+  assert.equal(collapsed[0].props.entry.hits.length, 1, 'hits 要原样传下去，展开时靠它列出明细');
+
+  await renderTab('log', state, { expanded: 0 });
+  const [opened] = nodesOfType(lastTree, 'LogEntry');
+  assert.equal(opened.props.expanded, true, '展开态要传成 true（否则按钮永远只显示「展开」）');
+});
+
+test('面板：宿主路由不可用时给人话，而不是白屏', async () => {
+  const text = await renderWith([null, 'ECONNREFUSED', Date.now(), 'log', -1, '', '', {}, null]);
+  assert.match(text, /正在读取记忆库状态…/);
+  assert.match(text, /宿主路由不可用：ECONNREFUSED/);
 });
