@@ -25,6 +25,7 @@ import { checkMemoryWrite } from './guard.js';
 import { checkIndexWrite, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES } from './index-guard.js';
 import { registerSkill, skillStatus } from './skill.js';
 import { appendAudit, readAudit, GUARD_EPOCH } from './audit.js';
+import { appendUsage, readUsage, summarizeUsage, noteIdFromPath, pickInjected } from './usage.js';
 import { readDocs } from './store.js';
 import { describeSeam, semanticSearch } from './semantic.js';
 import { auditStore } from './doctor.js';
@@ -45,6 +46,12 @@ const DEFAULTS = {
   maxChars: 480,
   minScore: 0,
   nudge: true,
+  /**
+   * 召回落盘日志（`.engramory-recall.jsonl`）。开着才有「注入的指针后来被用上了吗」
+   * 这个数据——内存里的日志重启即清，跨会话的窗口宽度决策没法靠它。
+   * 关掉 = 只留内存日志（旧行为）。账本本身不占上下文，只占磁盘（512KB 封顶）。
+   */
+  usageLog: true,
   /**
    * freshness 衰减半衰期（天）；0 = 关闭（默认）。
    *
@@ -278,6 +285,46 @@ export function apply(ctx, config = {}) {
   /** 上一次注入的去重键：`query\0id,id,…`（见 DEFAULTS.dedupeInjection 的注释）。 */
   let lastInjectedKey = '';
 
+  // ── 召回日志的分子：注入过的笔记后来被打开了吗 ────────────────────────
+  // 只记 id → 注入时刻，只供记账用（与 rotationHistory 那套轮换去重无关）。
+  // 上限 500 条：一场长会话足够，且不会把内存里的表撑大。
+  const injectedAt = new Map();
+  const INJECTED_MAX = 500;
+  const rememberInjectedAt = (ids) => {
+    const now = Date.now();
+    for (const id of ids) {
+      if (injectedAt.has(id)) injectedAt.delete(id); // 重新注入 = 刷新时刻，顺便挪到队尾
+      injectedAt.set(id, now);
+    }
+    while (injectedAt.size > INJECTED_MAX) injectedAt.delete(injectedAt.keys().next().value);
+  };
+
+  /**
+   * 工具调用里有没有「打开一篇库里的笔记」——有就记一行。**不参与任何裁决**：
+   * 库里 .md 的读/写都算用过（read 是最常见的形态，edit/write 是更硬的证据）。
+   * 注入过的记 `used`（带 lagMs），没注入过也打开的记 `opened`（对照组）。
+   */
+  const noteNoteOpened = (exec, toolName) => {
+    try {
+      const args = exec?.arguments ?? {};
+      const raw = args.file_path ?? args.filePath ?? args.path;
+      if (typeof raw !== 'string' || !raw) return;
+      const resolved = path.resolve(expandHome(raw));
+      if (!resolved.startsWith(settings.storePath + path.sep)) return; // 库外的读不记：那是噪音
+      const id = noteIdFromPath(resolved);
+      if (!id) return;
+      const injected = pickInjected(id, injectedAt);
+      appendUsage(settings.storePath, {
+        kind: injected ? 'used' : 'opened',
+        id,
+        via: toolName,
+        lagMs: injected ? Date.now() - injected.at : undefined,
+      });
+    } catch {
+      // 记账失败绝不影响工具调用
+    }
+  };
+
   // ── 可观测性：每个用户轮的召回判定留痕 ────────────────────────────────
   // 从外面看，「这轮为什么没注入」「注入了什么」以前完全不可见——这是评估里
   // 列的头号短板。这里把判定结果留在内存里（最近 LOG_MAX 条，不落盘），
@@ -287,6 +334,19 @@ export function apply(ctx, config = {}) {
   const record = (entry) => {
     recallLog.unshift({ at: Date.now(), ...entry });
     if (recallLog.length > LOG_MAX) recallLog.length = LOG_MAX;
+    // 同时落一份到库里：内存日志重启即清，而「窗口该多宽、注入的指针有没有被用上」
+    // 这类问题恰恰要跨会话才问得出来（分子由下面的读取记账负责写）。
+    if (settings.usageLog !== false) {
+      appendUsage(settings.storePath, {
+        kind: entry.kind,
+        query: entry.query,
+        reason: entry.reason,
+        ids: (entry.hits ?? []).map((hit) => hit.id).filter(Boolean),
+        injected: entry.injected,
+        collapsed: entry.collapsed,
+        dropped: entry.dropped,
+      });
+    }
   };
   const brief = (text, n = 160) => clip(String(text ?? ''), n);
 
@@ -539,10 +599,14 @@ export function apply(ctx, config = {}) {
   // → tools/execute → tools/post-execute → tools/result。守卫是同步的，返回字符串即拒绝，
   // 且**后续任何监听器都无法把拒绝翻回允许**——正是 fail-closed 需要的单调性。
   // 只在目标路径落在 storePath 内时介入；库外的写入一律放行（不在管辖范围）。
-  if (settings.guardWrites !== false) {
+  // 这个守卫回调是两个用途共用的观测点：写入闸门（会拒绝）+ 召回日志的读取记账（只记）。
+  // 闸门关掉时记账仍要在，所以注册条件是两个开关的并集。
+  if (settings.guardWrites !== false || settings.usageLog !== false) {
     ctx.tools.guard((exec) => {
       try {
         const toolName = String(exec?.name ?? '');
+        if (settings.usageLog !== false) noteNoteOpened(exec, toolName);
+        if (settings.guardWrites === false) return undefined;
         if (toolName !== 'write' && toolName !== 'edit') return undefined;
         const args = exec?.arguments ?? {};
         const filePath = args.file_path ?? args.filePath;
@@ -752,6 +816,7 @@ export function apply(ctx, config = {}) {
       }
       lastInjectedKey = dedupeKey;
       rememberInjected(shown.map((hit) => hit.id));
+      rememberInjectedAt(shown.map((hit) => hit.id));
 
       if (id) {
         seen.add(id);
@@ -1027,7 +1092,13 @@ export function apply(ctx, config = {}) {
             res.end();
             return;
           }
-          sendJson(res, 200, { ...storeSnapshot(), log: recallLog, generatedAt: Date.now() });
+          sendJson(res, 200, {
+            ...storeSnapshot(),
+            log: recallLog,
+            // 落盘日志的汇总（打开率/位置级曲线/从未被打开的笔记）——面板与尺子同一套算法。
+            usage: summarizeUsage(readUsage(settings.storePath)),
+            generatedAt: Date.now(),
+          });
         },
       }),
     );

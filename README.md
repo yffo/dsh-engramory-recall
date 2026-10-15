@@ -85,6 +85,9 @@
   里有** —— 别的宿主拿到的是只读视图。`claude-mem` 覆盖 7 个宿主、`thoth-mem` 覆盖 4 个，
   我们覆盖「1 个全功能 + N 个只读」。
 - **没有多端或团队同步**：basic-memory 有云同步，本插件没有。
+- **召回的「用没用上」只有代理指标**：`.engramory-recall.jsonl` 能证明「注入过的笔记后来被打开了」，
+  证明不了「它被用进了回答」；也没有按查询统计的注入成功率（只有零命中轮数）。要把这层做实，
+  得让宿主把「模型引用过某条记忆」这件事暴露出来，当前宿主接口里没有。
 - **写入闸门可以被绕过**：`guard` 只拦 `write` / `edit` 工具调用，`bash` 重定向它看不见；
   `@jipika/dsh-memory` 的 guard 挂在更底层的 `tools/pre-execute`，覆盖更广。
 
@@ -429,9 +432,50 @@ react + primitives），注册到宿主的 `conversation.view` slot，与「对�
 归档（待归档计划 + 一键执行）、写入审计（每条放行与拒绝都留痕）。
 
 数据来自插件注册的只读路由 `GET /api/engramory-recall/state`（面板每 3 秒轮询；
-体检与归档计划按 30 秒 TTL 缓存，不重算全库）。执行口是另一条必须 `POST` 的路由
+体检与归档计划按 30 秒 TTL 缓存，不重算全库）。这条路由的 JSON 里还多一节 `usage`：
+**打开率、位置级曲线、从未被打开过的笔记** —— 与 `npm run recall:stats` 同一套算法（见下）。执行口是另一条必须 `POST` 的路由
 （`{ file, confirm: true }`，GET 一律 405）。用 `ctx.inject(['webServer'], …)` 注册：
 Electron 载体走 `file://` + IPC 时可能没有 webServer，那时召回照常工作，只是没有面板数据。
+
+### 召回日志与打开率（`npm run recall:stats`）
+
+内存里的召回日志（面板第一个页签）只留最近 80 条、重启即清——它回答「这轮为什么注入」，
+回答不了「注入的指针后来有没有被用上」。0.13.1 起每次注入、每次打开都多写一行到
+`<storePath>/.engramory-recall.jsonl`（512KB 封顶、超了半量截断、**永不抛异常**——
+记账失败不该影响工具调用）：
+
+| 行 | 什么时候写 | 关键字段 |
+| --- | --- | --- |
+| `hit` / `sediment` | 每轮注入（命中 / 只给沉淀提醒） | `ids`（**按显示顺序**）、`injected`、`dropped` |
+| `skip` / `empty` / `deny` | 被去重挡掉 / 零命中 / 写入被拦 | `reason` |
+| `used` | 注入过的笔记后来被 `read` / `edit` 打开 | `id`、`via`、`lagMs`（距注入多久） |
+| `opened` | 没注入过、也被主动打开的库内笔记（对照组） | `id`、`via` |
+
+```bash
+npm run recall:stats              # 打开率、位置级曲线、从未被打开的注入、一句判据
+npm run recall:stats -- --json    # 机器可读（--store / --positions / --limit 可调）
+```
+
+**窗口该多宽，两半合起来看**：上半是 hit@k 曲线（离线卷子给的「上界」），下半是打开率
+（线上实测的「到底用得着吗」）。
+
+| 窗口 | 词面（每轮注入走的就是这条） | rrf（开了语义时） |
+| --- | --- | --- |
+| 1 条 | 67.2% | 74.7% |
+| 3 条 | 89.1% | 90.8% |
+| 4 条 | 91.4% | 94.3% |
+| 5 条 | 93.1% | 95.4% |
+| 6 条 | 93.1%（**白给**） | 97.1% |
+| 8 条 | 95.4% | 97.1% |
+| 10 条 | 97.1% | 97.1% |
+
+（174 条真库卷子、池 10、智谱 embedding-3；由 `bench/.tmp/guard-data.json` 离线复算。
+读法：4→5 买 1.7 个点、**4→6 一个点都不买**、8 条再买 2.3 个点。）
+
+判据写进尺子了，省得每次重新推：注入样本 < 20 条**不下结论**；打开率 < 30% 说明窗口在浪费
+上下文（收窄，或把 `minScore` 抬一点）；> 60% 说明窗口偏窄（按上表放宽）。位置级曲线更直接：
+第 4/5 条几乎没人打开的话，放宽就是白加字数。**诚实说一句**：`used` 只证明模型读了那篇
+（打开率是代理指标），不证明它被用进了回答；真正的「用没用上」要靠人读几轮对话才判得准。
 
 ### 按需检索工具
 
@@ -973,7 +1017,7 @@ harness，提示词直接 `import` 产品的 `hostLlmPrompt()` —— 尺子问�
       config:
         enabled: true            # 总开关
         storePath: ~/memory/engramory
-        maxPointers: 4           # 最多注入几条指针
+        maxPointers: 4           # 最多注入几条指针（实测 4→5 买 1.7 个点，4→6 一个点都不买，见「召回日志与打开率」）
         maxChars: 480            # 注入文本硬上限（字符）
         minScore: 0              # 提高它可以过滤弱命中
         queryChars: 400          # 检索的查询字符预算（超长消息头尾各取一半）
@@ -981,6 +1025,7 @@ harness，提示词直接 `import` 产品的 `hostLlmPrompt()` —— 尺子问�
         nudgeSediment: true      # 沉淀提醒
         sedimentMinTurns: 12     # 沉淀提醒的轮次门槛
         guardWrites: true        # 写入闸门
+        usageLog: true           # 召回落盘日志（打开率尺子的数据源，见「召回日志与打开率」）
         dedupeInjection: true    # 注入去重
         rotationPenalty: 0.5     # 跨轮轮换降权（1 = 关闭）
         rotationHistory: 32      # 轮换记忆长度
@@ -1141,6 +1186,7 @@ npm run bench:guard       # 把握度门槛（guarded）的尺子：保护集/�
 npm run bench:ceiling     # 池宽天花板：任一提供方在公开数据集上的上界 + 每查询要发多少东西
 npm run bench:embed       # embeddings 接缝：--fake 量管线与代价 / --real 用真端点量质量（--store 才上真库）
 npm run bench:probe       # 探针卷子本身：174 条真 query 的词面名次分布、保护区/争夺区、池内召回上界（--json）
+npm run recall:stats      # 召回打开率尺子：注入/打开/零命中、位置级曲线、从未被打开的笔记（数据源 .engramory-recall.jsonl）
 npm run embed:check       # 参考提供方自检：探一次 embeddings 接口，报维度与耗时（不打印密钥）
 npm run bench:rewrite     # 宿主模型当改写提供方：真调用量代价与收益（要本机有 dsh；--offline 只重算）
 npm run bench:mcp         # MCP 这一层：冷启动、每步往返、协议帧字节数
@@ -1153,7 +1199,9 @@ CI 跑 `npm test` 和 `npm run bench:check` 两件事。后者是防「数字悄
 分数低不红 —— 绝对值会随语料演化，卡死绝对值只会逼人去改尺子；漂了才红，因为那说明
 要么是回归、要么是刻意改动而没人说清楚。
 
-上面这些命令是克隆仓库开发时用的：`test/`、`scripts/`、`bench/` 不在 npm 包的 `files` 白名单里。
+上面这些命令大多要在克隆出来的仓库里跑：`test/` 与 `bench/` 不在 npm 包的 `files` 白名单里
+（例外是 `scripts/recall-stats.mjs` —— 它读的是你自己库里的日志，装在包里的用户也该能跑，
+所以它跟着 `usage.js` 一起发布）。
 发布出去的是运行时真正需要的那十几个文件（`npm pack --dry-run` 可核），
 其中 `package.test.mjs` 会从 `index.js` 递归跟所有 `./x.js` 的 import，逐个核对是否都在白名单里。
 这个检查已经抓到过两次真事故（漏 `audit.js`、漏 `archive.js`），两次的后果都是

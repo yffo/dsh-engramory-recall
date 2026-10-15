@@ -1,6 +1,6 @@
 {
   "name": "dsh-engramory-recall",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Local BM25 auto-recall, fail-closed write guard, static doctor and a memory panel for the Engramory markdown store — no network, no model, no daemon.",
   "keywords": [
     "dsh",
@@ -40,7 +40,8 @@
     "./index": "./index.js",
     "./mcp": "./mcp.js",
     "./semantic": "./semantic.js",
-    "./providers/openai-embeddings": "./providers/openai-embeddings.mjs"
+    "./providers/openai-embeddings": "./providers/openai-embeddings.mjs",
+    "./usage": "./usage.js"
   },
   "files": [
     "index.js",
@@ -59,7 +60,9 @@
     "providers/openai-embeddings.mjs",
     "CHANGELOG.md",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "scripts/recall-stats.mjs",
+    "usage.js"
   ],
   "dsh": {
     "manifestVersion": 1,
@@ -90,6 +93,7 @@
     "embed:check": "node providers/openai-embeddings.mjs --check",
     "release:verify": "node scripts/verify-release.mjs",
     "bench:probe": "node bench/probe.mjs",
+    "recall:stats": "node scripts/recall-stats.mjs",
     "bench:guard": "node bench/guard-sweep.mjs"
   },
   "bin": {
