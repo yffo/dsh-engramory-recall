@@ -36,6 +36,7 @@ const LIMIT = Number(opt('--limit', '0')) || 0;
 const POOL = Number(opt('--pool', '50'));
 const FUSION = opt('--fusion', 'trust');
 const fake = !argv.includes('--real');
+const TIMEOUT_MS = Number(opt('--timeout', '20000')) || 20000;
 const DIM = 16;
 
 /** 假 embeddings 服务：确定性的哈希向量（同文本同向量），只验证管线与代价。 */
@@ -106,9 +107,11 @@ if (fake) {
   }
   console.log(`真端点：${cfg.baseUrl} · 模型 ${cfg.model}（密钥来自配置，脚本不打印它）\n`);
   providerPath = join(here, '.tmp', 'real-embed-provider.mjs');
+  // 注意：参考提供方走的是**命名导出**（`export function rerank`），没有默认导出 —— 这里必须用 namespace 导入，
+  // 写成 `import provider from …` 会 ERR_MODULE_NOT_FOUND 式的 load-error（实测栽过一次）。
   writeFileSync(
     providerPath,
-    `import provider from ${JSON.stringify(new URL('../providers/openai-embeddings.mjs', import.meta.url).href)};
+    `import * as provider from ${JSON.stringify(new URL('../providers/openai-embeddings.mjs', import.meta.url).href)};
      export const rerank = provider.rerank;\n`,
   );
 }
@@ -144,7 +147,7 @@ for (const s of sheet) {
       index: queryIndex,
       query: item.q,
       limit: 4,
-      config: { provider: providerPath, pool: POOL, fusion: FUSION, timeoutMs: 20000 },
+      config: { provider: providerPath, pool: POOL, fusion: FUSION, timeoutMs: TIMEOUT_MS },
       baseDir: here,
     });
     const rank = result.hits.findIndex((hit) => hit.id === item.gold);
