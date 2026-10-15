@@ -271,9 +271,39 @@ const expandHome = (value) => {
   return p.startsWith('~/') ? path.join(homedir(), p.slice(2)) : p;
 };
 
+/**
+ * 归一库路径：**唯一一处**去掉结尾分隔符。所有比较、拼接、落盘都用它的返回值。
+ *
+ * 为什么必须归一：`noteNoteOpened()` 用「前缀 + 分隔符」判「这次读的是不是库里的笔记」，
+ * 而 `storePath` 配成 `…/engramory/` 时前缀就成了 `…/engramory//` —— 永远匹配不上，
+ * 于是 `opened` / `used` 一行都不落盘（打开率恒为 0），而且**不报任何错**。
+ * `storeSnapshot()` 早就在自己那边写过一次去尾斜杠，两处口径不一致；现在收敛到这一个函数。
+ *
+ * ⚠️ 两处不能归一坏：整条路径都是分隔符（`/`、`\\`）时去完尾斜杠会变空串，而空串在配置里
+ * 代表「没配库」——那会让整个库静默失效，所以根一律留一个分隔符；`C:\` 去掉尾分隔符会变成
+ * `C:`（当前盘的工作目录，语义完全不同），也要补回分隔符。没有尾分隔符时原样返回，
+ * `~` 展开与相对路径的解析行为都不受影响。
+ */
+const normalizeStorePath = (value) => {
+  // 唯一调用点是 `normalizeStorePath(expandHome(…))`，expandHome 保证给回字符串。
+  const p = String(value).trim();
+  if (!p) return '';
+  if (!/[/\\]$/.test(p)) return p; // 没有尾分隔符：原样（含 `C:` 这类相对写法）
+  const stripped = p.replace(/[/\\]+$/, '');
+  if (!stripped) return p[0]; // 纯分隔符 = 根，留一个
+  return /^[A-Za-z]:$/.test(stripped) ? stripped + path.sep : stripped; // `C:\` → `C:\`，不是 `C:`
+};
+
+/**
+ * 「库内」判定用的前缀。`storePath` 已经归一（不带尾分隔符），这里只补回**缺失的那一个**：
+ * `path.join` 而不是字符串拼接 —— 库就是根（`/`、`C:\`）时 `storePath + path.sep` 会拼成
+ * `//`，与尾斜杠那个坑同源（`path.join('/', '/')` 仍是 `/`）。
+ */
+const storePrefix = (storePath) => path.join(storePath, path.sep);
+
 export function apply(ctx, config = {}) {
   const settings = { ...DEFAULTS, ...(config ?? {}) };
-  settings.storePath = expandHome(settings.storePath);
+  settings.storePath = normalizeStorePath(expandHome(settings.storePath));
   if (!settings.enabled) return;
 
   let indexCache = { docs: null, index: null };
@@ -323,7 +353,8 @@ export function apply(ctx, config = {}) {
       const raw = args.file_path ?? args.filePath ?? args.path;
       if (typeof raw !== 'string' || !raw) return;
       const resolved = path.resolve(expandHome(raw));
-      if (!resolved.startsWith(settings.storePath + path.sep)) return; // 库外的读不记：那是噪音
+      // 库内的读才记：前缀用归一后的 storePath 算（见 normalizeStorePath / storePrefix）。
+      if (!resolved.startsWith(storePrefix(settings.storePath))) return;
       const id = noteIdFromPath(resolved);
       if (!id) return;
       const injected = pickInjected(id, injectedAt);
@@ -458,7 +489,7 @@ export function apply(ctx, config = {}) {
     },
     // 与官方 defineTool 的产出保持一致：execute 必须是 async（宿主可能按 Promise 调用）。
     async execute(args) {
-      const storePath = String(settings.storePath || '').trim();
+      const storePath = settings.storePath;
       const query = String(args?.query ?? '').trim();
       if (!storePath || !query) {
         return { store: storePath, hits: [], note: '需要 storePath 配置与非空 query' };
@@ -555,7 +586,7 @@ export function apply(ctx, config = {}) {
         render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
       },
       async execute(args) {
-        const storePath = String(settings.storePath || '').trim();
+        const storePath = settings.storePath;
         if (!storePath) return { store: storePath, notes: 0, findings: [] };
         const docs = readDocs(storePath);
         const limit = Math.max(Number(args?.limit) || docs.length, 1);
@@ -597,7 +628,7 @@ export function apply(ctx, config = {}) {
       },
       async execute(args) {
         const file = String(args?.file ?? '').trim();
-        const storePath = String(settings.storePath || '').trim();
+        const storePath = settings.storePath;
         if (!storePath || !file) return { file, summary: '', model: '', ms: 0, error: '需要 storePath 配置与非空 file' };
         const docs = readDocs(storePath);
         const note = docs.find((doc) => doc.id === file || doc.file === file);
@@ -713,7 +744,6 @@ export function apply(ctx, config = {}) {
       const human = [...decision.messages].reverse().find(isHuman);
       if (!human) return decision;
       const id = String(human.id ?? '');
-      if (id && seen.has(id)) return decision;
       // 「这一轮是谁在问」：委派轮（子代理 / Agent Teams）与主对话轮共用同一个记忆库，
       // 而委派提示词里根本没有「先看记忆库」这回事 —— 它们的指针几乎不可能被打开。
       // 不分开数，打开率会被系统性稀释（实测：23 轮注入里一半是「你是只读侦察员…」）。
@@ -726,6 +756,15 @@ export function apply(ctx, config = {}) {
       );
       const scope = depth > 0 ? 'subagent' : 'main';
       const recordRound = (entry) => record({ ...entry, scope, depth });
+      // 同一个 message id 又被喂进来 = 宿主把同一轮重复交给 pre-step：不重复注入。
+      // ⚠️ 但**必须记账**：以前这里直接 `return decision`，这一轮在台账里一行都没有 ——
+      // 既不进分母，也统计不到原因码，账本对不上。现在与下面「同一 query 跨轮被去重」
+      // 那条路同口径：记一行 skip，原因码用既有的 `duplicate`（usage.js 的 REASON_LABELS 里
+      // 现成那个，不新造词）。turnCount 与自动归档都不参与：它不是一个新轮。
+      if (id && seen.has(id)) {
+        recordRound({ kind: 'skip', query: brief(textOf(human)), hits: [], reason: 'duplicate' });
+        return decision;
+      }
       // 本会话的第几个真实用户轮（沉淀提醒的判据之一）
       turnCount += 1;
       // 自动归档的两个触发源之一：兜底路径。（另一个在闸门放行写入之后。）
@@ -748,7 +787,7 @@ export function apply(ctx, config = {}) {
         return decision;
       }
 
-      const storePath = String(settings.storePath || '').trim();
+      const storePath = settings.storePath;
       if (!storePath) {
         recordRound({ kind: 'skip', query: brief(query), hits: [], reason: 'store-not-configured' });
         return decision;
@@ -950,7 +989,7 @@ export function apply(ctx, config = {}) {
 
   const maybeAutoArchive = (trigger) => {
     if (settings.autoArchive !== true) return null;
-    const storePath = String(settings.storePath || '').trim();
+    const storePath = settings.storePath;
     if (!storePath) return null;
     if (trigger === 'pre-step') {
       const now = Date.now();
@@ -1005,7 +1044,7 @@ export function apply(ctx, config = {}) {
   };
 
   const storeSnapshot = () => {
-    const storePath = String(settings.storePath || '').trim();
+    const storePath = settings.storePath;
     const docs = storePath ? readDocs(storePath) : [];
     const byId = new Map();
     for (const doc of docs) {
@@ -1029,7 +1068,9 @@ export function apply(ctx, config = {}) {
     // 索引是记忆库的入口，面板要能直接显示它（只读）。
     let index = { path: '', lines: 0, bytes: 0, text: '' };
     if (storePath) {
-      const indexPath = `${storePath.replace(/[/\\]+$/, '')}/MEMORY.md`;
+      // storePath 已在配置归一那一步去过尾分隔符，这里直接拼（不再各自去一遍）。用 path.join
+      // 是为了让「库就是根（`/`）」这种配置拼出 `/MEMORY.md` 而不是 `//MEMORY.md`。
+      const indexPath = path.join(storePath, 'MEMORY.md');
       try {
         const text = readFileSync(indexPath, 'utf8');
         index = { path: indexPath, lines: text.split('\n').length, bytes: Buffer.byteLength(text, 'utf8'), text };
@@ -1179,7 +1220,7 @@ export function apply(ctx, config = {}) {
             res.end();
             return;
           }
-          const storePath = String(settings.storePath || '').trim();
+          const storePath = settings.storePath;
           if (!storePath) {
             sendJson(res, 400, { ok: false, reason: 'storePath 没配' });
             return;

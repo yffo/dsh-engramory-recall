@@ -4,6 +4,9 @@
 //  - import 本身不发任何调用（默认关闭）；
 //  - 失败的两个来源（终止 chunk / 抛异常）都被归一成带 code 的错误，且 detectConflicts 永不抛；
 //  - 模型编出来的文件名进不了 findings —— 检测结果必须能对上真实文件。
+//
+// 覆盖率自检（llm.js 的真实数字；跑之前必须先按「默认关闭」用例里的说明把 ?fresh= 查询串临时去掉）：
+//   node --test --experimental-test-coverage test/llm.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -164,6 +167,34 @@ test('collectText：没见到终止 chunk —— 有文本就带 finished:false 
   assert.equal(await codeOf(() => collectText(fakeLlm({ chunks: [] }), PLAIN, 5000)), LLM_EMPTY);
 });
 
+test('collectText：认不得的 chunk 一律跳过（null / 字符串 / 数字），finish 不带 reason 也当正常收尾', async () => {
+  const llm = fakeLlm({
+    chunks: [null, '不是对象', 42, { type: 'text-delta', index: 0, text: '答' }, { type: 'finish' }, { type: 'text-delta', index: 0, text: '终止之后的东西' }],
+  });
+  const r = await collectText(llm, PLAIN, 5000);
+  assert.equal(r.text, '答', '宿主版本演进出的怪 chunk 不许污染文本，更不许当成错误');
+  assert.equal(r.finished, true, 'finish 没带 reason 也要记成正常收尾，而不是 finished:false');
+  assert.equal(r.model, 'm');
+});
+
+test('collectText：请求里没有 model 时返回空串，不把 undefined 漏给调用方', async () => {
+  const llm = fakeLlm(textPlay('答'));
+  const r = await collectText(llm, { provider: 'p', messages: PLAIN.messages }, 5000);
+  assert.equal(r.model, '');
+  assert.equal(llm.calls[0].model, undefined, '不该为了让返回值好看而伪造一个 model');
+});
+
+test('collectText：timeoutMs 为 0 不自造 deadline —— 调用方的 signal 原样透传，两者都没有就不带 signal 键', async () => {
+  const controller = new AbortController();
+  const llm = fakeLlm(textPlay('答'), textPlay('答'));
+  const withOuter = await collectText(llm, { ...PLAIN, signal: controller.signal }, 0);
+  assert.equal(withOuter.text, '答');
+  assert.equal(llm.calls[0].signal, controller.signal, '没有自造 deadline 时，调用方的 signal 必须原样传下去（取消能力不许被吞）');
+  const bare = await collectText(llm, PLAIN, 0);
+  assert.equal(bare.text, '答');
+  assert.equal('signal' in llm.calls[1], false, '既没预算也没外部取消 → 请求里压根不该有 signal 这个键');
+});
+
 test('collectText：llm 缺失 / 不是服务 → llm-unavailable，而不是 TypeError', async () => {
   assert.equal(await codeOf(() => collectText(undefined, PLAIN, 1000)), LLM_UNAVAILABLE);
   assert.equal(await codeOf(() => collectText({}, PLAIN, 1000)), LLM_UNAVAILABLE);
@@ -189,6 +220,26 @@ test('终止 chunk {kind:"aborted"} → llm-aborted', async () => {
   assert.equal(await codeOf(() => collectText(llm, PLAIN, 5000)), LLM_ABORTED);
 });
 
+test('终止 chunk 没带 failure / failure 没带 message → UNKNOWN 兜底，且不硬凑那段破折号', async () => {
+  // 宿主自己崩掉时 reason 上可能什么都没有；这时报出来的文字必须仍然能读懂，不能是 "undefined"。
+  await assert.rejects(
+    () => collectText(fakeLlm({ chunks: [{ type: 'finish', reason: { kind: 'error' } }] }), PLAIN, 5000),
+    (error) => {
+      assert.equal(error.code, LLM_ERROR);
+      assert.equal(error.message, '宿主模型调用终止于 error：UNKNOWN');
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => collectText(fakeLlm({ chunks: [{ type: 'finish', reason: { kind: 'aborted', failure: { code: 'CANCELLED' } } }] }), PLAIN, 5000),
+    (error) => {
+      assert.equal(error.code, LLM_ABORTED);
+      assert.equal(error.message, '宿主模型调用终止于 aborted：CANCELLED');
+      return true;
+    },
+  );
+});
+
 // --------------------------------------------------- 失败形态二：抛异常
 
 test('迭代中抛非 Abort 异常（中间件炸）→ llm-error，不会漏成未捕获异常', async () => {
@@ -198,6 +249,18 @@ test('迭代中抛非 Abort 异常（中间件炸）→ llm-error，不会漏成
     (error) => {
       assert.equal(error.code, LLM_ERROR);
       assert.match(error.message, /中间件炸了/);
+      return true;
+    },
+  );
+});
+
+test('迭代中抛出的不是 Error（宿主/中间件直接扔字符串）→ 一样归一成 llm-error，不炸在 instanceof 上', async () => {
+  const llm = fakeLlm({ throwAfter: '底层直接把字符串扔出来了' });
+  await assert.rejects(
+    () => collectText(llm, PLAIN, 5000),
+    (error) => {
+      assert.equal(error.code, LLM_ERROR);
+      assert.equal(error.message, '调用宿主模型失败：底层直接把字符串扔出来了');
       return true;
     },
   );
@@ -294,6 +357,12 @@ test('summarizeNote：正文超过上限只喂前 MAX_NOTE_CHARS 字符，并如
   assert.match(sent, new RegExp(`只给了前 ${MAX_NOTE_CHARS} 字符`));
 });
 
+test('summarizeNote：runtime 整个没给 → llm-unavailable，而不是解构 TypeError', async () => {
+  const note = { file: 'reference-x.md', title: 't', description: 'd', body: 'b' };
+  assert.equal(await codeOf(() => summarizeNote(undefined, note)), LLM_UNAVAILABLE);
+  assert.equal(await codeOf(() => summarizeNote({}, note)), LLM_UNAVAILABLE);
+});
+
 test('summarizeNote：不可用 / 无路由 / 空回答都抛带 code 的错，绝不返回空摘要冒充成功', async () => {
   const note = { file: 'reference-x.md', title: 't', description: 'd', body: 'b' };
   assert.equal(await codeOf(() => summarizeNote({ ctx: fakeCtx({}) }, note)), LLM_UNAVAILABLE);
@@ -311,6 +380,58 @@ const NOTES = [
 ];
 
 const CONFLICT_JSON = JSON.stringify([{ files: ['reference-a.md', 'reference-b.md'], reason: 'A 说这方案已弃用，B 说必须用它' }]);
+
+test('推理强度：显式路由里的 reasoningEffort 会原样带进 stream()，摘要与冲突检查都不漏', async () => {
+  const llm = fakeLlm(textPlay('摘要'), textPlay('[]'));
+  const runtime = runtimeWith(llm, { provider: 'p', model: 'm' });
+  const note = { file: 'reference-x.md', title: 't', description: 'd', body: 'b' };
+
+  const r = await summarizeNote(runtime, note, { provider: 'p', model: 'm', reasoningEffort: 'high' });
+  assert.equal(r.route.reasoningEffort, 'high');
+  assert.equal(llm.calls[0].reasoningEffort, 'high', '解析出来的推理强度必须进请求，否则等于白配');
+
+  await detectConflicts(runtime, NOTES, { provider: 'p', model: 'm', reasoningEffort: 'max' });
+  assert.equal(llm.calls[1].reasoningEffort, 'max');
+
+  // 半截显式路由（只给 reasoningEffort）按既定口径整个作废、回落默认选择 —— 而不是只把 provider/model
+  // 补默认值、却留着这个字段：那样等于把两个来源的路由拼在一起，出问题时报的错会离原因很远。
+  const half = await summarizeNote(runtime, note, { reasoningEffort: 'high' });
+  assert.deepEqual(half.route, { provider: 'p', model: 'm' });
+  assert.equal(llm.calls[2].reasoningEffort, undefined);
+});
+
+test('detectConflicts：也认 doctor.auditStore() 的 fields 形状，缺 file/id 的笔记文件名为空但不炸', async () => {
+  const llm = fakeLlm(textPlay('[]'));
+  const notes = [
+    { file: 'reference-a.md', body: '正文 A', fields: { name: 'A 的名字', description: 'A 的描述' } },
+    { file: 'reference-b.md', text: '只给了 text 字段的正文' },
+    {}, // 一种字段都没有：不许抛，也不许编一个文件名出来
+  ];
+  const findings = await detectConflicts(runtimeWith(llm), notes);
+  assert.deepEqual(findings, []);
+  const sent = sentText(llm.calls[0]);
+  assert.match(sent, /### reference-a\.md/);
+  assert.match(sent, /A 的名字/, 'fields.name 要当成标题');
+  assert.match(sent, /A 的描述/, 'fields.description 要当成描述');
+  assert.match(sent, /只给了 text 字段的正文/, 'body 缺了就退回 text');
+  assert.match(sent, /### \n/, '连 file/id 都没有的笔记 → 文件名为空，不炸也不编');
+});
+
+test('detectConflicts：notes 不是数组（undefined / 字符串 / 混进 null）→ 空 findings，一次调用都不发', async () => {
+  const llm = fakeLlm(textPlay('[]'));
+  assert.deepEqual(await detectConflicts(runtimeWith(llm), undefined), []);
+  assert.deepEqual(await detectConflicts(runtimeWith(llm), '其实是一段字符串'), []);
+  assert.deepEqual(await detectConflicts(runtimeWith(llm), [null, 'no', 7]), []);
+  assert.equal(llm.calls.length, 0, '没有笔记可查就不该烧调用');
+});
+
+test('detectConflicts：runtime 整个没给 → 一条 warn 的不可用，而不是解构 TypeError', async () => {
+  const findings = await detectConflicts(undefined, NOTES);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].code, 'semantic-unavailable');
+  assert.equal(findings[0].severity, 'warn');
+  assert.match(findings[0].message, /宿主 LLM 服务不可用/);
+});
 
 test('detectConflicts：模型指认的矛盾变成 doctor 形状的 finding（键名与严重级都对得上）', async () => {
   const llm = fakeLlm(textPlay(CONFLICT_JSON));
@@ -375,6 +496,46 @@ test('detectConflicts：模型整轮不是 JSON → 不报冲突、不关键词�
   const findings = await detectConflicts(runtimeWith(llm), NOTES);
   assert.deepEqual(findings.filter((f) => f.code === 'semantic-conflict'), []);
   assert.match(findings.find((f) => f.code === 'semantic-unavailable').message, /对不上真实文件名/);
+});
+
+test('detectConflicts：JSON 前后带模型的客套话也能解（剥完围栏再按 [ 和 ] 夹出来）', async () => {
+  const llm = fakeLlm(textPlay(`好的，我检查完了。${CONFLICT_JSON}以上，请复核。`));
+  const findings = await detectConflicts(runtimeWith(llm), NOTES);
+  assert.equal(findings.filter((f) => f.code === 'semantic-conflict').length, 1);
+  assert.equal(findings.some((f) => f.code === 'semantic-unavailable'), false, '解出来了就不该再报「没查成」');
+});
+
+test('detectConflicts：方括号没闭合（半截 JSON）→ 不硬猜，只报「没查成」', async () => {
+  // 没有 ] 时切片会得到一段更烂的东西，宁可返回 null 让它进「输出对不上」，也不做猜测式修补。
+  const llm = fakeLlm(textPlay('[{"files": ["reference-a.md", "reference-b.md", "reason": "截断了'));
+  const findings = await detectConflicts(runtimeWith(llm), NOTES);
+  assert.deepEqual(findings.filter((f) => f.code === 'semantic-conflict'), []);
+  assert.match(findings.find((f) => f.code === 'semantic-unavailable').message, /1 处输出对不上真实文件名/);
+});
+
+test('detectConflicts：模型给了终止 chunk 却一个字都没写 → 算「输出对不上」，不当成查过了', async () => {
+  const llm = fakeLlm({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] });
+  const findings = await detectConflicts(runtimeWith(llm), NOTES);
+  assert.deepEqual(findings.filter((f) => f.code === 'semantic-conflict'), []);
+  const info = findings.find((f) => f.code === 'semantic-unavailable');
+  assert.equal(info.severity, 'info', '空回答是「模型没给东西」，不是「服务不可用」');
+  assert.match(info.message, /1 处输出对不上真实文件名/);
+  assert.equal(llm.calls.length, 1);
+});
+
+test('detectConflicts：条目缺 files（或 files 不是数组）、缺 reason 都算「对不上」，不猜也不编', async () => {
+  const llm = fakeLlm(
+    textPlay(
+      JSON.stringify([
+        { reason: '没说清是哪两篇' },
+        { files: 'reference-a.md', reason: 'files 只有一个字符串' },
+        { files: ['reference-a.md', 'reference-b.md'] },
+      ]),
+    ),
+  );
+  const findings = await detectConflicts(runtimeWith(llm), NOTES);
+  assert.deepEqual(findings.filter((f) => f.code === 'semantic-conflict'), []);
+  assert.match(findings.find((f) => f.code === 'semantic-unavailable').message, /3 处输出对不上真实文件名/);
 });
 
 test('detectConflicts：代码围栏里的 JSON 也能解（模型很爱加 ```json）', async () => {
@@ -475,6 +636,17 @@ test('单篇正文超长：计入 semantic-truncated，且第 1201 个字没送�
 
 test('默认关闭：import 模块本身不发任何调用、不读 ctx（重新求值一次也一样）', async () => {
   const ctx = fakeCtx({ llm: fakeLlm(textPlay('绝不该被调用')) });
+  // ⚠️ 这个查询串只为一件事：拿到一份「没被上面几十个用例改过状态」的全新模块实例，重新求值一次顶层。
+  //
+  // 但它会让覆盖率报告**失真**，而且失真得很吓人：node 的 --experimental-test-coverage 以
+  // fileURLToPath(url) 作键（查询串被丢掉），于是 llm.js 被统计成两条 script —— 这一份只求值了顶层、
+  // 一个函数都没执行，它把函数计数直接抹成 0%（行覆盖率也被拖到 ~37%）。去掉查询串后的真实数字是
+  // 99%+ 行 / 100% 函数，所以「函数 0%」是记账怪癖，不是真缺口。
+  //
+  // 为什么不干脆删掉：这个用例要断言的正是「import 阶段零副作用」，必须有一个没被别的用例碰过的
+  // 模块实例（上面那些用例会调 stream、塞 ctx、改 options）；复用上面那份 import 就测不到这件事。
+  // 保留它，代价只是别拿默认报告的数字当真 —— 要看真实覆盖率先把 ?fresh= 临时去掉再跑：
+  //   node --test --experimental-test-coverage test/llm.test.mjs
   const fresh = await import(`../llm.js?fresh=${Date.now()}`);
   assert.equal(ctx.getCalls, 0, 'import 阶段不许碰 ctx');
   assert.equal(ctx.agentDefaultModel, undefined);

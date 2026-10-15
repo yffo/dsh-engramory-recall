@@ -7,10 +7,18 @@
  *   3. 超过 512 KiB 只留后半，且**仍在行边界**（不能留半行）；
  *   4. `appendAudit` **永不抛异常**（目录不存在/只读挂载/磁盘满都不该让一次记忆写入失败）。
  *
+ * 其它写实行为（同样在下面钉住，疑似 bug 的地方都写了「疑似 bug」）：
+ *   5. entry 不做任何校验：字段类型不对也照写（`bytes: '420'`、`tool: null`），
+ *      但显式 `ts: undefined` 会把默认的落盘时刻整个抹掉（它覆盖默认值，又被 JSON 丢掉）；
+ *   6. 序列化失败（BigInt / 循环引用）⇒ 整条记录静默消失，调用方拿不到任何信号；
+ *   7. limit 只要求「slice 能强转」：NaN / null / -0 都是全量，小数被截断，布尔被当成 0/1；
+ *   8. 空行不占 limit 名额（`filter(Boolean)` 在 `slice` 之前），只有空格的「空白行」与坏行占名额；
+ *   9. 轮转按**行数**减半而非字节减半：大行落在后半时，轮转完仍可能在上限之上。
+ *
  * 全部落在 `mkdtempSync(join(tmpdir(), 'engramory-'))` 里 —— 不碰真实记忆库。
  */
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -86,6 +94,49 @@ test('entry 里的 ts/epoch 覆盖默认值（展开顺序：默认值在前）'
   });
 });
 
+test('entry 不做校验：字段缺失/类型不对都原样落盘，但显式 ts:undefined 会把落盘时刻抹掉（疑似 bug）', () => {
+  withDir((dir) => {
+    appendAudit(dir, undefined); // 连 entry 都不给
+    appendAudit(dir, {}); // 空对象：同上
+    appendAudit(dir, { tool: null, bytes: '420', verdict: 0, extra: { a: [1, 2] } }); // 类型全不对
+    appendAudit(dir, { ts: undefined, tool: 'edit' }); // 显式 undefined
+    appendAudit(dir, { ts: 0, epoch: null, tool: 'edit' }); // 显式假值
+
+    const rows = parseAll(rawLines(dir));
+    assert.equal(rows.length, 5, '5 次调用 5 行 —— 没有一条因为「字段不对」被丢掉');
+    for (const row of rows.slice(0, 2)) {
+      assert.deepEqual(Object.keys(row).sort(), ['epoch', 'ts'], 'entry 缺什么就不写什么，不补 null');
+      assert.equal(row.epoch, GUARD_EPOCH);
+    }
+    // 类型一概不校验：字符串的 bytes、null 的 tool、数字的 verdict、嵌套对象都原样进 JSON
+    assert.deepEqual(rows[2], { ts: rows[2].ts, epoch: GUARD_EPOCH, tool: null, bytes: '420', verdict: 0, extra: { a: [1, 2] } });
+    // 疑似 bug：`{ ...entry }` 里显式 undefined 覆盖掉默认 ts，JSON.stringify 又丢掉 undefined 键
+    // ⇒ 这条记录**根本没有落盘时刻**，而审计的全部价值就是「什么时候发生了什么」。
+    assert.deepEqual(rows[3], { epoch: GUARD_EPOCH, tool: 'edit' }, '现状：显式 ts:undefined 让记录没有 ts');
+    assert.equal(Object.hasOwn(rows[3], 'ts'), false);
+    // 而 0 / null 是「真的给了值」，照样赢过默认值（展开顺序：默认值在前）
+    assert.deepEqual(rows[4], { ts: 0, epoch: null, tool: 'edit' });
+  });
+});
+
+test('序列化失败（BigInt / 循环引用）：不抛，但整条记录静默消失（疑似 bug：审计会无声少一条）', () => {
+  withDir((dir) => {
+    appendAudit(dir, { tool: 'edit', verdict: 'allow', seq: 1 });
+    assert.equal(rawLines(dir).length, 1);
+
+    // JSON.stringify 在 appendFileSync 之前求值 ⇒ 抛在外层 try 里被吞掉，调用方拿不到任何信号。
+    const circular = { name: 'loop' };
+    circular.self = circular;
+    for (const bad of [{ bytes: 10n }, { nested: circular }, { big: BigInt(Number.MAX_SAFE_INTEGER) }]) {
+      appendAudit(dir, { tool: 'edit', verdict: 'allow', ...bad }); // 不抛
+    }
+
+    assert.equal(rawLines(dir).length, 1, '三次失败一条都没落盘（也没有落半条）');
+    assert.deepEqual(parseAll(rawLines(dir)).map((row) => row.seq), [1], '先前那条完好，文件仍是合法 JSONL');
+    assert.deepEqual(readAudit(dir).map((row) => row.seq), [1], '读回来也看不出「刚才有三次审计丢了」');
+  });
+});
+
 // ── 路径与容错：appendAudit 永不抛 ────────────────────────────────────────
 
 test('appendAudit：目录不存在就建出来，照样落盘', () => {
@@ -122,6 +173,24 @@ test('readAudit：文件/目录不存在都是空数组，不是抛异常', () =
   });
 });
 
+test('AUDIT_FILE 的位置被目录占了、storePath 是真值非字符串：都不抛，读回空数组', () => {
+  withDir((dir) => {
+    mkdirSync(fileOf(dir)); // 审计文件的位置被一个目录占着（同步盘/备份工具留下的同名目录）
+    assert.deepEqual(readAudit(dir), [], 'EISDIR 被吞掉：审计坏了也不能让调用方炸');
+    appendAudit(dir, { tool: 'edit', verdict: 'allow' }); // appendFileSync 到目录必失败 → 吞掉
+    assert.equal(statSync(fileOf(dir)).isDirectory(), true, '目录还在：没被删掉，也没被换成文件');
+    assert.deepEqual(readAudit(dir), [], '失败之后依然是「读不回来」而不是抛');
+
+    // storePath 的守卫只有 `!storePath`（真值判断）：数字/布尔/对象这些「真值但不是字符串」
+    // 会在 mkdirSync / path.join 里抛 TypeError，同样被外层 catch 吞掉。
+    for (const bogus of [1, true, NaN, {}]) {
+      appendAudit(bogus, { tool: 'edit' });
+      assert.deepEqual(readAudit(bogus), []);
+    }
+    assert.deepEqual(readAudit(Symbol('x')), [], 'Symbol 也一样：吞掉异常，返回空数组');
+  });
+});
+
 // ── limit 语义 ───────────────────────────────────────────────────────────
 
 test('limit：默认 40 条、取最近 N 条、新的在前', () => {
@@ -150,6 +219,42 @@ test('limit=0 的写实行为：slice(-0) 就是 slice(0)，返回全部（疑�
     assert.equal(readAudit(dir, 0).length, 3);
     // 负数 limit 也不是「不要」，而是「跳过开头 N 条再倒序」，同样反直觉：
     assert.deepEqual(readAudit(dir, -1).map((row) => row.seq), [3, 2]);
+  });
+});
+
+test('limit 的非数字语义：NaN / null / -0 都是「全量」，布尔被当成 0/1（写实）', () => {
+  withDir((dir) => {
+    for (let i = 1; i <= 5; i += 1) appendAudit(dir, { tool: 'edit', seq: i });
+    const seqs = (limit) => readAudit(dir, limit).map((row) => row.seq);
+
+    // `slice(-limit)` 先做 ToIntegerOrInfinity：NaN/null/-0 都算 0 ⇒ slice(-0) ⇒ slice(0) ⇒ 全量。
+    // 面板/脚本想用 NaN 或 null 表达「不限制/没设置」时拿到的是整份日志，而不是空数组 —— 反直觉但稳。
+    assert.deepEqual(seqs(NaN), [5, 4, 3, 2, 1]);
+    assert.deepEqual(seqs(null), [5, 4, 3, 2, 1], 'null 不触发默认值（默认值只认 undefined）');
+    assert.deepEqual(seqs(-0), [5, 4, 3, 2, 1]);
+    assert.deepEqual(seqs(Infinity), [5, 4, 3, 2, 1]);
+    assert.deepEqual(seqs(2.7), [5, 4], '小数被截断（ToIntegerOrInfinity 向零取整）');
+    assert.deepEqual(seqs('3'), [5, 4, 3], '字符串也行：不是设计，是 slice 内部强转');
+    assert.deepEqual(seqs(true), [5], '布尔被当成 1 —— 传错了不会报错，只会静默换个条数');
+    // 只有 undefined 才走默认值（默认参数语义），这也是「没传」与「传了个假值」的唯一分界：
+    assert.equal(readAudit(dir, undefined).length, 5);
+  });
+});
+
+test('空行不占名额、空白行与坏行占名额：filter(Boolean) 在 slice 之前，JSON.parse 在 slice 之后', () => {
+  withDir((dir) => {
+    appendAudit(dir, { tool: 'edit', seq: 1 });
+    appendFileSync(fileOf(dir), '\n\n'); // 两个真空行
+    appendAudit(dir, { tool: 'edit', seq: 2 });
+    assert.equal(readFileSync(fileOf(dir), 'utf8').split('\n').length, 5, '文件里确实多了 2 个空槽（外加末尾换行）');
+    assert.deepEqual(readAudit(dir, 2).map((row) => row.seq), [2, 1], '空行在切之前就被滤掉，不吃名额');
+
+    appendFileSync(fileOf(dir), '   \n'); // 只有空格：不是空串 ⇒ filter(Boolean) 留它下来
+    assert.deepEqual(readAudit(dir, 2).map((row) => row.seq), [2], '空白行吃名额（切到了它，又解析不出对象，只能丢）');
+
+    appendFileSync(fileOf(dir), '{半截\n'); // 坏行同理：切完才 parse
+    assert.deepEqual(readAudit(dir, 3).map((row) => row.seq), [2], '坏行也吃名额');
+    assert.deepEqual(readAudit(dir, 100).map((row) => row.seq), [2, 1], 'limit 够大时两条好行一条不少');
   });
 });
 
@@ -218,6 +323,30 @@ test('轮转的边界：单行就超过上限时 slice(-0) 让轮转空转（写
     assert.equal(rawLines(dir).length, 2);
     assert.equal(readAudit(dir)[0].seq, 'third');
     assert.ok(statSync(fileOf(dir)).size < MAX_AUDIT_BYTES, '自愈后回到上限以内');
+  });
+});
+
+test('轮转按「行数减半」而非「字节减半」：大行落在后半时轮转完仍超上限（疑似 bug）', () => {
+  withDir((dir) => {
+    const HUGE = 'y'.repeat(600 * 1024); // 单行 600 KiB：已经超过 512 KiB 的上限
+    const small = (n) => `${JSON.stringify({ ts: 1, tool: 'edit', verdict: 'allow', n })}\n`;
+    writeFileSync(fileOf(dir), small(1) + small(2) + `${JSON.stringify({ ts: 1, tool: 'edit', verdict: 'allow', huge: HUGE })}\n` + small(4));
+    assert.ok(statSync(fileOf(dir)).size > MAX_AUDIT_BYTES, '起点：4 行、已经超限');
+
+    appendAudit(dir, { tool: 'edit', verdict: 'allow', seq: 'a' });
+    // lines.length=4 ⇒ slice(-2) ⇒ 留下「后半」= [巨大行, n=4] —— 巨大行本身就在后半，原样留下
+    const mid = parseAll(rawLines(dir));
+    assert.equal(mid.length, 3, '留下的 2 行 + 刚写的 1 条');
+    assert.equal(mid[0].huge.length, HUGE.length, '巨大行被留下：轮转只数行数，不看每行有多大');
+    assert.equal(mid[1].n, 4, '留下来的确实是后半，顺序原样');
+    assert.equal(mid[2].seq, 'a');
+    assert.ok(statSync(fileOf(dir)).size > MAX_AUDIT_BYTES, '轮转之后仍在 512 KiB 之上 —— 这一轮没把体积收回来');
+
+    appendAudit(dir, { tool: 'edit', verdict: 'allow', seq: 'b' });
+    // lines.length=3 ⇒ slice(-1) ⇒ 只留最后一行，巨大行这次终于出局 ⇒ 体积自愈
+    assert.deepEqual(readAudit(dir, 9).map((row) => row.seq), ['b', 'a']);
+    assert.equal(rawLines(dir).length, 2, '轮到只剩 2 行');
+    assert.ok(statSync(fileOf(dir)).size < MAX_AUDIT_BYTES, '下一次写入才回到上限以内');
   });
 });
 
