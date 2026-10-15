@@ -19,14 +19,20 @@
  *   return [{ id: 'some-note.md', score: 0.9 }, ...];
  * }
  *
- * // 2) 扩展：把问题改写成几句别的说法，由我分别检索再融合
+ * // 2) 扩展：把问题改写成几句别的说法，由我分别检索（**只用于补空位**）
  * export async function expand({ query, signal }) {
  *   return ['另一种说法', '关键词组合'];
  * }
  * ```
  *
- * 两种结果都不是「替换」而是「融合」（RRF）：词面命中的文档永远还在池子里，
- * 提供方只能改变顺序，删不掉东西。
+ * 两种接口的边界**不一样**，这是量出来的、不是拍出来的：
+ * · `rerank` 声称自己有打分器 ⇒ 结果与词面走 RRF 融合，**允许改顺序**（同 limit 下不增不减）；
+ * · `expand` 只是「换个说法再查一遍」⇒ **只补空位，永不改动词面顺序**。
+ *   实测（2026-10-15，真库探针 36 条 + 合成 70 条，改写由宿主模型逐条产生）：
+ *   RRF 融合让 3 条改写以 1:1 的票数盖过原查询的 1 票，真库 hit@1 26/36 → 19/36、
+ *   hit@4 36/36 → 30/36；把原查询加权到 3 票 / 5 票、或改成归一化打分，全都仍不如基线；
+ *   只有「只补空位」「池子合并（原查询打分优先）」「命中不足才用」三种保守规则能逐字打平基线。
+ *   结论：改写能扩候选，改不了排序，那就别让它碰排序。详见 README「宿主模型改写实测」。
  */
 
 import { readFileSync } from 'node:fs';
@@ -119,13 +125,21 @@ function normalizeModule(module, source) {
   return null;
 }
 
-/** 宿主模型的「扩展」实现：问模型要几句别的说法，别的什么都不做。 */
-async function hostLlmExpand(module, route, query, config, signal) {
-  const prompt = [
+/**
+ * 宿主模型改写的提示词。**导出**是给 `bench/host-rewrite.mjs` 用的：
+ * 那把尺子得用同一句话去问真宿主模型，否则量出来的不是产品行为。
+ */
+export function hostLlmPrompt(query) {
+  return [
     '把用户的问题改写成 3 条更可能命中本地记忆库的检索短句（同义词、术语、英文对照都可以）。',
     '只输出 JSON 数组，元素是字符串，不要解释、不要编号。',
     `问题：${query}`,
   ].join('\n');
+}
+
+/** 宿主模型的「扩展」实现：问模型要几句别的说法，别的什么都不做。 */
+async function hostLlmExpand(module, route, query, config, signal) {
+  const prompt = hostLlmPrompt(query);
   const result = await module.collectText(
     { stream: (options) => route.llm.stream(options) },
     {
@@ -208,7 +222,8 @@ function normalizeRanking(raw, docs) {
   return { ids, dropped };
 }
 
-function normalizeExpansions(raw, query) {
+/** 改写结果的宽松解析（同样导出给尺子复用：解析口径不一致，数字就不可比）。 */
+export function normalizeExpansions(raw, query) {
   const rows = Array.isArray(raw) ? raw : [];
   const out = [];
   const seen = new Set([String(query).trim().toLowerCase()]);
@@ -293,22 +308,32 @@ export async function semanticSearch(options = {}) {
     if (!expansions.length) {
       return fail(lexical, started, 'provider-empty', `提供方 ${provider.name} 没给出任何可用的改写，已降级`, { provider: provider.name });
     }
-    const lists = [lexical.map((hit) => hit.id)];
+    // 词面顺序原样保留：改写只按自己的名次往后补，绝不插队。理由见文件头（实测：融合会以多欺少）。
+    const order = lexical.map((hit) => hit.id);
+    const seen = new Set(order);
     const byId = new Map(lexical.map((hit) => [hit.id, hit]));
+    const extra = [];
     for (const text of expansions) {
-      const hits = runSearch(options.index, text, limit);
-      for (const hit of hits) if (!byId.has(hit.id)) byId.set(hit.id, hit);
-      lists.push(hits.map((hit) => hit.id));
+      for (const hit of runSearch(options.index, text, limit)) {
+        if (seen.has(hit.id)) continue;
+        seen.add(hit.id);
+        if (!byId.has(hit.id)) byId.set(hit.id, hit);
+        extra.push(hit.id);
+      }
     }
-    const order = mergeRRF(lists, limit);
-    const hits = order.map((id) => byId.get(id)).filter(Boolean);
+    const room = Math.max(0, limit - order.length);
+    const filled = extra.slice(0, room);
+    const hits = [...order, ...filled].map((id) => byId.get(id)).filter(Boolean);
     return {
       hits,
       used: true,
       code: 'expanded',
-      message: `已用 ${expansions.length} 条改写融合（RRF）`,
+      message: filled.length
+        ? `已用 ${expansions.length} 条改写补位（新增 ${filled.length} 条，词面顺序未动）`
+        : `已用 ${expansions.length} 条改写，但没有可补的空位（词面结果已占满 ${limit} 条，顺序未动）`,
       provider: provider.name,
       expansions,
+      added: filled.length,
       ms: Date.now() - started,
     };
   } catch (error) {

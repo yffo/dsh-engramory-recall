@@ -93,3 +93,34 @@ test('接缝正常路径：真打分的提供方只能重排，不能凭空增�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('接缝的 expand 契约：一个「好改写」提供方也只许补空位，永不改动词面顺序', async () => {
+  // 用「同一篇笔记的其它问法」当改写 —— 这是**真实的好改写**（模型能给的就是这种），
+  // 也是 2026-10-15 实测里把 RRF 融合打出 -7 hit@1 的那类输入。契约：顺序一个字都不许变。
+  const others = new Map();
+  for (const query of queries) {
+    if (!others.has(query.gold)) others.set(query.gold, []);
+    const list = others.get(query.gold);
+    if (list.length < 3 && query.q !== undefined) list.push(query.q);
+  }
+  const byQuery = new Map(sample.map((q) => [q.q, (others.get(q.gold) ?? []).filter((t) => t !== q.q).slice(0, 3)]));
+
+  const dir = mkdtempSync(join(tmpdir(), 'engramory-seam-expand-'));
+  const path = join(dir, 'provider.mjs');
+  writeFileSync(path, `const table = new Map(${JSON.stringify([...byQuery])});\nexport function expand({ query }) { return table.get(query) ?? []; }\n`);
+  try {
+    let withExpansions = 0;
+    for (const query of sample) {
+      const base = await idsFor(query.q, {});
+      const { ids, code, used, added } = await idsFor(query.q, { provider: path, timeoutMs: 2000 });
+      assert.equal(used, true);
+      assert.equal(code, 'expanded');
+      assert.deepEqual(ids, base.ids, `「${query.q}」的命中顺序被改写了 —— expand 只许补空位`);
+      if ((byQuery.get(query.q) ?? []).length) withExpansions += 1;
+      assert.equal(added, 0, '词面已占满 limit（4 条），不该有补位空间');
+    }
+    assert.ok(withExpansions > sample.length * 0.8, '绝大多数查询都该真的拿到了改写（否则这个用例是空跑）');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

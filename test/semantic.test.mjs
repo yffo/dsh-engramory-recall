@@ -157,18 +157,38 @@ test('语义接缝：提供方卡住时必须按时收手，不能让检索等�
   }
 });
 
-test('语义接缝：expand 提供方带进来的新文档会进结果，词面第一名不丢', async () => {
+test('语义接缝：词面占满 limit 时，expand 提供方一条都不许动（实测：融合会以多欺少）', async () => {
   const c = providerCase(
-    'expand',
+    'expand-order',
     `export const name = 'fake-expander';\nexport function expand({ query }) { return ['表达偏好 中文短句', query, '   ']; }\n`,
   );
   try {
-    const lexical = await semanticSearch({ index, query: 'CI 跑测试', limit: 3, config: {} });
-    const expanded = await semanticSearch({ index, query: 'CI 跑测试', limit: 3, config: { provider: c.file } });
+    const lexical = await semanticSearch({ index, query: ALL_HIT_QUERY, limit: 3, config: {} });
+    const expanded = await semanticSearch({ index, query: ALL_HIT_QUERY, limit: 3, config: { provider: c.file } });
     assert.equal(expanded.used, true);
     assert.equal(expanded.code, 'expanded');
     assert.deepEqual(expanded.expansions, ['表达偏好 中文短句'], '去空白、丢掉与原查询重复的那条（重跑一遍原查询没有意义）');
-    assert.ok(ids(expanded).includes(lexical.hits[0].id), '词面第一名不能被改写挤掉');
+    assert.deepEqual(ids(expanded), ids(lexical), '词面已占满 limit：顺序与条目必须逐字相同');
+    assert.equal(expanded.added, 0);
+    assert.match(expanded.message, /没有可补的空位/);
+  } finally {
+    c.cleanup();
+  }
+});
+
+test('语义接缝：词面不足 limit 时，expand 提供方补位（接在后面，不插队）', async () => {
+  const c = providerCase(
+    'expand-fill',
+    `export const name = 'fake-expander';\nexport function expand() { return ['表达偏好 中文短句']; }\n`,
+  );
+  try {
+    const lexical = await semanticSearch({ index, query: 'npm publish', limit: 3, config: {} });
+    assert.ok(lexical.hits.length >= 1 && lexical.hits.length < 3, '夹具里这个查询只命中一部分文档');
+    const filled = await semanticSearch({ index, query: 'npm publish', limit: 3, config: { provider: c.file } });
+    assert.equal(filled.code, 'expanded');
+    assert.ok(filled.added > 0, '有空位就该补上');
+    assert.deepEqual(ids(filled).slice(0, lexical.hits.length), ids(lexical), '词面结果原样在前');
+    assert.ok(ids(filled).includes('user-preferences.md'), '改写带来的新文档只能接在后面');
   } finally {
     c.cleanup();
   }
