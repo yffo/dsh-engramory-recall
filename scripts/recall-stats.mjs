@@ -84,6 +84,22 @@ console.log(`| **打开率** | **${pct(summary.used, summary.pointers)}** |`);
 console.log(`| 没注入也打开（对照） | ${summary.coldOpens} |`);
 console.log(`| 被注入过的不同笔记 | ${summary.uniqueNotes} |`);
 
+// 分母要按「谁在问」拆开：委派轮（子代理 / Agent Teams）的提示词里没有「先看记忆库」
+// 这回事，它们的指针几乎注定不会被打开 —— 混在一起会把打开率系统性压低，
+// 而打开率正是决定窗口宽窄的那个数（unknown = 升级到 0.13.7 之前写的老行）。
+const byScope = summary.scopes ?? {};
+if (Object.values(byScope).some((v) => v && v.pointers)) {
+  console.log('\n## 按提问者拆开：主对话 vs 委派轮');
+  console.log('| 提问者 | 注入轮 | 注入指针 | 打开 | 打开率 |');
+  console.log('| --- | --- | --- | --- | --- |');
+  const label = { main: '主对话轮', subagent: '子代理轮', unknown: '未标记（0.13.7 前）' };
+  for (const key of ['main', 'subagent', 'unknown']) {
+    const v = byScope[key];
+    if (!v || !v.pointers) continue;
+    console.log(`| ${label[key]} | ${v.injectRounds} | ${v.pointers} | ${v.used} | ${pct(v.used, v.pointers)} |`);
+  }
+}
+
 console.log('\n## 位置级：窗口该多宽的直接依据');
 console.log('| 位置 | 注入次数 | 打开次数 | 打开率 |');
 console.log('| --- | --- | --- | --- |');

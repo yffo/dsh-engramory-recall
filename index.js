@@ -354,6 +354,8 @@ export function apply(ctx, config = {}) {
         kind: entry.kind,
         query: entry.query,
         reason: entry.reason,
+        // 提问者身份（main / subagent）：打开率的分母必须能按这个拆开
+        ...(entry.scope ? { scope: entry.scope, depth: entry.depth ?? 0 } : {}),
         ids: (entry.hits ?? []).map((hit) => hit.id).filter(Boolean),
         // 分数与门槛一起落盘：否则「minScore 该定多高」永远只能猜。
         // `scores` 与 `ids` 一一对应（同一顺序），第 1 条与最后一条的落差也靠它算。
@@ -712,6 +714,18 @@ export function apply(ctx, config = {}) {
       if (!human) return decision;
       const id = String(human.id ?? '');
       if (id && seen.has(id)) return decision;
+      // 「这一轮是谁在问」：委派轮（子代理 / Agent Teams）与主对话轮共用同一个记忆库，
+      // 而委派提示词里根本没有「先看记忆库」这回事 —— 它们的指针几乎不可能被打开。
+      // 不分开数，打开率会被系统性稀释（实测：23 轮注入里一半是「你是只读侦察员…」）。
+      // 判据与 DSH 自己的 delegationDepthOf() 一字不差：session.header.delegationDepth 与
+      // agent.options.subagentDepth 取大者；两处都没有（老宿主）就当主对话轮，宁可少分不可误杀。
+      const roundAgent = payload?.agent;
+      const depth = Math.max(
+        Number(roundAgent?.session?.header?.delegationDepth) || 0,
+        Number(roundAgent?.options?.subagentDepth) || 0,
+      );
+      const scope = depth > 0 ? 'subagent' : 'main';
+      const recordRound = (entry) => record({ ...entry, scope, depth });
       // 本会话的第几个真实用户轮（沉淀提醒的判据之一）
       turnCount += 1;
       // 自动归档的两个触发源之一：兜底路径。（另一个在闸门放行写入之后。）
@@ -730,13 +744,13 @@ export function apply(ctx, config = {}) {
       // 检索只会把噪音塞进上下文（见 CHITCHAT 上方注释的实测数据）。
       const notSearchable = searchableReason(query);
       if (notSearchable) {
-        record({ kind: 'skip', query: brief(query), hits: [], reason: notSearchable });
+        recordRound({ kind: 'skip', query: brief(query), hits: [], reason: notSearchable });
         return decision;
       }
 
       const storePath = String(settings.storePath || '').trim();
       if (!storePath) {
-        record({ kind: 'skip', query: brief(query), hits: [], reason: 'store-not-configured' });
+        recordRound({ kind: 'skip', query: brief(query), hits: [], reason: 'store-not-configured' });
         return decision;
       }
 
@@ -774,7 +788,7 @@ export function apply(ctx, config = {}) {
       if (!hits.length && !wantsRemember && !wantsSediment) {
         // 三种「空」要分清：库里没东西、一条都不匹配、全被 minScore 拦掉。
         // `topScore` 是校准 minScore 的唯一依据 —— 只写「空」等于把门槛高低的责任推给猜。
-        record({
+        recordRound({
           kind: 'empty',
           query: brief(query),
           hits: [],
@@ -845,7 +859,7 @@ export function apply(ctx, config = {}) {
           seenOrder.push(id);
           if (seenOrder.length > 500) seen.delete(seenOrder.shift());
         }
-        record({ kind: 'skip', query: brief(query), hits: [], reason: 'duplicate' });
+        recordRound({ kind: 'skip', query: brief(query), hits: [], reason: 'duplicate' });
         return decision;
       }
       lastInjectedKey = dedupeKey;
@@ -858,7 +872,7 @@ export function apply(ctx, config = {}) {
         if (seenOrder.length > 500) seen.delete(seenOrder.shift());
       }
 
-      record({
+      recordRound({
         kind: lines.length ? 'hit' : 'sediment',
         query: brief(query),
         hits: shown.map((hit) => ({

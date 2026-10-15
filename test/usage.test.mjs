@@ -251,6 +251,47 @@ test('minScore 判据：有零代价上限 / 没有零代价 两种话术', () =
   assert.match(scoreCurveVerdict(costly), /没有「砍掉又不丢」的门槛/);
 });
 
+test('按提问者分账：委派轮的指针不算进主对话的打开率，归因跟着「命中它的最后一次注入」', () => {
+  const t = 1_700_000_000_000;
+  const s = summarizeUsage([
+    { ts: t, kind: 'hit', ids: ['a.md', 'b.md'], scores: [9, 5], scope: 'main' },
+    { ts: t + 10, kind: 'used', id: 'a.md', via: 'read' },
+    { ts: t + 20, kind: 'hit', ids: ['c.md', 'd.md'], scope: 'subagent' },
+    { ts: t + 30, kind: 'used', id: 'c.md', via: 'read' },
+    { ts: t + 40, kind: 'hit', ids: ['e.md'], scores: [4], scope: 'main' },
+    { ts: t + 50, kind: 'skip', reason: 'chitchat' },
+  ]);
+  assert.equal(s.pointers, 5);
+  assert.equal(s.used, 2);
+  assert.equal(s.scopes.main.pointers, 3);
+  assert.equal(s.scopes.main.used, 1);
+  assert.equal(s.scopes.main.openRate, 1 / 3);
+  assert.equal(s.scopes.subagent.pointers, 2);
+  assert.equal(s.scopes.subagent.used, 1);
+  assert.equal(s.scopes.unknown.pointers, 0, '没标 scope 的行进 unknown，不能混进 main');
+
+  // 同一篇被注入了两次（先委派、后主对话），之后被打开 —— 归「最后一次命中它的那次注入」
+  const repeated = summarizeUsage([
+    { ts: 1, kind: 'hit', ids: ['x.md'], scope: 'subagent' },
+    { ts: 2, kind: 'hit', ids: ['x.md'], scope: 'main' },
+    { ts: 3, kind: 'used', id: 'x.md', via: 'read' },
+  ]);
+  assert.equal(repeated.scopes.main.used, 1);
+  assert.equal(repeated.scopes.subagent.used, 0);
+});
+
+test('第一句判据：委派轮占大头时改用「只看主对话」的口径，不够多时不换', () => {
+  const main = { injectRounds: 5, pointers: 25, used: 9, openRate: 9 / 25 };
+  const sub = { injectRounds: 10, pointers: 50, used: 0, openRate: 0 };
+  const diluted = usageVerdict({ pointers: 75, used: 9, openRate: 9 / 75, scopes: { main, subagent: sub, unknown: { injectRounds: 0, pointers: 0, used: 0, openRate: 0 } } });
+  assert.match(diluted, /只看主对话轮的 25 条指针/, '委派轮占到 2/3 时要换口径');
+  assert.match(diluted, /另有 50 条来自子代理轮/);
+  assert.match(diluted, /在中间档/, '36% 是中间档（换口径前 12% 会被误判成偏低）');
+
+  const small = usageVerdict({ pointers: 75, used: 9, openRate: 0.12, scopes: { main, subagent: { injectRounds: 1, pointers: 4, used: 0, openRate: 0 }, unknown: { injectRounds: 9, pointers: 46, used: 0, openRate: 0 } } });
+  assert.match(small, /打开率 12\.0% 偏低/, '委派轮只有 4 条指针时不该换口径');
+});
+
 // ── 插件层：注入 → 打开 的完整链路 ─────────────────────────────────────────
 
 function fixtureStore() {

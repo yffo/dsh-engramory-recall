@@ -325,6 +325,22 @@ window.__ModuleLoader__.load({
                   hint: usage.openLag && usage.openLag.n ? `p90 ${Math.round(usage.openLag.p90 / 1000)}s · n=${usage.openLag.n}` : '还没被打开过',
                 })),
 
+              // 分母要按「谁在问」拆开：委派轮（子代理）的提示词里没有「先看记忆库」这回事，
+              // 把它们算进分母会把打开率压低，而打开率正是决定窗口宽窄的那个数。
+              (() => {
+                const scopes = usage.scopes || {};
+                const label = { main: '主对话轮', subagent: '子代理轮', unknown: '未标记（0.13.7 前）' };
+                const rows = ['main', 'subagent', 'unknown']
+                  .map((key) => [label[key], scopes[key]])
+                  .filter(([, v]) => v && v.pointers);
+                if (!rows.length) return null;
+                return h('div', { style: { ...S.muted, fontSize: '11.5px', marginTop: '8px' } },
+                  '按提问者：',
+                  rows.map(([name, v], i) => h('span', { key: name },
+                    i ? ' · ' : '',
+                    `${name} ${v.injectRounds} 轮 / ${v.pointers} 条 / 打开 ${v.used}（${((v.openRate || 0) * 100).toFixed(1)}%）`)));
+              })(),
+
               h('div', { style: { fontSize: '11.5px', marginTop: '10px' } },
                 [usage.verdicts && usage.verdicts.open, usage.verdicts && usage.verdicts.budget, usage.verdicts && usage.verdicts.reason, usage.verdicts && usage.verdicts.curve]
                   .filter(Boolean)

@@ -125,6 +125,10 @@ export function summarizeUsage(lines, options = {}) {
   const emptyReasons = new Map();
   const topScores = [];
   const spreads = [];
+  // 「这一轮是谁在问」：main（主对话）/ subagent（委派轮）/ unknown（0.13.7 之前的老行）。
+  // 委派轮按设计几乎不会打开笔记，混进分母会让打开率系统性偏低 —— 必须能拆开看。
+  const scopes = { main: { injectRounds: 0, pointers: 0, used: 0 }, subagent: { injectRounds: 0, pointers: 0, used: 0 }, unknown: { injectRounds: 0, pointers: 0, used: 0 } };
+  const scopeOf = (line) => (line?.scope === 'main' || line?.scope === 'subagent' ? line.scope : 'unknown');
   const bump = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
   const toCounts = (map) =>
     Object.fromEntries([...map.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]))));
@@ -153,6 +157,9 @@ export function summarizeUsage(lines, options = {}) {
       stats.injectRounds += 1;
       stats.pointers += ids.length;
       roundSizes.push(ids.length);
+      const bucket = scopes[scopeOf(line)];
+      bucket.injectRounds += 1;
+      bucket.pointers += ids.length;
       const scores = Array.isArray(line?.scores) ? line.scores.map(Number).filter(Number.isFinite) : [];
       if (scores.length) {
         topScores.push(scores[0]);
@@ -169,7 +176,7 @@ export function summarizeUsage(lines, options = {}) {
         stats.droppedRounds += 1;
       }
       if (collapsed > 0 || dropped > 0) stats.truncatedRounds += 1;
-      injections.push({ at: ts, ids });
+      injections.push({ at: ts, ids, scope: scopeOf(line) });
     }
     if (kind === 'used' && line?.id) {
       stats.used += 1;
@@ -192,11 +199,16 @@ export function summarizeUsage(lines, options = {}) {
   }
   for (const ev of usedEvents) {
     let position = -1;
+    let owner = null;
     for (const inj of injections) {
       if (inj.at > ev.at) break;
       const at = inj.ids.indexOf(ev.id);
-      if (at >= 0) position = at;
+      if (at >= 0) {
+        position = at;
+        owner = inj;
+      }
     }
+    if (owner) scopes[owner.scope].used += 1;
     if (position >= 0 && position < maxPositions) positions[position].opened += 1;
     const rec = perNote.get(ev.id);
     if (rec) rec.opened += 1;
@@ -209,6 +221,11 @@ export function summarizeUsage(lines, options = {}) {
   return {
     ...stats,
     openRate: stats.pointers ? stats.used / stats.pointers : 0,
+    // 按提问者拆开的同一笔账：主对话轮才是「这套召回到底有没有用」的判据，
+    // 委派轮的指针几乎注定不会被打开（unknown = 升级前写的老行）。
+    scopes: Object.fromEntries(
+      Object.entries(scopes).map(([key, v]) => [key, { ...v, openRate: v.pointers ? v.used / v.pointers : 0 }]),
+    ),
     positions,
     notes,
     neverOpened: notes.filter((n) => !n.opened).slice(0, neverLimit),
@@ -370,13 +387,23 @@ export function usageVerdict(summary) {
   if (!summary || summary.pointers < 20) {
     return `样本太小（注入 ${summary?.pointers ?? 0} 条）——先攒到 20 条以上再据此决策`;
   }
-  if (summary.openRate < 0.3) {
-    return `打开率 ${(summary.openRate * 100).toFixed(1)}% 偏低：窗口该收窄，或把 minScore 抬高一点`;
+  // 有足够多的委派轮时改用「只看主对话」的口径：委派提示词里没有「先看记忆库」这回事，
+  // 把它们算进分母等于拿一群不会打开笔记的轮次来评判窗口宽度（实测稀释掉一半以上）。
+  const byScope = summary.scopes ?? {};
+  const main = byScope.main ?? { pointers: 0, used: 0, openRate: 0 };
+  const sub = byScope.subagent ?? { pointers: 0, used: 0 };
+  const diluted = sub.pointers >= 10 && sub.pointers >= 0.2 * summary.pointers && main.pointers >= 20;
+  const rate = diluted ? main.openRate : summary.openRate;
+  const head = diluted
+    ? `打开率 ${(rate * 100).toFixed(1)}%（只看主对话轮的 ${main.pointers} 条指针；另有 ${sub.pointers} 条来自子代理轮，它们几乎不会打开笔记）`
+    : `打开率 ${(summary.openRate * 100).toFixed(1)}%`;
+  if (rate < 0.3) {
+    return `${head} 偏低：窗口该收窄，或把 minScore 抬高一点`;
   }
-  if (summary.openRate > 0.6) {
-    return `打开率 ${(summary.openRate * 100).toFixed(1)}% 偏高：窗口可以按 hit@k 曲线放宽到 5~8 条`;
+  if (rate > 0.6) {
+    return `${head} 偏高：窗口可以按 hit@k 曲线放宽到 5~8 条`;
   }
-  return `打开率 ${(summary.openRate * 100).toFixed(1)}% 在中间档：窗口保持现状，先看位置级曲线`;
+  return `${head} 在中间档：窗口保持现状，先看位置级曲线`;
 }
 
 /**

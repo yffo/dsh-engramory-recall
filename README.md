@@ -449,6 +449,7 @@ Electron 载体走 `file://` + IPC 时可能没有 webServer，那时召回照�
 | 行 | 什么时候写 | 关键字段 |
 | --- | --- | --- |
 | `hit` / `sediment` | 每轮注入（命中 / 只给沉淀提醒） | `ids`（**按显示顺序**）、`scores`（与 `ids` 一一对应）、`injected`、`collapsed`、`dropped` |
+| （轮级字段） | 上面三类「轮」的行都带 | `scope` = `main` / `subagent`（提问者；0.13.7 之前的行没有这一项，汇总里归 `unknown`） |
 | `skip` | 没去检索（寒暄 / 太短 / 与上轮重复 / 没配库路径） | `reason` = `chitchat` / `too-short` / `duplicate` / `store-not-configured` |
 | `empty` | 检索了但一条都没注入 | `reason` = `index-empty` / `no-hits` / `below-min-score`，另带 `minScore` 与 `topScore` |
 | `deny` | 写入被闸门拦下 | `reason`（拒绝原文） |

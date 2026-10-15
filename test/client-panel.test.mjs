@@ -133,6 +133,11 @@ const richUsage = () => ({
   skipReasons: { chitchat: 5, duplicate: 2 },
   emptyReasons: { 'no-hits': 3, 'below-min-score': 1, 'made-up-code': 1 },
   scoreStats: { n: 6, median: 12.345, p10: 4.1, p90: 30.2, spreadMedian: 8.888 },
+  scopes: {
+    main: { injectRounds: 4, pointers: 18, used: 8, openRate: 8 / 18 },
+    subagent: { injectRounds: 2, pointers: 6, used: 1, openRate: 1 / 6 },
+    unknown: { injectRounds: 0, pointers: 0, used: 0, openRate: 0 },
+  },
   scoreCurve: {
     n: 20, rounds: 4, legacy: 19, unaligned: 0, opened: 0,
     points: [
@@ -209,6 +214,11 @@ test('面板：使用账页签把打开率、位置级曲线、预算、原因�
   assert.match(text, /窗口基本用满/);
   assert.match(text, /跳过以寒暄为主/);
   assert.match(text, /曲线只能看形状/, '第四句判据（minScore 曲线）要照搬宿主的原话');
+  // textsOf 用 ' | ' 拼文本，所以断言只取连续的那一段
+  assert.match(text, /按提问者：/);
+  assert.match(text, /主对话轮 4 轮 \/ 18 条 \/ 打开 8（44\.4%）/, '分母要按谁在问拆开');
+  assert.match(text, /子代理轮 2 轮 \/ 6 条 \/ 打开 1（16\.7%）/);
+  assert.doesNotMatch(text, /未标记（0\.13\.7 前）/, '空桶不显示，免得面板上全是 0');
   assert.match(text, /把 minScore 抬高会付出什么/);
   assert.match(text, /配对 20 条指针 \/ 4 轮/);
   assert.match(text, /≥ 3\.152/);
