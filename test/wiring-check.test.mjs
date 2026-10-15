@@ -76,7 +76,7 @@ function hasDshProcess() {
     .some((l) => /DeepSeek Harness\.app\/Contents\/MacOS\/DeepSeek Harness(\s|$)/.test(l) || /dsh\s+web/.test(l));
 }
 
-/** 把「被检仓库」里的运行时文件统一改成某个时刻（旧代码检测那两条用例要用）。 */
+/** 把「被检仓库」里的运行时文件统一改成某个时刻（旧代码检测那几条用例要用）。 */
 function stampRuntimeFiles(repo, ms) {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   const files = (pkg.files ?? [])
@@ -210,6 +210,23 @@ test('旧代码检测：整份运行时文件都比 App 旧时，明确说「跑
     stampRuntimeFiles(fx.repo, Date.now() - 30 * 24 * 3600 * 1000);
     const { out } = run(fx);
     assert.match(out, /DSH 进程比仓库代码新/, out);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('旧代码检测：只有面板那一半（client/）比 App 新时，说的是「刷新页面就生效」而不是「重启」', (t) => {
+  if (!hasDshProcess()) return t.skip('这台机器上没有跑着的 DSH 进程（CI 上就是这样）');
+  const fx = makeFixture();
+  try {
+    stampRuntimeFiles(fx.repo, Date.now() - 30 * 24 * 3600 * 1000);
+    // 只动 client/client.js：它由浏览器加载，刷新页面（⌘R）就换新，重启 App 是白等
+    const future = Date.now() + 60_000;
+    utimesSync(join(fx.repo, 'client', 'client.js'), new Date(future), new Date(future));
+    const { code, out } = run(fx);
+    assert.match(out, /只有面板那一半/, out);
+    assert.doesNotMatch(out, /重启 App 之前接缝那截新代码不会跑/, '面板代码不该被说成「要重启」');
+    assert.equal(code, 0, '面板那一半不该让自检判红');
   } finally {
     fx.cleanup();
   }

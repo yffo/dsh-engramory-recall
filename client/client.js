@@ -174,6 +174,9 @@ window.__ModuleLoader__.load({
       }, { hit: 0, empty: 0, skip: 0, deny: 0, chars: 0 });
       // 落盘的使用账（宿主侧 summarizeUsage 的汇总 + 三句判据）。老宿主没这个字段就整块不显示。
       const usage = state.usage && typeof state.usage === 'object' ? state.usage : null;
+    // 使用账的字段可能来自旧版宿主（少字段）或半截日志 —— 这一节用到什么就先补齐什么，
+    // 别让一个属性访问或 toFixed 把整个「记忆」页签打成白屏（回归测试盯着这条）。
+    const rounds = (usage && usage.perRound) || {};
 
       const shown = filter
         ? notes.filter((note) => `${note.file} ${note.title} ${note.description}`.toLowerCase().includes(filter.toLowerCase()))
@@ -295,15 +298,15 @@ window.__ModuleLoader__.load({
               '，攒够 20 条指针再回来看判据。')
           : h('div', null,
               h('div', { style: { ...S.row, gap: '20px', alignItems: 'flex-start' } },
-                h(Stat, { label: '注入指针', value: `${usage.pointers} 条`, hint: `${usage.injectRounds} 轮` }),
+                h(Stat, { label: '注入指针', value: `${usage.pointers || 0} 条`, hint: `${usage.injectRounds || 0} 轮` }),
                 h(Stat, {
                   label: '打开率',
-                  value: `${(usage.openRate * 100).toFixed(1)}%`,
-                  hint: `${usage.used} 条被 read/edit`,
+                  value: `${((usage.openRate || 0) * 100).toFixed(1)}%`,
+                  hint: `${usage.used || 0} 条被 read/edit`,
                 }),
                 h(Stat, {
                   label: '注入过的笔记',
-                  value: `${usage.uniqueNotes} 篇`,
+                  value: `${usage.uniqueNotes || 0} 篇`,
                   hint: usage.neverOpened && usage.neverOpened.length ? `${usage.neverOpened.length} 篇从未被打开` : '都至少打开过一次',
                 }),
                 h(Stat, {
@@ -339,9 +342,11 @@ window.__ModuleLoader__.load({
 
               h('div', { style: S.title }, '预算与分数'),
               h('div', { style: { fontSize: '12px' } },
-                `每轮注入 ${usage.perRound.median} 条（最少 ${usage.perRound.min} / p90 ${usage.perRound.p90} / 最多 ${usage.perRound.max}）`,
-                usage.perRound.windowLimit ? ` · 顶满窗口 ${usage.perRound.fullRounds}/${usage.injectRounds} 轮` : '',
-                ` · 有内容被截断 ${usage.truncatedRounds} 轮（缩成裸文件名 ${usage.collapsed} 条、整条没列出 ${usage.dropped} 条，涉及 ${usage.droppedRounds} 轮）`),
+                rounds.median === undefined
+                  ? '还没有逐轮记录（这一节要重启一次 App 让新宿主开始写）。'
+                  : `每轮注入 ${rounds.median} 条（最少 ${rounds.min} / p90 ${rounds.p90} / 最多 ${rounds.max}）`,
+                rounds.windowLimit ? ` · 顶满窗口 ${rounds.fullRounds || 0}/${usage.injectRounds || 0} 轮` : '',
+                rounds.median === undefined ? '' : ` · 有内容被截断 ${usage.truncatedRounds || 0} 轮（缩成裸文件名 ${usage.collapsed || 0} 条、整条没列出 ${usage.dropped || 0} 条，涉及 ${usage.droppedRounds || 0} 轮）`),
               h('div', { style: { ...S.muted, fontSize: '11.5px', marginTop: '2px' } },
                 usage.scoreStats && usage.scoreStats.n
                   ? `注入分：中位 ${usage.scoreStats.median} · p10 ${usage.scoreStats.p10} · p90 ${usage.scoreStats.p90} · 首尾落差中位 ${usage.scoreStats.spreadMedian}（共 ${usage.scoreStats.n} 轮）`

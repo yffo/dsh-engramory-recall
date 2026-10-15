@@ -21,7 +21,7 @@
  */
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 
@@ -239,39 +239,59 @@ if (!seamProvider) {
 // 旧代码检测：仓库里的**运行时文件**比 DSH 进程还新 = App 里跑的是旧模块。
 // 文件集从 package.json 的 files 白名单现算（.js/.mjs，去掉 scripts/ —— 那是独立 CLI，
 // 改了它不用重启 App）。硬写三个文件名会漏：`usage.js` 就是这么漏过一次的。
+//
+// 一半一半：**Node 侧**（index/semantic/…）改完要重启 App（Node 缓存 ESM），
+// 而 `client/` 那一半是浏览器加载的 —— 刷新页面（⌘R）就换新，重启 App 是白等。
+// 混成一句话会把人引去做无用功（甚至以为改了面板必须先重启）。
 try {
-  const runtimeFiles = (() => {
+  const { nodeFiles, clientFiles } = (() => {
     try {
       const pkg = JSON.parse(readFileSync(join(PKG_DIR, 'package.json'), 'utf8'));
       const listed = Array.isArray(pkg.files) ? pkg.files : [];
       const picked = listed
         .filter((f) => typeof f === 'string' && /\.(?:js|mjs)$/.test(f) && !f.startsWith('scripts/'))
         .map((f) => join(PKG_DIR, f));
-      if (picked.length) return picked;
+      if (picked.length) {
+        return {
+          nodeFiles: picked.filter((f) => !f.includes(`${sep}client${sep}`)),
+          clientFiles: picked.filter((f) => f.includes(`${sep}client${sep}`)),
+        };
+      }
     } catch { /* 读不到 package.json 就退回保守的三件套 */ }
-    return [
-      join(PKG_DIR, 'index.js'),
-      join(PKG_DIR, 'semantic.js'),
-      join(PKG_DIR, 'providers', 'openai-embeddings.mjs'),
-    ];
+    return {
+      nodeFiles: [
+        join(PKG_DIR, 'index.js'),
+        join(PKG_DIR, 'semantic.js'),
+        join(PKG_DIR, 'providers', 'openai-embeddings.mjs'),
+      ],
+      clientFiles: [join(PKG_DIR, 'client', 'client.js')],
+    };
   })();
-  let newest = 0;
-  for (const file of runtimeFiles) {
-    try {
-      newest = Math.max(newest, statSync(file).mtimeMs);
-    } catch { /* 白名单里可能有不存在的条目，那是第 4 节负责报的事 */ }
-  }
+  const newestOf = (files) => {
+    let newest = 0;
+    for (const file of files) {
+      try {
+        newest = Math.max(newest, statSync(file).mtimeMs);
+      } catch { /* 白名单里可能有不存在的条目，那是第 4 节负责报的事 */ }
+    }
+    return newest;
+  };
+  const newest = newestOf(nodeFiles);
+  const newestClient = newestOf(clientFiles);
   const ps = spawnSync('ps', ['-axo', 'lstart=,command='], { encoding: 'utf8' });
   const appLine = String(ps.stdout ?? '')
     .split('\n')
     .find((l) => /DeepSeek Harness\.app\/Contents\/MacOS\/DeepSeek Harness(\s|$)/.test(l) || /dsh\s+web/.test(l));
   const startedAt = appLine ? Date.parse(appLine.trim().slice(0, 24)) : NaN;
+  const clock = (ms) => new Date(ms).toLocaleTimeString();
   if (Number.isFinite(startedAt) && newest > startedAt + 1000) {
-    const msg = `DSH 进程比仓库代码旧（进程 ${new Date(startedAt).toLocaleTimeString()}，代码 ${new Date(newest).toLocaleTimeString()}）—— Node 会缓存 ESM：App 里跑的还是旧模块`;
+    const msg = `DSH 进程比仓库代码旧（进程 ${clock(startedAt)}，Node 侧代码 ${clock(newest)}）—— Node 会缓存 ESM：App 里跑的还是旧模块`;
     // 接缝开着 = 你正指望新代码在 App 里生效，这时它是**要处理的问题**；
     // 接缝没开（干净安装 / 没配语义）时新代码晚一轮生效无所谓，只提醒不判红。
     if (seamProvider) warn(`${msg}，你没重启 App 之前接缝那截新代码不会跑（配置会热重载，代码不会）`);
     else notes.push(`${msg}；语义接缝没开，这次不影响召回，重启 App 后新代码才生效`);
+  } else if (Number.isFinite(startedAt) && newestClient > startedAt + 1000) {
+    ok(`只有面板那一半（client/，${clock(newestClient)}）比进程新 —— 刷新页面（⌘R）就生效，不用重启 App`);
   } else if (Number.isFinite(startedAt)) {
     ok('DSH 进程比仓库代码新 —— App 里跑的就是当前这份代码');
   }
