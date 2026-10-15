@@ -3,6 +3,32 @@
 本项目的所有重要变更都记在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.12.0] — 2026-10-15
+
+### 新增
+
+- **语义提供方现在看的是宽池**（`semanticPool`，默认 50、上限 200）：池子等于输出窗口时，提供方只能
+  在词面已经挑中的那几条里排序，语义再准也捞不动排在第 12 名的正确笔记。合成 704 条上池内召回从
+  70.3%（池 5）涨到 97.3%（池 50），真库探针从池 5 起就是 36/36（`npm run bench:seam`）。
+- **默认融合模式改成 `trust`**（提供方的顺序即结果，词面只用来补满窗口），`semanticFusion: rrf` 保留为
+  「不确定提供方靠不靠谱」时的安全档。依据：完美的全量排名提供方在等权 RRF 下 hit@1 只有 52.7%
+  （纯词面 50.4%，几乎没赚），`trust` 下 86.6%；而倒排提供方反过来是 trust 1.0% / rrf 26.0%。
+- **新增参考提供方 `providers/openai-embeddings.mjs`**：OpenAI 兼容的 `/embeddings` 客户端，零依赖、
+  批请求 + 按文本缓存、错误带 HTTP 状态与服务端原话、**密钥不进日志**。配置走环境变量或
+  `~/.config/engramory/embed.json`（0600），`npm run embed:check` 一条命令自检。
+- **新增 `provider: 'host-embed'`**：复用 DSH 设置页里已经配好的那条路由（`baseURL` + 模型 + 密钥），
+  不用再填一遍环境变量。四步（路由 / baseURL / 模型 / 密钥）都从宿主读，每步失败都给可照做的提示；
+  凭据每次检索现解析（不跨操作缓存）；MCP 等没有宿主的场景明确报 `no-host`。
+- 新测试：`test/embed-provider.test.mjs`（7 例，含假 embeddings 服务）、`test/host-embed.test.mjs`
+  （5 例，含宿主三个服务的最小替身）、`test/semantic.test.mjs` 增加池宽与融合模式 3 例。
+
+### 说明
+
+- 参考提供方与 `host-embed` 的**召回收益还没有在真 key 上量过**（要花 token，等用户点头）。已量的是
+  接缝本身的上限与代价，以及默认值为什么这么定 —— 这两组数字都在 `npm run bench:seam` 里可复算。
+- 默认池 50 的代价：每次检索多算一次词面（50 条），实测平均仍是毫秒级；提供方多收到 45 条候选，
+  embeddings 按文本缓存，重复检索不重复付费。
+
 ## [0.11.2] — 2026-10-15
 
 ### 变更

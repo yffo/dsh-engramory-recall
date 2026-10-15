@@ -175,6 +175,23 @@ const DEFAULTS = {
   semanticProvider: '',
   /** 接缝的单次超时预算（毫秒）。超时/抛错/返回垃圾一律降级回词面结果。 */
   semanticTimeoutMs: 2000,
+  /**
+   * `rerank` 提供方看到的候选池宽度（默认 50，上限 200）。
+   *
+   * 池宽 = 输出窗口时，提供方只能重排词面已经挑中的那几条，天花板被词面钉死；放宽池子
+   * 才给语义信号留出「把排名靠后的正确笔记捞上来」的空间。实测（2026-10-15，合成 704 条）：
+   * 池内召回 P=5 时 70.3%、P=20 86.6%、P=50 97.3%。代价只是词面多算几条候选 + 提供方多算
+   * 几十条（embedding 按篇计费，50 条约几千 token，一次查询级别）。
+   */
+  semanticPool: 50,
+  /**
+   * 融合方式：`rrf`（默认）= 词面与提供方各一票，少赚不赔；`trust` = 提供方的顺序即最终顺序，
+   * 天花板最高（合成 @1 86.6% vs 词面 50.4%），但提供方不靠谱时结果会比纯词面更差。
+   * 两个数都是量出来的，见 semantic.js 文件头与 README「语义接缝」小节。
+   */
+  semanticFusion: 'trust',
+  // 只有 `semanticProvider: 'host-embed'` 用得上：指定复用哪条 DSH 路由（留空 = 当前默认模型的路由）。
+  semanticHostRoute: '',
 };
 
 /** 只在用户句子里出现明确的「长期记住」意图时才追加一行提示（默认开）。 */
@@ -357,14 +374,20 @@ export function apply(ctx, config = {}) {
       }
       const limit = Math.min(Math.max(Number(args?.limit) || 5, 1), 20);
       // 接缝关着（默认）就走原来那条同步路径：不 await、不 import、零额外开销。
-      // 开着也只是「融合」：语义提供方插进来的顺序与词面顺序做 RRF，词面命中的文档一条不丢。
+      // 开着时提供方看到的是宽于 limit 的候选池（semanticPool），融合方式见 semanticFusion。
       const seam = describeSeam({ provider: settings.semanticProvider });
       const result = seam.enabled
         ? await semanticSearch({
             index: indexOf(storePath),
             query,
             limit,
-            config: { provider: settings.semanticProvider, timeoutMs: settings.semanticTimeoutMs },
+            config: {
+              provider: settings.semanticProvider,
+              timeoutMs: settings.semanticTimeoutMs,
+              pool: settings.semanticPool,
+              fusion: settings.semanticFusion,
+              hostRoute: settings.semanticHostRoute,
+            },
             runtime: llmRuntime(),
           })
         : { hits: search(indexOf(storePath), query, limit), used: false, code: 'off', message: '语义接缝未启用（默认）' };

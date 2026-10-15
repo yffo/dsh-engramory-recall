@@ -578,8 +578,11 @@ idempotent / mojibake / xpath / selenium / watchdog / dsn / backoff` 这一类**
 接缝（seam）而不是内置向量库：用户自己指一个提供方，指了才生效，指错了也不会把检索弄坏。
 
 ```yaml
-        semanticProvider: ''      # 留空 = 纯词面（默认）。可填本地模块路径，或字面量 host-llm
+        semanticProvider: ''      # 留空 = 纯词面（默认）。可填本地模块路径，或字面量 host-llm / host-embed
         semanticTimeoutMs: 2000   # 单次预算；超时/抛错/返回垃圾一律降级回词面结果
+        semanticPool: 50          # 提供方看多宽的候选池（默认 50，上限 200）
+        semanticFusion: trust     # trust = 提供方说了算（默认）；rrf = 词面有一票否决权
+        semanticHostRoute: ''     # 只有 host-embed 用：复用哪条 DSH 路由（留空 = 当前默认模型的路由）
 ```
 
 提供方就是一个本地 ESM 模块，导出两个函数里的任意一个：
@@ -604,9 +607,10 @@ export async function expand({ query, signal }) {
 
 | 行为 | 为什么 |
 |---|---|
-| `rerank` 走 **RRF 融合**，`expand` **只补空位** | 同一个 limit 下 rerank 输出就是同一批文档的重排（不会凭空多出、也不会丢；`test/semantic-corpus.test.mjs` 在真语料上钉这条）。`expand` 若也拿去融合，实测 hit@1 掉 7~19pt（原因见下面「让宿主模型当改写提供方」）：词面那 1 票没有任何理由比模型那 3 票更该被信任。所以它只把词面没排上的文档**接在后面**，`added` 报补了几条。两种提供方返回候选之外的文件名一律丢弃并报数 |
+| `rerank` 默认 **trust 融合**（提供方的顺序即结果，词面只用来补满窗口），`expand` **只补空位** | 真提供方返回的是一份**全量排名**，等权 RRF 会让它自己第 2 名以后的名次反过来稀释第 1 名 —— 合成 704 条上这是 86.6% 对 52.7%（下表）。`semanticFusion: rrf` 保留给「不确定提供方靠不靠谱」的场景（那时它是安全档：26.0% 对 1.0%）。`expand` 若也拿去融合，实测 hit@1 掉 7~19pt（原因见下面「让宿主模型当改写提供方」）：词面那 1 票没有任何理由比模型那 3 票更该被信任。所以它只把词面没排上的文档**接在后面**，`added` 报补了几条。`expand` 若也拿去融合，实测 hit@1 掉 7~19pt（原因见下面「让宿主模型当改写提供方」）：词面那 1 票没有任何理由比模型那 3 票更该被信任。所以它只把词面没排上的文档**接在后面**，`added` 报补了几条。两种提供方返回候选之外的文件名一律丢弃并报数 |
 | 超时**硬兜一层** `Promise.race` | 提供方可以完全忽略 `AbortSignal`（第三方代码什么都干得出来），只靠 abort 会让检索永远等下去 |
 | 失败**不抛错**，降级回词面并如实报 `code` | `off` / `not-found` / `unsupported` / `provider-error` / `timeout` / `provider-empty`，检索工具返回值里的 `semantic` 字段直接给出这次到底用没用上 |
+| **提供方看的是宽池**（`semanticPool`，默认 50） | 池子等于输出窗口时，提供方只能在词面已经挑中的那几条里排序 —— 语义再准也捞不动排在第 12 名的正确笔记。池宽从 5 抬到 50，池内召回从 70.3% 涨到 97.3%（`npm run bench:seam`） |
 | **只管按需检索工具**，不碰每轮自动注入 | 自动召回每个用户轮都跑；挂一个要 200ms 的外部件等于给每一轮加税。热路径永远纯词面 |
 
 
@@ -641,7 +645,83 @@ RRF 只能在池内重排，所以 hit@4 一动都不动（67.5%），坏的提�
 `test/semantic-wiring.test.mjs`（关着时连 import 都不发生、开着时真的融合、自动注入不碰接缝）
 就是钉这四条的。
 
-#### 实测：让宿主模型当改写提供方（`npm run bench:rewrite`）
+#### 实测：候选池与融合模式（同一个 `npm run bench:seam`）
+
+合成语料 704 条、输出窗口 top-4。池宽决定「提供方最多能捞多远」——池内召回就是它的天花板：
+
+| 候选池 `semanticPool` | 5 | 20 | **50（默认）** | 100 |
+|---|---|---|---|---|
+| 池内召回（合成 704 条） | 70.3% | 86.6% | **97.3%** | 97.9% |
+| 池内召回（真库探针 36 条） | 36/36 | 36/36 | **36/36** | 36/36 |
+
+融合模式决定「提供方的话算不算数」（同一张卷子，只换提供方与融合）：
+
+| 提供方 | `trust`（默认） | `rrf` |
+|---|---|---|
+| 完美：全量排名（真 embedding 的形态） | **86.6% / 86.6%** | 52.7% / 73.6% |
+| 完美：只投 gold 一票 | 86.6% / 86.6% | 86.6% / 86.6% |
+| 词面倒排（最坏的可信提供方） | 1.0% / 3.8% | 26.0% / 59.7% |
+| 与语义无关的稳定顺序 | 3.1% / 16.8% | 18.8% / 43.9% |
+| 纯词面（不看提供方） | 50.4% / 67.5% | 50.4% / 67.5% |
+
+（每格 = hit@1 / hit@4。）三点结论：
+
+1. **默认 `trust`**：真提供方一定会排完整个池，等权 RRF 下它自己的低名次条目会把第 1 名挤下去 —— 完美提供方因此只拿到 52.7%（比纯词面 50.4% 几乎没有赚），`trust` 是 86.6%。
+2. **`rrf` 是安全档**：提供方不靠谱时，`trust` 会一路砸到底（倒排 1.0%），`rrf` 至少保住词面的一部分（26.0%）。拿不准就用它。
+3. **「只投一票」两种融合同分**：稀释来自提供方**自己的低名次**，不是来自「它参与了融合」。所以问题不在「要不要融合」，而在「按谁的顺序」。
+
+#### 内置参考提供方：OpenAI 兼容的 embeddings（`providers/openai-embeddings.mjs`）
+
+填两个环境变量就能试；密钥只从环境变量或一个 0600 的小文件进，**不进仓库、不进日志**：
+
+```bash
+node providers/openai-embeddings.mjs --check     # 先自检：报维度与耗时（不打印密钥）
+```
+
+```yaml
+        semanticProvider: 'dsh-engramory-recall/providers/openai-embeddings'
+        semanticTimeoutMs: 15000   # 远端接口要给足预算（默认 2000ms 是给本机小模型的）
+        semanticPool: 50
+        semanticFusion: trust
+```
+
+```bash
+export ENGRAMORY_EMBED_API_KEY=sk-…                                  # 或写 ~/.config/engramory/embed.json
+export ENGRAMORY_EMBED_BASE_URL=https://api.openai.com/v1            # 换一家就换这两行
+export ENGRAMORY_EMBED_MODEL=text-embedding-3-small
+```
+
+**embeddings 只有 OpenAI 这一种接口形状**（`POST {base}/embeddings`）：Anthropic 没有 embedding 接口，
+所谓「Claude 协议」在这里用不上。国产替代填 `BASE_URL` + `MODEL` 即可，例如阿里百炼
+`https://dashscope.aliyuncs.com/compatible-mode/v1` + `text-embedding-v4`、智谱
+`https://open.bigmodel.cn/api/paas/v4` + `embedding-3`、硅基流动 `https://api.siliconflow.cn/v1` + `BAAI/bge-m3`。
+
+**一句实话**：这条路径的代码、测试、失败降级都有，但**还没有在真 key 上量过召回**（要花token，得你先点头）。
+接缝本身的上限是量过的（上表 86.6%），提供方的质量只能真调一次才知道。
+
+#### 复用 DSH 里已经配好的那条路由（`provider: "host-embed"`）
+
+不想再填一遍环境变量：DSH 设置页 → 模型里配好的路由（`baseURL` + 模型 + API 密钥）可以**直接借来用**：
+
+```yaml
+        semanticProvider: 'host-embed'
+        semanticHostRoute: ''      # 留空 = 用当前默认模型的那条路由；也可指名（如 openai / zhipu）
+        semanticTimeoutMs: 15000
+```
+
+它按四步读宿主，每步失败都给**可照做**的提示（而不是一句「配置错误」），失败一律降级回词面：
+
+| 步骤 | 从哪读 | 读不到时 |
+|---|---|---|
+| 路由 | `semanticHostRoute` → 插件的 `llmProvider` → `agentDefaultModel.currentSelection()` | 提示写 `semanticHostRoute` |
+| `baseURL` | 该路由配置里的 `baseURL`；目录自带路由（openai / mistral / together / 智谱）有内置兜底 | 提示去「自定义模型 API」加一条路由，或写 `semanticHostBaseUrl` |
+| 模型 | 路由 `models[]` 里名字含 embed 的那个；单模型路由直接用它；内置兜底 | 提示写 `semanticHostModel` |
+| 密钥 | 路由的 `apiKeyEnv`（没有就按 `<ROUTE>_API_KEY` 派生）→ `ctx.credentials.resolve()` | 提示去设置页填密钥，并说清 ref 名字 |
+
+三条纪律：密钥**只在这四步里过一遍**，不进返回值、不进日志、不进错误信息；凭据**每次检索现解析**
+（宿主规范：不许跨操作缓存）；MCP 那种没有宿主的场景会明确报 `no-host` 并提示改用本地模块提供方。
+
+
 
 `host-llm` 能跑通不等于划算，所以这条尺子用**真宿主模型**量了一遍（2026-10-15，逐条调用本机
 harness，提示词直接 `import` 产品的 `hostLlmPrompt()` —— 尺子问的就是产品要问的那句话；
@@ -707,9 +787,12 @@ harness，提示词直接 `import` 产品的 `hostLlmPrompt()` —— 尺子问�
         indexMaxLines: 200       # 索引 MEMORY.md 的行数上限
         indexMaxBytes: 25600     # 索引的字节上限
         registerSkill: true      # 注册 engramory 技能（写入纪律的正文）
-        # 语义检索接缝（默认关闭）：本地模块路径，或 host-llm（走宿主模型做查询改写）
+        # 语义检索接缝（默认关闭）：本地模块路径，或 host-llm / host-embed
         semanticProvider: ''
         semanticTimeoutMs: 2000
+        semanticPool: 50          # 提供方看多宽的候选池
+        semanticFusion: trust     # trust = 提供方说了算；rrf = 词面有一票否决权
+        semanticHostRoute: ''     # 只有 host-embed 用
 ```
 
 `autoArchive` 打开后归档会在两处自动跑：每轮 pre-step 兜底（10 分钟 TTL，不会每轮扫库），
@@ -841,13 +924,14 @@ stdout 上只准有 JSON-RPC 帧，混进任何一行非 JSON，这次运行就�
 ## 测试与自检
 
 ```bash
-npm test        # 分词 / BM25 / 切桶 / 门控 / 闸门 / 索引闸门 / 技能注册 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由 / 公开基准 harness / MCP 服务器
+npm test        # 分词 / BM25 / 切桶 / 门控 / 闸门 / 索引闸门 / 技能注册 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由 / 公开基准 harness / MCP 服务器 / 语义接缝（含 host-embed）
 npm run check   # 接线自检：配置键认不认、库路径对不对、装的是哪一份、包清单漏没漏文件
 npm run probe   # 召回质量探针：3 组 query + 三道对照，跑在真实记忆库上
 npm run probe -- --save   # 把这次结果存成基线，之后每次跑自动比对
 npm run bench:check       # 合成基准 + 和 bench/expectations.json 对账（CI 跑的就是它）
 npm run bench:bridges     # 同义表覆盖率尺子：死值、覆盖、使用面、逐键消融（--ablate / --json / --store）
-npm run bench:seam        # 语义接缝的代价与天花板（四种坏提供方 + 作弊上界）
+npm run bench:seam        # 语义接缝的代价与天花板（四种坏提供方 + 作弊上界 + 融合模式对照）
+npm run embed:check       # 参考提供方自检：探一次 embeddings 接口，报维度与耗时（不打印密钥）
 npm run bench:rewrite     # 宿主模型当改写提供方：真调用量代价与收益（要本机有 dsh；--offline 只重算）
 npm run bench:mcp         # MCP 这一层：冷启动、每步往返、协议帧字节数
 npm run mcp:smoke         # 拿脚本当 MCP 客户端，把服务器拉起来走一遍真实对话
@@ -904,7 +988,7 @@ CI 跑 `npm test` 和 `npm run bench:check` 两件事。后者是防「数字悄
 | DSH-SEP | 每步 ~1250 字符 guidance + ≤4200 字符快照 | 同上 | 抽取走 `api.deepseek.com` |
 | **本插件** | **0** | **≤480 字符，且只有指针** | **无** |
 
-## 十条被实测证伪的路
+## 十一条被实测证伪的路
 
 | 尝试 | 结果 |
 |---|---|
@@ -917,6 +1001,7 @@ CI 跑 `npm test` 和 `npm run bench:check` 两件事。后者是防「数字悄
 | 时间乘性加权（学 hindsight） | 五档扫描净收益为零，`w ≥ 0.1` 起反而伤对照组 |
 | 给一个已有同义桥继续加词（`主题` 从 `['theme']` 扩到含 `light-dark / color-mix / data-theme / token`） | 看着全是相关的技术词，实测对照 B 掉 3 分（136→133）。机制：把词加进查询扩展后，同一篇笔记自己的其它 chunk 会把「标题里真的写着这个词」的那个 chunk 挤下去，长笔记里这叫自己跟自己抢。判据不是「这词相不相关」，而是「加了它，谁会往上浮」。这 4 个词已全部退回 |
 | 拿宿主模型的改写去和词面结果融合（RRF / 归一化求和 / 取最大） | 用真宿主模型（逐条调用本机 harness，提示词取自产品代码）在合成子集 70 条 + 真库探针 36 条上量：改写里**确实有信号**（任意一条单独检索命中 gold@1 达 50.0% / 80.6%，词面是 70.0% / 72.2%），但融合发展一律变差 —— RRF 真库 72.2% → 52.8%、取最大 → 27.8%。机制：投票数变成 4 倍，而词面那 1 票并不比模型那 3 票更该被信任，宿主又没有打分器判断改写好坏。修法是让 `expand` **只补空位**（0.11.1），并且承认「模型能写出更好的查询」≠「检索变好」（`npm run bench:rewrite`） |
+| 拿等权 RRF 当语义提供方的默认融合 | 合成 704 条、池 20、窗口 4：**完美的全量排名提供方**（真 embedding 的形态）在等权 RRF 下 hit@1 只有 52.7%，比纯词面（50.4%）几乎没赚；同一个提供方在 `trust` 下是 86.6%。机制：提供方返回的是全量排名，它自己第 2 名以后的名次也会拿到票，于是把第 1 名挤下去 —— 稀释来自它**自己的低名次**，不是来自融合本身（「只投一票」的完美提供方两种融合同为 86.6%）。默认已改成 `trust`，`rrf` 保留为「不确定提供方靠不靠谱」时的安全档（倒排提供方：trust 1.0% vs rrf 26.0%） |
 | 拿偏袒的对照当护栏：用对照 A/B 证明「抬高标题权重是安全的」 | 它们都拿标题当查询，对标题权重结构性偏袒，抬高它必然让两组变好。这不是证据，是同义反复。`TITLE_EXTRA` 第一次定成 3 就是被这个漏洞困住的（「口径在 3 之后不再动，所以后面的增量全来自对照」，而对照根本测不出这件事）。补了中立的对照 C 之后，数据说 3 太保守：C 从 0 到 96 一路不降，在 24 到达平台。已按 C 的拐点改成 24 |
 
 ## 许可

@@ -248,3 +248,85 @@ test('语义接缝：module 形式不静态 import 宿主包，也不静态 impo
   assert.match(source, /await import\('\.\/llm\.js'\)/, 'host-llm 走动态 import');
   assert.deepEqual(staticImports.filter((spec) => spec.startsWith('.')), ['./bm25.js'], '本地静态依赖只有 bm25.js');
 });
+
+// —— 池宽与融合：提供方只能在「候选池」里说话，池子多大决定它能捞多远 ——
+// 这两条数字（池内召回 70.3% → 86.6% → 97.3%，锚定 `npm run bench:seam --pool`）决定了默认池 = 50。
+const POOL_ORDER = ['a.md', 'b.md', 'c.md', 'd.md'];
+
+/** 记账用的假检索器：固定顺序 a→d，按 limit 截断，记录下来每次被要了多宽的池。 */
+function scriptedSearch(calls) {
+  return (index, query, limit) => {
+    calls.push(limit);
+    return POOL_ORDER.slice(0, limit).map((id, i) => ({
+      id,
+      snippet: `第 ${i + 1} 篇`,
+      matched: [],
+      score: 10 - i,
+    }));
+  };
+}
+
+test('语义接缝：宽池让提供方捞得动（trust = 直接采纳它的顺序）', async () => {
+  const c = providerCase(
+    'pool-trust',
+    `export const name = 'fake-reranker';\nexport function rerank() { return ['d.md', 'c.md'];\n}\n`,
+  );
+  const calls = [];
+  try {
+    const result = await semanticSearch({
+      index,
+      query: '随便',
+      limit: 2,
+      searchFn: scriptedSearch(calls),
+      config: { provider: c.file, pool: 4, fusion: 'trust', timeoutMs: 5000 },
+    });
+    assert.deepEqual(calls, [2, 4], '先按窗口要一次（2），再按池子要一次（4）—— 宽的那次才是喂给提供方的');
+    assert.deepEqual(ids(result), ['d.md', 'c.md'], 'trust：提供方说了算，词面排最后的 d 被捞进窗口');
+    assert.equal(result.fusion, 'trust');
+    assert.equal(result.pool, 4);
+    assert.equal(result.code, 'reranked');
+  } finally {
+    c.cleanup();
+  }
+});
+
+test('语义接缝：默认 trust（提供方说了算），rrf 是「词面有一票否决权」的保守档', async () => {
+  // 提供方给全量排名：d（词面最后）第一。这正是真 embedding 提供方的形态 —— 它会排完整个池子。
+  const c = providerCase(
+    'pool-fusion',
+    `export const name = 'fake-reranker';\nexport function rerank() { return ['d.md', 'a.md', 'b.md', 'c.md'];\n}\n`,
+  );
+  const calls = [];
+  try {
+    const omitted = await semanticSearch({ index, query: '随便', limit: 2, searchFn: scriptedSearch(calls), config: { provider: c.file, pool: 4 } });
+    const rrf = await semanticSearch({ index, query: '随便', limit: 2, searchFn: scriptedSearch(calls), config: { provider: c.file, pool: 4, fusion: 'rrf' } });
+    const bogus = await semanticSearch({ index, query: '随便', limit: 2, searchFn: scriptedSearch(calls), config: { provider: c.file, pool: 4, fusion: '随便写的' } });
+    assert.equal(omitted.fusion, 'trust', '不写 fusion 就是 trust');
+    assert.equal(bogus.fusion, 'trust', '写错的值回默认，不报错也不变怪');
+    assert.deepEqual(ids(omitted), ['d.md', 'a.md'], 'trust：提供方的第一名就是最终第一名，剩下的坑按词面补');
+    assert.deepEqual(ids(rrf), ['a.md', 'd.md'], 'rrf：词面第 1 + 提供方第 2 名，等权之下压过了提供方的第 1 名（这就是它为什么会稀释真提供方）');
+    assert.deepEqual(ids(bogus), ids(omitted));
+  } finally {
+    c.cleanup();
+  }
+});
+
+test('语义接缝：池子宽度有默认值与上限（配置写坏了也只会落回默认）', async () => {
+  const c = providerCase('pool-bounds', `export function rerank({ docs }) { return docs.map((d) => d.id); }\n`);
+  try {
+    const cases = [
+      [{ pool: 100000 }, 200, '超过上限按 200 封顶'],
+      [{ pool: 0 }, 50, '0 不是「不要池子」，是不合法 → 默认 50'],
+      [{ pool: -3 }, 50, '负数同理'],
+      [{ pool: 'abc' }, 50, '非数字同理'],
+      [{ pool: 2 }, 5, '比窗口还小的池子不许把窗口缩掉：返回来还是窗口那一次调用'],
+    ];
+    for (const [config, expected, why] of cases) {
+      const calls = [];
+      await semanticSearch({ index, query: '随便', limit: 5, searchFn: scriptedSearch(calls), config: { provider: c.file, ...config, timeoutMs: 5000 } });
+      assert.equal(calls.at(-1), expected, `${why}（配置 ${JSON.stringify(config)}）`);
+    }
+  } finally {
+    c.cleanup();
+  }
+});

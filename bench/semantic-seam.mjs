@@ -161,9 +161,80 @@ console.log(
     `说明 RRF 没有把提供方锁死：**提供方准到什么程度，结果就到什么程度**，收益完全来自信号质量（真 embedding / 交叉编码器），不来自接缝本身。`,
 );
 
+// —— 融合模式 × 提供方好坏：`semanticFusion` 的默认值就是这张表定的 ——
+//
+// 真 embedding 提供方返回的是**全量排名**（池里每条都给分）。等权 RRF 下，它自己第 2 名以后的名次
+// 会反过来稀释第 1 名 —— 一条 700 人的卷子上这是 30 多个百分点的差别，所以默认选了 trust。
+const perfectFull = providerFile(
+  'perfect-full',
+  `const gold = ${JSON.stringify(oracleMap)};
+   export function rerank({ query, docs }) {
+     const ids = docs.map((d) => d.id);
+     const want = gold[String(query).trim()];
+     return want ? [want, ...ids.filter((id) => id !== want)] : ids;
+   }`,
+);
+const reverse = providerFile('reverse', `export function rerank({ docs }) { return [...docs].reverse().map((d) => d.id); }`);
+const alphabet = providerFile(
+  'alphabet',
+  `export function rerank({ docs }) { return docs.map((d) => d.id).sort((a, b) => String(a).localeCompare(String(b))); }`,
+);
+
+async function windowed(config) {
+  let hit1 = 0;
+  let hitK = 0;
+  for (const query of queries) {
+    const result = await semanticSearch({ index, query: query.q, limit: K, config, baseDir: dir });
+    const rank = result.hits.findIndex((hit) => hit.id === query.gold);
+    if (rank === 0) hit1++;
+    if (rank >= 0 && rank < K) hitK++;
+  }
+  return { hit1, hitK };
+}
+
+const providers = [
+  ['完美：全量排名（真 embedding 的形态）', perfectFull],
+  ['完美：只投 gold 一票', oracle],
+  ['词面倒排（最坏的可信提供方）', reverse],
+  ['与语义无关的稳定顺序', alphabet],
+];
+const fusionRows = [];
+for (const [label, file] of providers) {
+  for (const fusion of ['trust', 'rrf']) {
+    const measured = await windowed({ provider: file, pool: POOL, fusion, timeoutMs: 5000 });
+    fusionRows.push({ label, fusion, ...measured });
+  }
+}
+const plainLexical = await windowed({});
+
+console.log(`\n## 融合模式 × 提供方好坏（\`semanticFusion\` 的默认值就是这张表定的）\n`);
+console.log(`窗口 top-${K}、候选池 ${POOL}、合成语料 ${total} 条。\n`);
+console.log(`| 提供方 | 融合 | hit@1 | hit@${K} |`);
+console.log(`| --- | --- | --- | --- |`);
+for (const row of fusionRows) console.log(`| ${row.label} | ${row.fusion} | ${pct(row.hit1)} | ${pct(row.hitK)} |`);
+console.log(`| 纯词面（不看提供方） | — | ${pct(plainLexical.hit1)} | ${pct(plainLexical.hitK)} |`);
+const find = (label, fusion) => fusionRows.find((row) => row.label === label && row.fusion === fusion);
+console.log(`\n- 全量排名的完美提供方：trust ${pct(find(providers[0][0], 'trust').hit1)} / rrf ${pct(find(providers[0][0], 'rrf').hit1)} —— 等权 RRF 把它的第一名稀释掉了。`);
+console.log(`- 坏提供方：trust ${pct(find(providers[2][0], 'trust').hit1)} vs rrf ${pct(find(providers[2][0], 'rrf').hit1)} —— 不确定提供方靠不靠谱时，rrf 是安全档。`);
+console.log(`- 只投一票的完美提供方两种融合同分：稀释来自「它自己的低名次」，不是来自「它参与了融合」。`);
+
 if (wantJson) {
   const out = fileURLToPath(new URL('./.semantic-seam.json', import.meta.url));
-  writeFileSync(out, `${JSON.stringify({ when: 'bench/semantic-seam.mjs', total, K, timeoutMs: TIMEOUT_MS, rows: rows.map(({ label, hit1, hitK, used, avgMs, codes }) => ({ label, hit1, hitK, used, avgMs, codes })) }, null, 2)}\n`);
+  writeFileSync(
+    out,
+    `${JSON.stringify(
+      {
+        when: 'bench/semantic-seam.mjs',
+        total,
+        K,
+        timeoutMs: TIMEOUT_MS,
+        rows: rows.map(({ label, hit1, hitK, used, avgMs, codes }) => ({ label, hit1, hitK, used, avgMs, codes })),
+        fusion: { pool: POOL, plainLexical, rows: fusionRows },
+      },
+      null,
+      2,
+    )}\n`,
+  );
   console.log(`\n（JSON 写到 bench/.semantic-seam.json）`);
 }
 

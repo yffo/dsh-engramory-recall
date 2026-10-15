@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { BENCH_NOW, buildCorpus } from '../bench/corpus.mjs';
-import { buildIndex } from '../bm25.js';
+import { buildIndex, search } from '../bm25.js';
 import { semanticSearch } from '../semantic.js';
 
 const { docs, queries } = buildCorpus();
@@ -32,6 +32,11 @@ function provider(body) {
 async function idsFor(query, config) {
   const result = await semanticSearch({ index, query, limit: LIMIT, config });
   return { ids: result.hits.map((h) => h.id), ...result };
+}
+
+/** 词面候选池（宽池）：用来验证「提供方只能在池子里挑」这条边界。 */
+function lexicalPool(query, width) {
+  return search(index, query, width).map((hit) => hit.id);
 }
 
 const cases = [
@@ -67,7 +72,7 @@ test('接缝降级：坏提供方在真语料上与词面结果逐字相同', as
   }
 });
 
-test('接缝正常路径：真打分的提供方只能重排，不能凭空增删', async () => {
+test('接缝正常路径：池 = 窗口时，真打分的提供方只能重排，不能凭空增删', async () => {
   // 用「字符三元组相似度」当离线提供方：确定性、不发请求、不用 gold。
   const { path, dir } = provider(`const grams = (s) => { const t = String(s).toLowerCase().replace(/\\s+/g, ' '); const out = new Set();
      for (let i = 0; i + 3 <= t.length; i++) out.add(t.slice(i, i + 3)); return out; };
@@ -81,14 +86,38 @@ test('接缝正常路径：真打分的提供方只能重排，不能凭空增�
   try {
     let reordered = 0;
     for (const query of sample) {
-      const base = await idsFor(query.q, {});
-      const { ids, code, used } = await idsFor(query.q, { provider: path, timeoutMs: 2000 });
+      // 池 = 窗口：提供方只能在词面挑中的这几条里排序，输出必然还是同一批文档
+      const base = await idsFor(query.q, { pool: LIMIT });
+      const { ids, code, used } = await idsFor(query.q, { provider: path, pool: LIMIT, timeoutMs: 2000 });
       assert.equal(code, 'reranked');
       assert.equal(used, true);
-      assert.deepEqual([...ids].sort(), [...base.ids].sort(), '同一个 limit 下输出就是同一批文档的重排');
+      assert.deepEqual([...ids].sort(), [...base.ids].sort(), '池 = 窗口时，输出就是同一批文档的重排');
       if (ids.join() !== base.ids.join()) reordered++;
     }
     assert.ok(reordered > 0, '真打分的提供方应该至少改掉一部分顺序，否则接缝是装饰');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('接缝正常路径：宽池下可以换人进窗口，但绝不许出现池子里没有的文档', async () => {
+  const { path, dir } = provider(`export function rerank({ docs }) {
+     // 故意把词面最后一名顶到第一：模拟「语义说这条才对」的提供方
+     return [...docs].reverse().map((d) => ({ id: d.id, score: 1 }));
+   }`);
+  try {
+    const poolWidth = 50;
+    let changed = 0;
+    for (const query of sample) {
+      const lexical = lexicalPool(query.q, LIMIT);
+      const pool = new Set(lexicalPool(query.q, poolWidth));
+      const { ids, code } = await idsFor(query.q, { provider: path, pool: poolWidth, timeoutMs: 2000 });
+      assert.equal(code, 'reranked');
+      assert.equal(ids.length, LIMIT, '输出了几条就是几条（不许多、不许少）');
+      for (const id of ids) assert.ok(pool.has(id), `${id} 不在 ${poolWidth} 宽的词面池里 —— 提供方不许凭空造文档`);
+      if (ids.join() !== lexical.join()) changed++;
+    }
+    assert.ok(changed > 0, '宽池的意义就是「词面第 5 名以后也能进窗口」，这条必须真的发生');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

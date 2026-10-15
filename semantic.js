@@ -8,6 +8,7 @@
  * 1. **默认关闭**：`provider` 为空时，这里连 `import()` 都不会执行；
  * 2. **不 import 任何宿主包**：提供方只能是「本地模块路径」（用户在配置里写），
  *    或者内置的 `host-llm` —— 后者也走 `llm.js` 的动态 import，静态依赖图里没有它；
+ *    （也可以写成裸模块名，如 `dsh-engramory-recall/providers/openai-embeddings`——包里自带）
  * 3. **挂掉的提供方不许影响检索**：超时、抛错、返回垃圾形状、编造不存在的文件名，
  *    一律降级回词面结果，并把原因如实放进返回值（`code` / `message`）。
  *
@@ -26,8 +27,23 @@
  * ```
  *
  * 两种接口的边界**不一样**，这是量出来的、不是拍出来的：
- * · `rerank` 声称自己有打分器 ⇒ 结果与词面走 RRF 融合，**允许改顺序**（同 limit 下不增不减）；
- * · `expand` 只是「换个说法再查一遍」⇒ **只补空位，永不改动词面顺序**。
+ * · `rerank` 声称自己有打分器 ⇒ 它看到的是一个**宽于输出窗口的候选池**（`pool`，默认 50），
+ *   融合方式由 `fusion` 决定：`rrf`（默认，词面与提供方各一票，谁也别想翻天）或
+ *   `trust`（提供方说了算，词面只负责出候选与补空位）；
+ * · `expand` 只是「换个说法再查一遍」⇒ **只补空位，永不改动词面顺序**（它仍然只按 `limit` 检索）。
+ *
+ * 「池子宽于窗口」这条是 0.12.0 加的，动机：池宽 = 输出窗口时，提供方只能重排词面已经挑中的
+ * 那几条，天花板被词面钉死。实测（`bench/.tmp/pool-oracle.mjs`，2026-10-15，合成 704 条 +
+ * 真库探针 36 条，`limit=4`，提供方 = 完美排序 / 乱序排序两个极端）：
+ * · 池内召回随池宽上升：合成 P=5 495/704 → P=20 610/704 → P=50 685/704 → P=100 689/704；
+ *   真库 36 条在 P≥5 就全在池内。池宽就是「完美提供方」的天花板。
+ * · `rrf` + 宽池（P≥20）能把完美提供方兑现一半：合成 @1 52.7%（P=5/20 一样，因为 RRF 里
+ *   词面第 1 名还压着提供方第 1 名）→ @4 73.6%；真库 @1 72.2% → 80.6%。
+ * · `trust` 才拿到全部：合成 @1 86.6%（= 池内召回 610/704）、真库 @1 100%（36/36）。
+ * · 代价同样量过：提供方若把顺序**倒过来**，`rrf` 合成 @1 50.4% → 26.0%，`trust` 更惨；
+ *   把提供方票数加到 2/3 票能让完美提供方涨到 63.2%/67.5%，但乱序提供方会直接把 @1 打到
+ *   1.0%（合成）/ 0.0%（真库）—— 所以**票数永远留 1**，谁想更激进就用 `trust` 明说。
+ * 一句话：`rrf` = 少赚不赔，`trust` = 把天花板交给提供方。
  *   实测（2026-10-15，真库探针 36 条 + 合成 70 条，改写由宿主模型逐条产生）：
  *   RRF 融合让 3 条改写以 1:1 的票数盖过原查询的 1 票，真库 hit@1 26/36 → 19/36、
  *   hit@4 36/36 → 30/36；把原查询加权到 3 票 / 5 票、或改成归一化打分，全都仍不如基线；
@@ -48,6 +64,41 @@ export const DEFAULT_TIMEOUT_MS = 2000;
 export const MAX_EXPANSIONS = 8;
 export const MAX_EXPANSION_CHARS = 120;
 export const HOST_LLM = 'host-llm';
+/** 复用 DSH 设置页里已配好的模型路由（baseURL + 模型 + 密钥），不用再填一遍环境变量。 */
+export const HOST_EMBED = 'host-embed';
+
+/**
+ * 目录自带路由的地址与 embedding 模型（pi-ai catalog 里，宿主设置读不到，只能在这里兜底）。
+ * 只收「确定提供 OpenAI 形状 /embeddings 接口」的几家；其余一律要求用户显式写 baseURL。
+ */
+const HOST_EMBED_BASE_URLS = {
+  openai: 'https://api.openai.com/v1',
+  mistral: 'https://api.mistral.ai/v1',
+  together: 'https://api.together.xyz/v1',
+  zai: 'https://open.bigmodel.cn/api/paas/v4',
+};
+const HOST_EMBED_MODELS = {
+  openai: 'text-embedding-3-small',
+  mistral: 'mistral-embed',
+  together: 'BAAI/bge-large-en-v1.5',
+  zai: 'embedding-3',
+};
+/** `rerank` 提供方看到的候选池宽度（`pool` 配置，默认 50；上限 200）。 */
+export const DEFAULT_POOL = 50;
+export const MAX_POOL = 200;
+/**
+ * 融合模式：
+ * · `trust`（默认）= 提供方给了顺序就按它的顺序走，词面只用来补满窗口；
+ * · `rrf` = 词面与提供方各一票（等权），词面因此有一票否决权。
+ *
+ * 默认选 `trust` 是量出来的（合成 704 条、池 20、窗口 5；`npm run bench:seam` 可复算）：
+ * 真提供方返回的是一份**全量排名**，等权 RRF 会让它自己第 2 名以后的名次去稀释第 1 名 ——
+ * 完美提供方在 rrf 下只有 52.7%/76.3%（比纯词面 50.4%/70.3% 几乎没赚），trust 下是 86.6%/86.6%；
+ * 反过来，坏提供方在 trust 下会一路砸到底（倒排：1.0%/4.7%），这时 rrf 是安全档（26.0%/63.9%）。
+ * 结论：可信的提供方配 trust；不确定它靠不靠谱时配 rrf。
+ */
+export const FUSION_MODES = ['rrf', 'trust'];
+export const DEFAULT_FUSION = 'trust';
 
 /** 配置里能写的提供方：空 = 关闭；`host-llm` = 走宿主模型（llm.js）；其余当本地模块路径。 */
 export function describeSeam(config = {}) {
@@ -56,7 +107,23 @@ export function describeSeam(config = {}) {
   if (spec === HOST_LLM) {
     return { enabled: true, kind: 'host-llm', spec, message: '语义接缝指向宿主模型（llm.js，动态 import）' };
   }
+  if (spec === HOST_EMBED) {
+    return { enabled: true, kind: 'host-embed', spec, message: '语义接缝复用 DSH 里已配好的模型路由（设置页的 baseURL + 模型 + 密钥）' };
+  }
   return { enabled: true, kind: 'module', spec, message: `语义接缝指向本地模块：${spec}` };
+}
+
+/** 候选池宽度：至少等于输出窗口，默认 DEFAULT_POOL，上限 MAX_POOL。 */
+export function poolLimit(config = {}, limit = 5) {
+  const want = Number(config.pool);
+  const pool = Number.isFinite(want) && want > 0 ? want : DEFAULT_POOL;
+  return Math.min(MAX_POOL, Math.max(Number(limit) || 1, Math.floor(pool)));
+}
+
+/** 融合模式：只认 FUSION_MODES 里的值，其余一律回默认（配置写错不该让检索变怪）。 */
+export function fusionMode(config = {}) {
+  const want = String(config.fusion ?? '').trim().toLowerCase();
+  return FUSION_MODES.includes(want) ? want : DEFAULT_FUSION;
 }
 
 function expandHome(value) {
@@ -64,10 +131,90 @@ function expandHome(value) {
   return value.startsWith('~/') ? join(homedir(), value.slice(2)) : value;
 }
 
+/**
+ * `provider` 可以写成三种形式，这里判断它是不是「裸模块名」（交给 Node 解析）：
+ * · `dsh-engramory-recall/providers/openai-embeddings` —— 裸名（包自引用 / 依赖解析）；
+ * · `./my-provider.mjs`、`~/x/y.mjs`、`/abs/path.mjs` —— 路径。
+ */
+export function isBareSpecifier(spec) {
+  const text = String(spec ?? '').trim();
+  if (!text) return false;
+  if (text.startsWith('.') || text.startsWith('/') || text.startsWith('~')) return false;
+  return !/^[A-Za-z]:[\\/]/.test(text);
+}
+
 export function resolveProviderPath(spec, baseDir = process.cwd()) {
   const text = expandHome(String(spec ?? '').trim());
   if (!text) return '';
   return isAbsolute(text) ? text : resolve(baseDir, text);
+}
+
+/**
+ * 从宿主设置里读出「用哪条路由做 embedding」：路由 → baseURL → 模型 → 密钥。
+ * 每一步都给出**可照做的失败信息**（而不是一句「配置错误」），并且**绝不把密钥写进任何返回值以外的路径**。
+ */
+async function readHostEmbedProfile(runtime, config = {}) {
+  const ctx = runtime?.ctx;
+  const settings = ctx && typeof ctx.get === 'function' ? ctx.get('settings') : undefined;
+  if (!settings || typeof settings.describe !== 'function') {
+    return { ok: false, code: 'no-host', message: 'host-embed 需要宿主设置服务（ctx.settings）；MCP 等没有宿主的场景请改用本地模块提供方' };
+  }
+  let route = String(config.hostRoute ?? runtime?.config?.provider ?? '').trim();
+  if (!route) {
+    try {
+      route = String(ctx.get('agentDefaultModel')?.currentSelection?.()?.provider ?? '').trim();
+    } catch {
+      route = '';
+    }
+  }
+  if (!route) return { ok: false, code: 'no-route', message: '拿不到宿主默认模型的路由：请在插件配置里写 semanticHostRoute' };
+
+  let row;
+  try {
+    const rows = settings.describe({ redactSecrets: true });
+    row = (Array.isArray(rows) ? rows : []).find((item) => item?.ns === 'llm-pi-ai');
+  } catch (error) {
+    return { ok: false, code: 'load-error', message: `读宿主设置失败：${error?.message ?? error}` };
+  }
+  const profile = row?.value?.providers?.[route] ?? row?.user?.providers?.[route] ?? {};
+  const baseUrl = String(config.hostBaseUrl ?? profile.baseURL ?? HOST_EMBED_BASE_URLS[route] ?? '').trim();
+  if (!baseUrl) {
+    return {
+      ok: false,
+      code: 'no-base-url',
+      message: `路由 ${route} 没写 baseURL，插件也猜不到它（目录自带路由的地址在 pi-ai catalog 里）。请在 DSH 设置 → 模型 →「自定义模型 API」里加一条 OpenAI 兼容的 embedding 路由，或在本插件配置里写 semanticHostBaseUrl`,
+    };
+  }
+  const declared = Array.isArray(profile.models) ? profile.models : [];
+  const model =
+    String(config.hostModel ?? '').trim() ||
+    String(declared.find((item) => /embed/i.test(String(item?.id ?? '')))?.id ?? '').trim() ||
+    (declared.length === 1 ? String(declared[0]?.id ?? '').trim() : '') ||
+    HOST_EMBED_MODELS[route] ||
+    '';
+  if (!model) {
+    return { ok: false, code: 'no-model', message: `路由 ${route} 里找不出 embedding 模型：请在插件配置里写 semanticHostModel（例如 text-embedding-3-small）` };
+  }
+  // 宿主侧凭据的 ref 就是环境变量名本身（custom 路由保存时按 <ROUTE>_API_KEY 派生，catalog 路由由 pi-ai 声明）。
+  const keyRef = String(profile.apiKeyEnv ?? '').trim() || `${route.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`;
+  const credentials = typeof ctx.get === 'function' ? ctx.get('credentials') : undefined;
+  let apiKey = '';
+  if (credentials && typeof credentials.resolve === 'function') {
+    try {
+      // 宿主规范：凭据**每次调用现解析、不许跨操作缓存**（值可能被用户随时改）。
+      apiKey = String((await credentials.resolve(keyRef))?.value ?? '');
+    } catch {
+      apiKey = '';
+    }
+  }
+  if (!apiKey) {
+    return {
+      ok: false,
+      code: 'no-key',
+      message: `宿主凭据里没有 ${keyRef}：在 DSH 设置 → 模型 →「${route}」里填 API 密钥（落到 ~/.dsh/.credentials.yaml 的 refs.${keyRef}），或给本插件配 ENGRAMORY_EMBED_API_KEY`,
+    };
+  }
+  return { ok: true, route, baseUrl, model, apiKey, keyRef };
 }
 
 /** 加载提供方。任何失败都返回 `{ ok: false }` —— 调用方负责降级，这里绝不抛。 */
@@ -87,6 +234,28 @@ export async function loadProvider(config = {}, deps = {}) {
         expand: ({ query, signal }) => hostLlmExpand(module, route, query, config, signal),
       };
       return { ok: true, provider, kind: 'expand', code: 'host-llm', message: seam.message, seam };
+    }
+
+    if (seam.kind === 'host-embed') {
+      const profile = await readHostEmbedProfile(deps.runtime, config);
+      if (!profile.ok) return { ok: false, code: profile.code, message: profile.message, seam };
+      const module = await import('./providers/openai-embeddings.mjs');
+      const provider = module.createProvider({
+        baseUrl: profile.baseUrl,
+        model: profile.model,
+        apiKey: profile.apiKey,
+        providerName: `${HOST_EMBED}:${profile.route}/${profile.model}`,
+      });
+      return { ok: true, provider, kind: 'rerank', code: 'host-embed', message: seam.message, seam, hostRoute: profile.route };
+    }
+
+    if (isBareSpecifier(seam.spec)) {
+      const module = await import(seam.spec);
+      const provider = normalizeModule(module, seam.spec);
+      if (!provider) {
+        return { ok: false, code: 'unsupported', message: `提供方模块必须导出 rerank 或 expand 函数：${seam.spec}`, seam, path: seam.spec };
+      }
+      return { ok: true, provider, kind: provider.kind, code: 'module', message: seam.message, seam, path: seam.spec };
     }
 
     const full = resolveProviderPath(seam.spec, deps.baseDir);
@@ -109,6 +278,14 @@ export async function loadProvider(config = {}, deps = {}) {
     }
     return { ok: true, provider, kind: provider.kind, code: 'module', message: seam.message, seam, path: full };
   } catch (error) {
+    if (error?.code === 'ERR_MODULE_NOT_FOUND' || error?.code === 'MODULE_NOT_FOUND') {
+      return {
+        ok: false,
+        code: 'not-found',
+        message: `找不到提供方模块：${seam.spec}（裸名要装在同一个 node_modules 里，否则写绝对路径）`,
+        seam,
+      };
+    }
     return { ok: false, code: 'load-error', message: `加载提供方失败：${error?.message ?? error}`, seam };
   }
 }
@@ -274,7 +451,10 @@ export async function semanticSearch(options = {}) {
 
   try {
     if (provider.kind === 'rerank') {
-      const docs = lexical.map((hit, index) => ({
+      // 提供方看的是宽池：池子 = 输出窗口时它只能重排词面已挑中的那几条（天花板被词面钉死）。
+      const poolSize = poolLimit(config, limit);
+      const pool = poolSize > limit ? runSearch(options.index, query, poolSize) : lexical;
+      const docs = pool.map((hit, index) => ({
         id: hit.id,
         snippet: hit.snippet,
         matched: hit.matched,
@@ -286,17 +466,28 @@ export async function semanticSearch(options = {}) {
       if (!ranking.ids.length) {
         return fail(lexical, started, 'provider-empty', `提供方 ${provider.name} 没给出任何可用排序，已降级`, { provider: provider.name });
       }
-      const order = mergeRRF([lexical.map((hit) => hit.id), ranking.ids], limit);
-      const byId = new Map(lexical.map((hit) => [hit.id, hit]));
+      const byId = new Map(pool.map((hit) => [hit.id, hit]));
+      const fusion = fusionMode(config);
+      let order;
+      if (fusion === 'trust') {
+        // 提供方说了算：它给过分的按它的顺序走，剩下的坑用词面顺序补满。
+        order = [...ranking.ids, ...pool.map((hit) => hit.id).filter((id) => !ranking.ids.includes(id))].slice(0, limit);
+      } else {
+        order = mergeRRF([pool.map((hit) => hit.id), ranking.ids], limit);
+      }
       const hits = order.map((id) => byId.get(id)).filter(Boolean);
-      // 词面没排进前 limit、却被提供方拉进来的文档不在池子里 —— 如实报数，别假装融合了。
+      // 提供方编造的、池子里没有的文件名 —— 如实报数，别假装融合了。
       const missing = order.filter((id) => !byId.has(id)).length;
       return {
         hits,
         used: true,
         code: 'reranked',
-        message: `已按 ${provider.name} 的顺序融合（RRF）`,
+        message: fusion === 'trust'
+          ? `已按 ${provider.name} 的顺序取前 ${hits.length} 条（池 ${pool.length}，Trusted 融合）`
+          : `已按 ${provider.name} 的顺序融合（RRF，池 ${pool.length}）`,
         provider: provider.name,
+        fusion,
+        pool: pool.length,
         dropped: ranking.dropped,
         missing,
         ms: Date.now() - started,
