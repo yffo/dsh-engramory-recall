@@ -13,11 +13,12 @@
  * 那放宽窗口就是白加字数。
  *
  * 用法：node scripts/recall-stats.mjs [--store ~/memory/engramory] [--json] [--positions 5] [--limit 2000]
+ *   [--max-pointers 5]（给了才算「窗口用满了几轮」）
  */
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readUsage, summarizeUsage, usageVerdict, USAGE_FILE } from '../usage.js';
+import { budgetVerdict, readUsage, summarizeUsage, usageVerdict, USAGE_FILE } from '../usage.js';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -30,9 +31,11 @@ const STORE = expandHome(opt('--store', '~/memory/engramory'));
 const POSITIONS = Math.max(1, Number(opt('--positions', '5')) || 5);
 const LIMIT = Math.max(10, Number(opt('--limit', '2000')) || 2000);
 const wantJson = argv.includes('--json');
+// 窗口上限只用于「用满了几轮」这一句；不给就不算（--max-pointers 5）
+const MAX_POINTERS = Math.max(0, Number(opt('--max-pointers', '0')) || 0);
 
 const lines = readUsage(STORE, LIMIT);
-const summary = summarizeUsage(lines, { positions: POSITIONS, neverOpenedLimit: 12 });
+const summary = summarizeUsage(lines, { positions: POSITIONS, neverOpenedLimit: 12, maxPointers: MAX_POINTERS });
 const stamp = (ms) => (ms ? new Date(ms).toLocaleString('zh-CN', { hour12: false }) : '—');
 const pct = (part, whole) => (whole ? `${((part / whole) * 100).toFixed(1)}%` : '—');
 
@@ -74,8 +77,20 @@ for (const row of summary.positions) {
   console.log(`| 第 ${row.position} 条 | ${row.injected} | ${row.opened} | ${pct(row.opened, row.injected)} |`);
 }
 
+console.log('\n## 预算：窗口调宽了，字跟上了吗');
+console.log('| 指标 | 值 |');
+console.log('| --- | --- |');
+console.log(`| 每轮注入条数 | 最少 ${summary.perRound.min} · 中位 ${summary.perRound.median} · p90 ${summary.perRound.p90} · 最多 ${summary.perRound.max}${summary.perRound.windowLimit ? `（上限 ${summary.perRound.windowLimit}）` : ''} |`);
+if (summary.perRound.windowLimit) {
+  console.log(`| 顶到上限的轮数 | ${summary.perRound.fullRounds}/${summary.injectRounds} |`);
+}
+console.log(`| 被缩成裸文件名 | ${summary.collapsed} 条（${summary.collapsedRounds} 轮） |`);
+console.log(`| 因预算整条没列出 | ${summary.dropped} 条（${summary.droppedRounds} 轮） |`);
+console.log(`| 打开得多快（距注入） | 中位 ${summary.openLag.median ? `${(summary.openLag.median / 1000).toFixed(1)} 秒` : '—'} · p90 ${summary.openLag.p90 ? `${(summary.openLag.p90 / 1000).toFixed(1)} 秒` : '—'} |`);
+
 console.log('\n## 判据');
 console.log(`- ${usageVerdict(summary)}`);
+console.log(`- ${budgetVerdict(summary)}`);
 
 if (summary.neverOpened.length) {
   console.log('\n## 从没被打开过的注入（按注入次数排）');

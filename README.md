@@ -446,15 +446,21 @@ Electron 载体走 `file://` + IPC 时可能没有 webServer，那时召回照�
 
 | 行 | 什么时候写 | 关键字段 |
 | --- | --- | --- |
-| `hit` / `sediment` | 每轮注入（命中 / 只给沉淀提醒） | `ids`（**按显示顺序**）、`injected`、`dropped` |
+| `hit` / `sediment` | 每轮注入（命中 / 只给沉淀提醒） | `ids`（**按显示顺序**）、`injected`、`collapsed`、`dropped` |
 | `skip` / `empty` / `deny` | 被去重挡掉 / 零命中 / 写入被拦 | `reason` |
 | `used` | 注入过的笔记后来被 `read` / `edit` 打开 | `id`、`via`、`lagMs`（距注入多久） |
 | `opened` | 没注入过、也被主动打开的库内笔记（对照组） | `id`、`via` |
 
 ```bash
-npm run recall:stats              # 打开率、位置级曲线、从未被打开的注入、一句判据
-npm run recall:stats -- --json    # 机器可读（--store / --positions / --limit 可调）
+npm run recall:stats                          # 打开率、位置级曲线、预算压力、从未被打开的注入、两句判据
+npm run recall:stats -- --max-pointers 5      # 多算一句「窗口用满了几轮」
+npm run recall:stats -- --json                # 机器可读（--store / --positions / --limit 可调）
 ```
+
+**预算那一节容易被忽略，但它才是「窗口调宽了、字跟上了吗」的答案**：注入行里带着
+`collapsed`（预算不够被缩成裸文件名）与 `dropped`（整个没列出）——窗口条数够、内容却被砍，
+这两列会直接露出来。第二句判据据此给动作：截断超过两成 ⇒ **先抬 `maxChars`**；
+窗口顶满且没截断 ⇒ 再放宽只需动 `maxPointers`；两者都没有 ⇒ 窗口没顶到上限，是命中不够。
 
 **窗口该多宽，两半合起来看**：上半是 hit@k 曲线（离线卷子给的「上界」），下半是打开率
 （线上实测的「到底用得着吗」）。

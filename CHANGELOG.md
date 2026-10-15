@@ -1,3 +1,22 @@
+## 0.13.2
+
+**打开率尺子补上「预算压力」这一维：窗口调宽了，字跟上了吗。**
+
+- 0.13.1 的尺子只看打开率与位置级曲线，看不出「指针条数够、内容却被 `maxChars` 砍掉」——
+  那正是 4→5 那次改动最容易踩的坑（第 5 条会塌缩成裸文件名或被丢）。现在 `recall:stats` 多一节：
+  每轮注入条数分布、**被缩成裸文件名 / 因预算整条没列出**的条数与轮数、打开延迟中位/p90，
+  以及第二句判据（截断 > 两成 ⇒ 先抬 `maxChars`；窗口顶满且无截断 ⇒ 放宽只需动 `maxPointers`）。
+- `summarizeUsage()` 新增 `collapsed` / `collapsedRounds` / `dropped` / `droppedRounds` / `truncatedRounds` /
+  `perRound`（min·median·p90·max，可选 `maxPointers` 时多给 `fullRounds`）/ `openLag`（中位·p90），
+  新增导出 `budgetVerdict()`；`npm run recall:stats -- --max-pointers 5` 才算「用满了几轮」。
+- 这些数字**不用重启 App**：`collapsed`/`dropped` 从 0.13.1 起就在日志里了，只是没被汇总过。
+- 顺带修掉接线自检的一个**漏检**：旧代码检测此前只比 `index.js` / `semantic.js` /
+  `providers/openai-embeddings.mjs` 三个文件的 mtime —— `usage.js` 改了它却报「接线全部正常」。
+  现在文件集从 `package.json` 的 `files` 白名单现算（`.js`/`.mjs`，去掉 `scripts/`：那是独立 CLI，
+  改了不用重启 App），以后新增运行时文件自动被覆盖。
+- 测试 +4（`test/usage.test.mjs` 2 例：汇总口径与三档判据；`test/wiring-check.test.mjs` 2 例：
+  「整份代码都比 App 旧」与「只动 `usage.js` 也要报」）。
+
 ## 0.13.1
 
 **给召回补上「用没用上」这一层：`used` / `opened` 记账 + 打开率尺子。**

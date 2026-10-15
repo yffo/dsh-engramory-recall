@@ -104,15 +104,21 @@ export function pickInjected(id, injectedAt) {
 export function summarizeUsage(lines, options = {}) {
   const maxPositions = Math.max(1, Number(options.positions) || 8);
   const neverLimit = Math.max(1, Number(options.neverOpenedLimit) || 12);
+  // 窗口上限（maxPointers）只用来算「窗口用满了几轮」；不知道就不算，别瞎猜。
+  const windowLimit = Math.max(0, Number(options.maxPointers) || 0);
   const sorted = [...(lines ?? [])].sort((a, b) => Number(a?.ts ?? 0) - Number(b?.ts ?? 0));
 
   const stats = {
     injectRounds: 0, pointers: 0, zeroRounds: 0, dedupeRounds: 0, sedimentRounds: 0, denyRounds: 0,
     used: 0, coldOpens: 0, firstAt: 0, lastAt: 0,
+    // 预算压力：collapsed = 被缩成裸文件名的那几条，dropped = 因预算整条没列出的条数
+    collapsed: 0, collapsedRounds: 0, dropped: 0, droppedRounds: 0, truncatedRounds: 0,
   };
   const injections = [];
   const usedEvents = [];
   const perNote = new Map();
+  const roundSizes = [];
+  const lags = [];
 
   for (const line of sorted) {
     const ts = Number(line?.ts ?? 0);
@@ -130,10 +136,24 @@ export function summarizeUsage(lines, options = {}) {
     if (ids.length) {
       stats.injectRounds += 1;
       stats.pointers += ids.length;
+      roundSizes.push(ids.length);
+      const collapsed = Math.max(0, Number(line?.collapsed) || 0);
+      const dropped = Math.max(0, Number(line?.dropped) || 0);
+      if (collapsed > 0) {
+        stats.collapsed += collapsed;
+        stats.collapsedRounds += 1;
+      }
+      if (dropped > 0) {
+        stats.dropped += dropped;
+        stats.droppedRounds += 1;
+      }
+      if (collapsed > 0 || dropped > 0) stats.truncatedRounds += 1;
       injections.push({ at: ts, ids });
     }
     if (kind === 'used' && line?.id) {
       stats.used += 1;
+      const lag = Number(line?.lagMs);
+      if (Number.isFinite(lag) && lag >= 0) lags.push(lag);
       usedEvents.push({ at: ts, id: String(line.id), via: String(line.via ?? '') });
     }
     else if (kind === 'opened' && line?.id) stats.coldOpens += 1;
@@ -162,6 +182,9 @@ export function summarizeUsage(lines, options = {}) {
   }
 
   const notes = [...perNote.values()].sort((a, b) => b.injected - a.injected || b.lastAt - a.lastAt);
+  const sizes = [...roundSizes].sort((a, b) => a - b);
+  const lagSorted = [...lags].sort((a, b) => a - b);
+  const q = (arr, p) => (arr.length ? arr[Math.min(arr.length - 1, Math.floor(p * (arr.length - 1)))] : 0);
   return {
     ...stats,
     openRate: stats.pointers ? stats.used / stats.pointers : 0,
@@ -169,6 +192,17 @@ export function summarizeUsage(lines, options = {}) {
     notes,
     neverOpened: notes.filter((n) => !n.opened).slice(0, neverLimit),
     uniqueNotes: notes.length,
+    // 窗口实际用满了吗：perRound 是每轮注入的条数分布，fullRounds 要有 maxPointers 才算
+    perRound: {
+      min: sizes[0] ?? 0,
+      median: q(sizes, 0.5),
+      p90: q(sizes, 0.9),
+      max: sizes.length ? sizes[sizes.length - 1] : 0,
+      windowLimit,
+      fullRounds: windowLimit ? roundSizes.filter((n) => n >= windowLimit).length : 0,
+    },
+    // 打开得多快：lagMs = 注入到被打开之间的毫秒数（中位/p90）
+    openLag: { n: lagSorted.length, median: q(lagSorted, 0.5), p90: q(lagSorted, 0.9) },
   };
 }
 
@@ -188,4 +222,25 @@ export function usageVerdict(summary) {
     return `打开率 ${(summary.openRate * 100).toFixed(1)}% 偏高：窗口可以按 hit@k 曲线放宽到 5~8 条`;
   }
   return `打开率 ${(summary.openRate * 100).toFixed(1)}% 在中间档：窗口保持现状，先看位置级曲线`;
+}
+
+/**
+ * 第二句判据：预算（maxChars）够不够用。
+ * 注入行里带着 collapsed（被缩成裸文件名）与 dropped（整个没列出）—— 它们才是
+ * 「窗口调宽了但字没跟上」的直接证据：指针条数够、内容却被砍掉。
+ * @param {ReturnType<typeof summarizeUsage>} summary
+ */
+export function budgetVerdict(summary) {
+  if (!summary || !summary.injectRounds) return '还没有注入行可比';
+  const rounds = summary.injectRounds;
+  const truncatedShare = summary.truncatedRounds / rounds;
+  if (truncatedShare > 0.2) {
+    return `预算在砍内容：${(truncatedShare * 100).toFixed(0)}% 的注入轮有指针被截断`
+      + `（合计 ${summary.collapsed} 条缩成裸文件名、${summary.dropped} 条整个没列出）—— 先抬 maxChars，再谈放宽窗口`;
+  }
+  if (summary.perRound.windowLimit && summary.perRound.fullRounds / rounds > 0.5) {
+    return `窗口基本用满（${summary.perRound.fullRounds}/${rounds} 轮顶到 ${summary.perRound.windowLimit} 条）`
+      + '，且几乎没有被预算砍掉 —— 想再放宽只需动 maxPointers，maxChars 还够';
+  }
+  return `预算没有明显压力（${summary.truncatedRounds}/${rounds} 轮被截断）——窗口没顶到上限，是命中不够或 minScore 挡住了`;
 }

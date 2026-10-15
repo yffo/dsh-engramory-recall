@@ -236,13 +236,31 @@ if (!seamProvider) {
   }
 }
 
-// 旧代码检测：仓库里 index.js / semantic.js 比 DSH 进程还新 = App 里跑的是旧模块。
+// 旧代码检测：仓库里的**运行时文件**比 DSH 进程还新 = App 里跑的是旧模块。
+// 文件集从 package.json 的 files 白名单现算（.js/.mjs，去掉 scripts/ —— 那是独立 CLI，
+// 改了它不用重启 App）。硬写三个文件名会漏：`usage.js` 就是这么漏过一次的。
 try {
-  const newest = Math.max(
-    statSync(join(PKG_DIR, 'index.js')).mtimeMs,
-    statSync(join(PKG_DIR, 'semantic.js')).mtimeMs,
-    statSync(join(PKG_DIR, 'providers', 'openai-embeddings.mjs')).mtimeMs,
-  );
+  const runtimeFiles = (() => {
+    try {
+      const pkg = JSON.parse(readFileSync(join(PKG_DIR, 'package.json'), 'utf8'));
+      const listed = Array.isArray(pkg.files) ? pkg.files : [];
+      const picked = listed
+        .filter((f) => typeof f === 'string' && /\.(?:js|mjs)$/.test(f) && !f.startsWith('scripts/'))
+        .map((f) => join(PKG_DIR, f));
+      if (picked.length) return picked;
+    } catch { /* 读不到 package.json 就退回保守的三件套 */ }
+    return [
+      join(PKG_DIR, 'index.js'),
+      join(PKG_DIR, 'semantic.js'),
+      join(PKG_DIR, 'providers', 'openai-embeddings.mjs'),
+    ];
+  })();
+  let newest = 0;
+  for (const file of runtimeFiles) {
+    try {
+      newest = Math.max(newest, statSync(file).mtimeMs);
+    } catch { /* 白名单里可能有不存在的条目，那是第 4 节负责报的事 */ }
+  }
   const ps = spawnSync('ps', ['-axo', 'lstart=,command='], { encoding: 'utf8' });
   const appLine = String(ps.stdout ?? '')
     .split('\n')

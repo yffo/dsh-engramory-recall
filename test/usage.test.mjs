@@ -17,6 +17,7 @@ import {
   MAX_USAGE_BYTES,
   USAGE_FILE,
   appendUsage,
+  budgetVerdict,
   noteIdFromPath,
   pickInjected,
   readUsage,
@@ -123,6 +124,51 @@ test('召回汇总：打开率、位置级曲线、从未被打开', () => {
   ]);
   assert.equal(late.positions[0].opened, 0, '第二次注入 a.md 在第 2 位，不该算到第 1 位头上');
   assert.equal(late.positions[1].opened, 1);
+});
+
+test('召回汇总：预算压力与打开延迟（窗口调宽了、字跟没跟上）', () => {
+  const t = 1_700_000_000_000;
+  const summary = summarizeUsage([
+    { ts: t, kind: 'hit', ids: ['a.md', 'b.md', 'c.md', 'd.md', 'e.md'], injected: 5, collapsed: 1, dropped: 2 },
+    { ts: t + 1000, kind: 'used', id: 'a.md', via: 'read', lagMs: 1000 },
+    { ts: t + 60_000, kind: 'hit', ids: ['a.md', 'b.md', 'c.md', 'd.md', 'e.md'], injected: 5 },
+    { ts: t + 61_000, kind: 'used', id: 'c.md', via: 'read', lagMs: 1000 },
+    { ts: t + 120_000, kind: 'hit', ids: ['a.md', 'b.md'], injected: 2, collapsed: 0, dropped: 1 },
+  ], { maxPointers: 5 });
+  assert.equal(summary.injectRounds, 3);
+  assert.equal(summary.collapsed, 1, '只有第一轮缩了一条');
+  assert.equal(summary.collapsedRounds, 1);
+  assert.equal(summary.dropped, 3);
+  assert.equal(summary.droppedRounds, 2);
+  assert.equal(summary.truncatedRounds, 2, '有截断的轮数：第一轮与第三轮');
+  assert.deepEqual(
+    [summary.perRound.min, summary.perRound.median, summary.perRound.p90, summary.perRound.max],
+    [2, 5, 5, 5],
+  );
+  assert.equal(summary.perRound.windowLimit, 5);
+  assert.equal(summary.perRound.fullRounds, 2, '两轮顶到 5 条');
+  assert.equal(summary.openLag.n, 2);
+  assert.equal(summary.openLag.median, 1000);
+  // 不给 maxPointers 就不算「用满了几轮」（别瞎猜别人的窗口）
+  const bare = summarizeUsage([{ ts: t, kind: 'hit', ids: ['a.md'] }]);
+  assert.equal(bare.perRound.windowLimit, 0);
+  assert.equal(bare.perRound.fullRounds, 0);
+});
+
+test('预算判据：截断多了先抬 maxChars，窗口顶满了才谈放宽', () => {
+  assert.match(budgetVerdict({ injectRounds: 0 }), /还没有注入行/);
+  assert.match(
+    budgetVerdict({ injectRounds: 10, truncatedRounds: 4, collapsed: 5, dropped: 3, perRound: { windowLimit: 5, fullRounds: 2 } }),
+    /预算在砍内容.*先抬 maxChars/,
+  );
+  assert.match(
+    budgetVerdict({ injectRounds: 10, truncatedRounds: 0, collapsed: 0, dropped: 0, perRound: { windowLimit: 5, fullRounds: 9 } }),
+    /窗口基本用满.*只需动 maxPointers/,
+  );
+  assert.match(
+    budgetVerdict({ injectRounds: 10, truncatedRounds: 0, collapsed: 0, dropped: 0, perRound: { windowLimit: 5, fullRounds: 1 } }),
+    /没有明显压力/,
+  );
 });
 
 test('召回汇总：判据在样本太小时不下结论', () => {

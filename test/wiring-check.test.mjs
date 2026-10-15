@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +63,19 @@ function run(fx) {
   } catch (error) {
     return { code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` };
   }
+}
+
+/** 把「被检仓库」里的运行时文件统一改成某个时刻（旧代码检测那两条用例要用）。 */
+function stampRuntimeFiles(repo, ms) {
+  const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
+  const files = (pkg.files ?? [])
+    .filter((f) => typeof f === 'string' && /\.(?:js|mjs)$/.test(f) && !f.startsWith('scripts/'));
+  for (const f of files) {
+    try {
+      utimesSync(join(repo, f), new Date(ms), new Date(ms));
+    } catch { /* 清单里可能有别的平台的条目，跳过 */ }
+  }
+  return files;
 }
 
 test('干净的接线：退出码 0，并报出库里有几篇笔记', () => {
@@ -174,6 +187,34 @@ test('漏进 files 白名单的入口文件：必须变红（本地能跑、装�
     const { code, out } = run(fx);
     assert.equal(code, 1, out);
     assert.match(out, /不在 files 白名单/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('旧代码检测：整份运行时文件都比 App 旧时，明确说「跑的就是当前这份」', () => {
+  const fx = makeFixture();
+  try {
+    stampRuntimeFiles(fx.repo, Date.now() - 30 * 24 * 3600 * 1000);
+    const { out } = run(fx);
+    assert.match(out, /DSH 进程比仓库代码新/, out);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('旧代码检测：不只看 index.js/semantic.js —— 任何一个运行时文件比 App 新都要报', () => {
+  const fx = makeFixture({
+    patchEdit: (p) => p.replace('        enabled: true', "        enabled: true\n        semanticProvider: 'dsh-engramory-recall/providers/openai-embeddings'"),
+  });
+  try {
+    stampRuntimeFiles(fx.repo, Date.now() - 30 * 24 * 3600 * 1000);
+    // 只动 usage.js（它曾经漏在检测名单外：改了它 App 里跑的还是旧模块）
+    const future = Date.now() + 60_000;
+    utimesSync(join(fx.repo, 'usage.js'), new Date(future), new Date(future));
+    const { code, out } = run(fx);
+    assert.match(out, /DSH 进程比仓库代码旧/, out);
+    assert.equal(code, 1, '接缝开着时这是要处理的问题');
   } finally {
     fx.cleanup();
   }
