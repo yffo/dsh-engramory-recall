@@ -20,7 +20,7 @@ import { buildIndex, search } from '../bm25.js';
 import { homedir } from 'node:os';
 import { buildCorpus, BENCH_NOW } from './corpus.mjs';
 import { readDocs } from '../store.js';
-import { PAIRS, BRIDGE_PAIRS, ALIAS_PAIRS } from '../scripts/probe-queries.mjs';
+import { ALL_PAIRS } from '../scripts/probe-queries.mjs';
 import { semanticSearch } from '../semantic.js';
 import { readConfig, DEFAULT_CONFIG_PATH } from '../providers/openai-embeddings.mjs';
 
@@ -33,8 +33,9 @@ const opt = (name, dflt) => {
 const wantJson = argv.includes('--json');
 const STORE = opt('--store', '');
 const LIMIT = Number(opt('--limit', '0')) || 0;
+// 默认对齐**插件出厂默认**（池 50 + rrf）；量线上那档要显式传 --pool 10 --fusion rrf
 const POOL = Number(opt('--pool', '50'));
-const FUSION = opt('--fusion', 'trust');
+const FUSION = opt('--fusion', 'rrf');
 const fake = !argv.includes('--real');
 const TIMEOUT_MS = Number(opt('--timeout', '20000')) || 20000;
 const DIM = 16;
@@ -76,13 +77,21 @@ if (STORE) {
   const storePath = STORE.startsWith('~') ? join(homedir(), STORE.slice(1)) : STORE;
   const docs = readDocs(storePath);
   storeIndex = buildIndex(docs);
-  // 配对表是 [query, 期望命中的笔记 id（不含 .md）] 的数组（见 scripts/probe-queries.mjs）
-  const pairs = [...PAIRS, ...BRIDGE_PAIRS, ...ALIAS_PAIRS];
+  // 配对表是 [query, 期望命中的笔记 id（不含 .md）] 的数组（见 scripts/probe-queries.mjs）；
+  // lexRank 是这条 query 在**纯词面全量排名**里的名次 —— 1 = 保护集（重排只能弄坏它），
+  // 2..池宽 = 争夺集（重排真正能挣分的区间）。没有它就只能看一个混在一起的平均分。
+  const pairs = ALL_PAIRS;
   const noteCount = new Set(docs.map((doc) => doc.id.replace(/\.md$/, ''))).size;
-  sheet.push({
-    label: `真库探针（${noteCount} 篇 / ${docs.length} chunk）`,
-    queries: pairs.map(([query, want]) => ({ q: query, gold: `${String(want).replace(/\.md$/, '')}.md` })),
-  });
+  const seen = new Set();
+  const queries = [];
+  for (const [query, want] of pairs) {
+    const gold = `${String(want).replace(/\.md$/, '')}.md`;
+    if (seen.has(`${query}\u0000${gold}`)) continue;      // 同一对在两组里都出现过：只算一次
+    seen.add(`${query}\u0000${gold}`);
+    const lexRank = search(storeIndex, query, 500).findIndex((hit) => hit.id === gold) + 1;
+    queries.push({ q: query, gold, lexRank });
+  }
+  sheet.push({ label: `真库探针（${noteCount} 篇 / ${docs.length} chunk）`, queries });
   console.log(`真库卷子：${storePath} —— ${fake ? '片段只发给本机假服务' : '**片段会发给你配的那个端点**'}\n`);
 }
 
@@ -141,6 +150,7 @@ for (const s of sheet) {
   const codes = new Map();
   const times = [];
   const pools = [];
+  const perQuery = [];
   const queryIndex = s.label.startsWith('真库') ? storeIndex : index;
   for (const item of s.queries) {
     const lexical = search(queryIndex, item.q, 4);
@@ -157,6 +167,7 @@ for (const s of sheet) {
     const rank = result.hits.findIndex((hit) => hit.id === item.gold);
     if (rank === 0) seam1 += 1;
     if (rank >= 0) seam4 += 1;
+    if (item.lexRank) perQuery.push({ lexRank: item.lexRank, seamRank: rank + 1 });
     if (!result.used) failed += 1;
     codes.set(result.code, (codes.get(result.code) ?? 0) + 1);
     if (typeof result.pool === 'number') pools.push(result.pool);
@@ -179,9 +190,34 @@ for (const s of sheet) {
     failed,
     codes: Object.fromEntries(codes),
   };
+  if (perQuery.length) {
+    const protect = perQuery.filter((x) => x.lexRank === 1);
+    const contend = perQuery.filter((x) => x.lexRank >= 2 && x.lexRank <= POOL);
+    row.split = {
+      sheet: s.label,
+      protectTotal: protect.length,
+      protectKept: protect.filter((x) => x.seamRank === 1).length,
+      protectLost: protect.filter((x) => x.seamRank !== 1).length,
+      contendTotal: contend.length,
+      contendWon: contend.filter((x) => x.seamRank === 1).length,
+    };
+  }
   json.sheets.push(row);
   const codeText = [...codes].map(([code, n]) => `${code}×${n}`).join(' ');
   console.log(`| ${s.label} | ${total} | ${pct(base1, total)} | ${pct(base4, total)} | ${pct(seam1, total)} | ${pct(seam4, total)} | ${row.p50.toFixed(0)} ms | ${row.p90.toFixed(0)} ms | ${failed}（${codeText}） |`);
+}
+
+// ── 按词面名次拆开看：平均分会把「挣到的」和「弄坏的」互相抵消，只有拆开才知道是哪种 ──
+const splitRows = json.sheets.filter((row) => row.split).map((row) => row.split);
+if (splitRows.length) {
+  console.log(`\n## 拆开看：重排到底挣了还是赔了\n`);
+  console.log(`| 卷子 | 争夺集条数 | 争夺集 词面 hit@1 | 争夺集 接缝 hit@1 | 保护集条数 | 保护集守住 | 保护集被挤掉 |`);
+  console.log(`| --- | --- | --- | --- | --- | --- | --- |`);
+  for (const r of splitRows) {
+    console.log(`| ${r.sheet} | ${r.contendTotal} | 0.0%（定义如此） | ${pct(r.contendWon, r.contendTotal)} | ${r.protectTotal} | ${r.protectKept}（${pct(r.protectKept, r.protectTotal)}） | ${r.protectLost} |`);
+  }
+  console.log(`\n争夺集 = 词面排在第 2~10 名、重排有机会翻到第 1 的题；保护集 = 词面已经第 1、重排只能弄坏的题。`);
+  console.log(`接缝 hit@1 的总分 = 保护集守住 + 争夺集翻盘，两项必须分开看：一个升一个降时总分不动，但机制完全不同。`);
 }
 
 console.log(`\n## 池子实际有多大（决定要发多少东西）\n`);
