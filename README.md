@@ -427,13 +427,15 @@ node bench/longmemeval.mjs --data bench/.tmp/longmemeval_s_cleaned.json --engine
 客户端 bundle 是手写的（`client/client.js`，不需要任何构建工具，只 `require` 平台的
 react + primitives），注册到宿主的 `conversation.view` slot，与「对话 / 轨迹」并排。
 
-六个页签：召回日志（每轮判定：注入 / 无命中 / 跳过 / 拦截写入 / 沉淀提醒 / 归档，带展开明细）、
+七个页签：召回日志（每轮判定：注入 / 无命中 / 跳过 / 拦截写入 / 沉淀提醒 / 归档，带展开明细）、
+使用账（打开率、位置级曲线、预算压力、没注入的原因分布、注入分，与尺子同一套算法 + 三句判据）、
 笔记（可过滤的清单）、体检（doctor 的发现，按严重度排序）、索引原文、
 归档（待归档计划 + 一键执行）、写入审计（每条放行与拒绝都留痕）。
 
 数据来自插件注册的只读路由 `GET /api/engramory-recall/state`（面板每 3 秒轮询；
 体检与归档计划按 30 秒 TTL 缓存，不重算全库）。这条路由的 JSON 里还多一节 `usage`：
-**打开率、位置级曲线、从未被打开过的笔记** —— 与 `npm run recall:stats` 同一套算法（见下）。执行口是另一条必须 `POST` 的路由
+**打开率、位置级曲线、预算压力、原因分布、注入分 + 三句判据** —— 与 `npm run recall:stats`
+同一套算法（见下），所以面板与命令行不会出现两套口径。执行口是另一条必须 `POST` 的路由
 （`{ file, confirm: true }`，GET 一律 405）。用 `ctx.inject(['webServer'], …)` 注册：
 Electron 载体走 `file://` + IPC 时可能没有 webServer，那时召回照常工作，只是没有面板数据。
 

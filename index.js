@@ -25,7 +25,10 @@ import { checkMemoryWrite } from './guard.js';
 import { checkIndexWrite, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES } from './index-guard.js';
 import { registerSkill, skillStatus } from './skill.js';
 import { appendAudit, readAudit, GUARD_EPOCH } from './audit.js';
-import { appendUsage, readUsage, summarizeUsage, noteIdFromPath, pickInjected } from './usage.js';
+import {
+  appendUsage, readUsage, summarizeUsage, usageVerdict, budgetVerdict, reasonVerdict,
+  noteIdFromPath, pickInjected,
+} from './usage.js';
 import { readDocs } from './store.js';
 import { describeSeam, semanticSearch } from './semantic.js';
 import { auditStore } from './doctor.js';
@@ -743,8 +746,12 @@ export function apply(ctx, config = {}) {
       const rotating = rotationPenalty < 1 && recentInjected.length > 0;
       const pool = rotating ? Math.max(maxPointers * 3, maxPointers + 4) : maxPointers;
       const minScore = Number(settings.minScore || 0);
-      const docs = indexOf(storePath);
-      const found = search(docs, query, pool);
+      // ⚠️ `indexOf()` 回的是**索引对象**（`{ docs, avgLen }`），不是笔记数组 ——
+      // 0.13.3 的原因码一开始写成 `!docs.length`，而对象的 `.length` 恒为 undefined，
+      // 于是每一轮「零命中」都被记成 `index-empty`（库里没笔记），
+      // 把「一条都不匹配」和「全被 minScore 拦掉」两种真问题全糊掉了。数笔记要 `.docs.length`。
+      const index = indexOf(storePath);
+      const found = search(index, query, pool);
       const scored = found.filter((hit) => hit.score > minScore);
       // 注入去重的键取「轮换前」的命中集：同查询 + 同候选 = 上一轮那批指针还在上下文里。
       // ⚠️ 不能用降权后的结果算 key——轮换自己就会改掉它，去重等于永不生效
@@ -771,7 +778,7 @@ export function apply(ctx, config = {}) {
           kind: 'empty',
           query: brief(query),
           hits: [],
-          reason: !docs.length ? 'index-empty' : !found.length ? 'no-hits' : 'below-min-score',
+          reason: !index.docs.length ? 'index-empty' : !found.length ? 'no-hits' : 'below-min-score',
           minScore,
           topScore: found[0] ? Number(found[0].score.toFixed(3)) : undefined,
         });
@@ -1122,8 +1129,21 @@ export function apply(ctx, config = {}) {
           sendJson(res, 200, {
             ...storeSnapshot(),
             log: recallLog,
-            // 落盘日志的汇总（打开率/位置级曲线/从未被打开的笔记）——面板与尺子同一套算法。
-            usage: summarizeUsage(readUsage(settings.storePath)),
+            // 落盘日志的汇总（打开率/位置级曲线/预算压力/原因分布/注入分）与三句判据 ——
+            // 面板与 `npm run recall:stats` 走同一套算法（usage.js），免得两处口径漂移。
+            usage: (() => {
+              const summary = summarizeUsage(readUsage(settings.storePath), {
+                maxPointers: settings.maxPointers,
+              });
+              return {
+                ...summary,
+                verdicts: {
+                  open: usageVerdict(summary),
+                  budget: budgetVerdict(summary),
+                  reason: reasonVerdict(summary),
+                },
+              };
+            })(),
             generatedAt: Date.now(),
           });
         },

@@ -59,6 +59,23 @@ window.__ModuleLoader__.load({
       return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     };
 
+    /**
+     * 原因码 → 人话。**与宿主侧 usage.js 的 REASON_LABELS 是同一份口径**（客户端 bundle
+     * 只 require('react')，拿不到宿主模块，所以照抄一份）；出现没列过的码就原样显示，
+     * 别把新码藏起来 —— 那正是「为什么没注入」最该被看见的时候。
+     */
+    const REASON_LABELS = {
+      chitchat: '寒暄 / 答话（设计如此）',
+      'too-short': '消息太短',
+      'empty-message': '空消息',
+      duplicate: '与上一轮重复',
+      'store-not-configured': '没配库路径',
+      'index-empty': '库里没有笔记',
+      'no-hits': '一条都不匹配',
+      'below-min-score': '被 minScore 拦住',
+      unspecified: '没记原因（早期日志）',
+    };
+
     /** 轮询宿主状态；失败不清空已有数据，只把错误挂出来（面板不该因一次抖动变白）。 */
     function useRecallState() {
       const [state, setState] = React.useState(null);
@@ -155,6 +172,8 @@ window.__ModuleLoader__.load({
         if (item.kind === 'hit') acc.chars += Number(item.chars) || 0;
         return acc;
       }, { hit: 0, empty: 0, skip: 0, deny: 0, chars: 0 });
+      // 落盘的使用账（宿主侧 summarizeUsage 的汇总 + 三句判据）。老宿主没这个字段就整块不显示。
+      const usage = state.usage && typeof state.usage === 'object' ? state.usage : null;
 
       const shown = filter
         ? notes.filter((note) => `${note.file} ${note.title} ${note.description}`.toLowerCase().includes(filter.toLowerCase()))
@@ -243,6 +262,9 @@ window.__ModuleLoader__.load({
 
         h('div', { style: { ...S.row, gap: '6px', marginTop: '16px' } },
           tabBtn('log', `召回日志（${log.length}）`),
+          tabBtn('usage', usage && usage.pointers
+            ? `使用账（${Math.round((usage.openRate || 0) * 100)}%）`
+            : '使用账'),
           tabBtn('notes', `笔记（${notes.length}）`),
           tabBtn('audit', (() => {
             const b = audit && audit.summary && audit.summary.bySeverity;
@@ -260,6 +282,106 @@ window.__ModuleLoader__.load({
             expanded: expanded === i,
             onToggle: () => setExpanded(expanded === i ? -1 : i),
           })) : h('div', { style: S.muted }, '这个会话还没有召回记录。发一句真实的提问就会出现在这里。'))
+          : null,
+
+        // 使用账：注入的指针对后来有没有被打开。账本在库目录的 .engramory-recall.jsonl，
+        // 算法与 `npm run recall:stats` 共用（宿主侧 usage.js）；标签映射也照抄那一份。
+        tab === 'usage' ? h('div', { style: S.card },
+          !usage ? h('div', { style: S.muted },
+            '宿主这一侧还没提供使用账 —— 重启一次 App（宿主代码不走热重载）后就有了。')
+          : !usage.pointers ? h('div', { style: S.muted },
+              '还没有注入记录。账本落在记忆库的 ',
+              h('span', { style: S.mono }, '.engramory-recall.jsonl'),
+              '，攒够 20 条指针再回来看判据。')
+          : h('div', null,
+              h('div', { style: { ...S.row, gap: '20px', alignItems: 'flex-start' } },
+                h(Stat, { label: '注入指针', value: `${usage.pointers} 条`, hint: `${usage.injectRounds} 轮` }),
+                h(Stat, {
+                  label: '打开率',
+                  value: `${(usage.openRate * 100).toFixed(1)}%`,
+                  hint: `${usage.used} 条被 read/edit`,
+                }),
+                h(Stat, {
+                  label: '注入过的笔记',
+                  value: `${usage.uniqueNotes} 篇`,
+                  hint: usage.neverOpened && usage.neverOpened.length ? `${usage.neverOpened.length} 篇从未被打开` : '都至少打开过一次',
+                }),
+                h(Stat, {
+                  label: '打开延迟',
+                  value: usage.openLag && usage.openLag.n ? `${Math.round(usage.openLag.median / 1000)}s` : '—',
+                  hint: usage.openLag && usage.openLag.n ? `p90 ${Math.round(usage.openLag.p90 / 1000)}s · n=${usage.openLag.n}` : '还没被打开过',
+                })),
+
+              h('div', { style: { fontSize: '11.5px', marginTop: '10px' } },
+                [usage.verdicts && usage.verdicts.open, usage.verdicts && usage.verdicts.budget, usage.verdicts && usage.verdicts.reason]
+                  .filter(Boolean)
+                  .map((v, i) => h('div', { key: i, style: S.muted }, `· ${v}`))),
+
+              h('div', { style: S.title }, '位置级曲线'),
+              h('div', { style: { ...S.muted, fontSize: '11.5px' } },
+                '第 N 条指针被打开的比例 —— 尾部长期是 0，说明窗口比需要的大。'),
+              h('table', { style: { ...S.table, marginTop: '4px' } },
+                h('tbody', null,
+                  (usage.positions || []).filter((p) => p.injected > 0).map((p, i) => h('tr', { key: i },
+                    h('td', { style: { ...S.td, whiteSpace: 'nowrap' } }, `第 ${i + 1} 条`),
+                    h('td', { style: { ...S.td, ...S.mono } }, `${p.opened}/${p.injected}`),
+                    h('td', { style: { ...S.td, ...S.mono, whiteSpace: 'nowrap' } },
+                      p.injected ? `${Math.round((p.opened / p.injected) * 100)}%` : '—'),
+                    h('td', { style: { ...S.td, width: '45%' } },
+                      h('div', { style: { height: '6px', borderRadius: '3px', background: dim(12), overflow: 'hidden' } },
+                        h('div', {
+                          style: {
+                            height: '100%',
+                            width: `${Math.round((p.injected ? p.opened / p.injected : 0) * 100)}%`,
+                            background: '#2e9e63',
+                          },
+                        }))))))),
+
+              h('div', { style: S.title }, '预算与分数'),
+              h('div', { style: { fontSize: '12px' } },
+                `每轮注入 ${usage.perRound.median} 条（最少 ${usage.perRound.min} / p90 ${usage.perRound.p90} / 最多 ${usage.perRound.max}）`,
+                usage.perRound.windowLimit ? ` · 顶满窗口 ${usage.perRound.fullRounds}/${usage.injectRounds} 轮` : '',
+                ` · 有内容被截断 ${usage.truncatedRounds} 轮（缩成裸文件名 ${usage.collapsed} 条、整条没列出 ${usage.dropped} 条，涉及 ${usage.droppedRounds} 轮）`),
+              h('div', { style: { ...S.muted, fontSize: '11.5px', marginTop: '2px' } },
+                usage.scoreStats && usage.scoreStats.n
+                  ? `注入分：中位 ${usage.scoreStats.median} · p10 ${usage.scoreStats.p10} · p90 ${usage.scoreStats.p90} · 首尾落差中位 ${usage.scoreStats.spreadMedian}（共 ${usage.scoreStats.n} 轮）`
+                  : '还没有带分数的注入记录（早期日志没有 scores 字段）。'),
+
+              (usage.skipReasons && Object.keys(usage.skipReasons).length) || (usage.emptyReasons && Object.keys(usage.emptyReasons).length)
+                ? h('div', null,
+                    h('div', { style: S.title }, '为什么没注入'),
+                    h('table', { style: { ...S.table, marginTop: '4px' } },
+                      h('thead', null, h('tr', null,
+                        h('th', { style: S.th }, '跳过（' + (usage.skipRounds || 0) + ' 轮）'),
+                        h('th', { style: S.th }, '次数'),
+                        h('th', { style: S.th }, '零命中（' + (usage.emptyRounds || 0) + ' 轮）'),
+                        h('th', { style: S.th }, '次数'))),
+                      h('tbody', null, (() => {
+                        const left = Object.entries(usage.skipReasons || {});
+                        const right = Object.entries(usage.emptyReasons || {});
+                        const rows = Math.max(left.length, right.length);
+                        return Array.from({ length: rows }, (_, i) => h('tr', { key: i },
+                          h('td', { style: S.td }, left[i] ? REASON_LABELS[left[i][0]] || left[i][0] : ''),
+                          h('td', { style: { ...S.td, ...S.mono } }, left[i] ? left[i][1] : ''),
+                          h('td', { style: S.td }, right[i] ? REASON_LABELS[right[i][0]] || right[i][0] : ''),
+                          h('td', { style: { ...S.td, ...S.mono } }, right[i] ? right[i][1] : '')));
+                      })())))
+                : null,
+
+              usage.neverOpened && usage.neverOpened.length
+                ? h('div', null,
+                    h('div', { style: S.title }, '注入过、但从没被打开'),
+                    h('div', { style: { ...S.muted, fontSize: '11.5px' } },
+                      '注入了却没被用上 —— 要么那条不该注入（词面太泛），要么它是被别的方式用掉了。'),
+                    h('div', { style: { marginTop: '4px' } },
+                      usage.neverOpened.map((n, i) => h('div', {
+                        key: i,
+                        style: { ...S.row, gap: '8px', padding: '3px 0', borderTop: i ? `1px solid ${dim(8)}` : 'none' },
+                      },
+                        h('span', { style: { ...S.mono, fontSize: '11.5px' } }, n.id),
+                        h('span', { style: { ...S.muted, fontSize: '11px' } },
+                          `注入 ${n.injected} 次${n.lastAt ? ` · 最近 ${fmtTime(n.lastAt)}` : ''}`)))))
+                : null))
           : null,
 
         tab === 'notes' ? h('div', { style: S.card },

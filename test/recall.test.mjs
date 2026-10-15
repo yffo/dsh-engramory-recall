@@ -376,6 +376,22 @@ test('宿主路由：状态接口返回记忆库快照，且每次召回都留�
     assert.equal(emptyLog[0].kind, 'empty');
     assert.ok(emptyLog.every((entry) => entry.at > 0 && typeof entry.query === 'string'));
 
+    // 使用账（面板「使用账」页签的数据源）：宿主侧汇总 + 三句判据都得在，
+    // 否则前端只能显示一个空壳。maxPointers 不传进去，窗口用满了几轮就永远是 0。
+    const usageBody = JSON.parse(afterEmpty.body).usage;
+    assert.ok(usageBody && typeof usageBody === 'object', 'state 路由应当带 usage 汇总');
+    assert.ok(usageBody.pointers > 0, '注入过就应当有指针计数');
+    assert.equal(usageBody.perRound.windowLimit, 4, 'usage 汇总要知道窗口上限（maxPointers）');
+    assert.equal(usageBody.skipRounds, 1, '寒暄轮应当算作一次跳过');
+    assert.ok(usageBody.skipReasons.chitchat >= 1, '跳过原因应当记成 chitchat，而不是光秃秃一个 skip');
+    assert.ok(usageBody.emptyReasons['no-hits'] >= 1, '零命中原因应当记成 no-hits');
+    assert.ok(Array.isArray(usageBody.positions) && usageBody.positions.length > 0, '应当有位置级曲线');
+    assert.ok(usageBody.positions[0].injected > 0, '第 1 条指针至少注入过一次');
+    for (const key of ['open', 'budget', 'reason']) {
+      assert.equal(typeof usageBody.verdicts[key], 'string', `usage.verdicts.${key} 应当是一句人话`);
+      assert.ok(usageBody.verdicts[key].length > 0);
+    }
+
     // 只读：非 GET 一律 405
     const rejected = captureResponse();
     await route.handler({ method: 'POST' }, rejected);
