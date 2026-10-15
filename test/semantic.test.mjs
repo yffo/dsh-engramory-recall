@@ -290,7 +290,7 @@ test('语义接缝：宽池让提供方捞得动（trust = 直接采纳它的顺
   }
 });
 
-test('语义接缝：默认 trust（提供方说了算），rrf 是「词面有一票否决权」的保守档', async () => {
+test('语义接缝：默认 rrf（词面有一票否决权），trust 是「提供方说了算」的高天花板档', async () => {
   // 提供方给全量排名：d（词面最后）第一。这正是真 embedding 提供方的形态 —— 它会排完整个池子。
   const c = providerCase(
     'pool-fusion',
@@ -299,12 +299,12 @@ test('语义接缝：默认 trust（提供方说了算），rrf 是「词面有�
   const calls = [];
   try {
     const omitted = await semanticSearch({ index, query: '随便', limit: 2, searchFn: scriptedSearch(calls), config: { provider: c.file, pool: 4 } });
-    const rrf = await semanticSearch({ index, query: '随便', limit: 2, searchFn: scriptedSearch(calls), config: { provider: c.file, pool: 4, fusion: 'rrf' } });
+    const trust = await semanticSearch({ index, query: '随便', limit: 2, searchFn: scriptedSearch(calls), config: { provider: c.file, pool: 4, fusion: 'trust' } });
     const bogus = await semanticSearch({ index, query: '随便', limit: 2, searchFn: scriptedSearch(calls), config: { provider: c.file, pool: 4, fusion: '随便写的' } });
-    assert.equal(omitted.fusion, 'trust', '不写 fusion 就是 trust');
-    assert.equal(bogus.fusion, 'trust', '写错的值回默认，不报错也不变怪');
-    assert.deepEqual(ids(omitted), ['d.md', 'a.md'], 'trust：提供方的第一名就是最终第一名，剩下的坑按词面补');
-    assert.deepEqual(ids(rrf), ['a.md', 'd.md'], 'rrf：词面第 1 + 提供方第 2 名，等权之下压过了提供方的第 1 名（这就是它为什么会稀释真提供方）');
+    assert.equal(omitted.fusion, 'rrf', '不写 fusion 就是 rrf（安全的那个）');
+    assert.equal(bogus.fusion, 'rrf', '写错的值回默认，不报错也不变怪');
+    assert.deepEqual(ids(omitted), ['a.md', 'd.md'], 'rrf：词面第 1 + 提供方第 2 名，等权之下压过了提供方的第 1 名');
+    assert.deepEqual(ids(trust), ['d.md', 'a.md'], 'trust：提供方的第一名就是最终第一名，剩下的坑按词面补（天花板档，提供方得靠谱才划算）');
     assert.deepEqual(ids(bogus), ids(omitted));
   } finally {
     c.cleanup();

@@ -19,6 +19,7 @@
  *   读不到 `~/.zshrc` 里的环境变量，一个 0600 的小文件最省事：
  *   `mkdir -p ~/.config/engramory && printf '{"apiKey":"sk-…"}' > ~/.config/engramory/embed.json && chmod 600 ~/.config/engramory/embed.json`
  * · `ENGRAMORY_EMBED_API_KEY`        或 `ENGRAMORY_EMBED_API_KEY_FILE` 指一个只放密钥的文件
+ *   （**本机端点** localhost / 127.0.0.1 不需要密钥：Ollama、LM Studio、llama.cpp 直接填 BASE_URL + MODEL）
  * · `ENGRAMORY_EMBED_BASE_URL`       默认 `https://api.openai.com/v1`（base 里带 `/v1`）
  * · `ENGRAMORY_EMBED_MODEL`          默认 `text-embedding-3-small`
  * · `ENGRAMORY_EMBED_BATCH`          默认 32（一次请求塞多少条）
@@ -108,9 +109,11 @@ export function readConfig(env = process.env) {
     return fallback;
   };
   const base = String(pick('ENGRAMORY_EMBED_BASE_URL', 'baseUrl', DEFAULTS.baseUrl)).replace(/\/+$/, '');
+  const baseUrl = base || DEFAULTS.baseUrl;
   return {
     configPath,
-    baseUrl: base || DEFAULTS.baseUrl,
+    baseUrl,
+    local: isLocalEndpoint(baseUrl),
     model: pick('ENGRAMORY_EMBED_MODEL', 'model', DEFAULTS.model) || DEFAULTS.model,
     batch: Math.min(128, Math.max(1, num(pick('ENGRAMORY_EMBED_BATCH', 'batch', DEFAULTS.batch), DEFAULTS.batch))),
     maxChars: Math.max(64, num(pick('ENGRAMORY_EMBED_MAX_CHARS', 'maxChars', DEFAULTS.maxChars), DEFAULTS.maxChars)),
@@ -142,6 +145,19 @@ function readKey(env, data = {}) {
   return String(data?.apiKey ?? '').trim();
 }
 
+/**
+ * 本机端点（Ollama / LM Studio / llama.cpp）**不需要密钥** —— 别拿「没配密钥」把一条零成本、
+ * 零出网的试法拦在门外。远端端点若也不需要密钥（内网网关），随便填一个值即可。
+ */
+export function isLocalEndpoint(baseUrl) {
+  try {
+    const { hostname } = new URL(String(baseUrl));
+    return ['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'].includes(hostname);
+  } catch {
+    return false;
+  }
+}
+
 function endpoint(baseUrl) {
   return /\/embeddings$/.test(baseUrl) ? baseUrl : `${baseUrl}/embeddings`;
 }
@@ -160,7 +176,7 @@ async function embedBatch(cfg, texts, signal) {
       signal,
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${cfg.apiKey}`,
+        ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {}),
       },
       body: JSON.stringify({ model: cfg.model, input: texts }),
     });
@@ -263,8 +279,11 @@ function cosine(a, b) {
  */
 /** 用一份**显式配置**跑重排（密钥来自调用方，而不是环境变量）—— `host-embed` 复用宿主凭据时走这条路。 */
 export async function rerankWith(cfg, { query, docs, signal } = {}) {
-  if (!cfg?.apiKey) {
-    throw new Error('没配密钥：设置 ENGRAMORY_EMBED_API_KEY（或 ENGRAMORY_EMBED_API_KEY_FILE）后重试');
+  if (!cfg?.apiKey && !cfg?.local) {
+    throw new Error(
+      '没配密钥：设置 ENGRAMORY_EMBED_API_KEY（或 ENGRAMORY_EMBED_API_KEY_FILE）后重试；'
+        + '本机端点（localhost / 127.0.0.1）不需要密钥，填好 ENGRAMORY_EMBED_BASE_URL + ENGRAMORY_EMBED_MODEL 即可',
+    );
   }
   const list = Array.isArray(docs) ? docs : [];
   if (!list.length) return [];
@@ -286,6 +305,7 @@ export async function rerank(args) {
  */
 export function createProvider(overrides = {}) {
   const cfg = { ...readConfig(), ...overrides };
+  if (overrides.baseUrl !== undefined) cfg.local = isLocalEndpoint(cfg.baseUrl);
   return {
     name: overrides.providerName ?? `${name}(${cfg.model})`,
     kind: 'rerank',
@@ -297,8 +317,11 @@ export function createProvider(overrides = {}) {
 /** 自检：探一次接口，报配置（不含密钥）、维度与耗时。 */
 export async function check(env = process.env) {
   const cfg = readConfig(env);
-  if (!cfg.apiKey) {
-    throw new Error(`没配密钥：设置 ENGRAMORY_EMBED_API_KEY，或写一份 ${cfg.configPath}（{"apiKey":"…"}，chmod 600）`);
+  if (!cfg.apiKey && !cfg.local) {
+    throw new Error(
+      `没配密钥：设置 ENGRAMORY_EMBED_API_KEY，或写一份 ${cfg.configPath}（{"apiKey":"…"}，chmod 600）；`
+        + '本机端点（localhost / 127.0.0.1）不需要密钥',
+    );
   }
   const started = Date.now();
   const vectors = await embedTexts(cfg, ['engramory 自检：这一段会被送进 embeddings 接口。'], undefined);
@@ -332,7 +355,8 @@ if (isMain || process.argv.includes('--check')) {
       if (process.argv.includes('--json')) console.log(JSON.stringify(result, null, 2));
       else {
         console.log(`✓ embeddings 可用：${result.model} @ ${result.baseUrl}`);
-        console.log(`  密钥来源：${result.keySource} · 维度：${result.dimensions} · 耗时：${result.ms}ms`);
+        const auth = result.keySource ? `密钥来源：${result.keySource}` : '本机端点，无需密钥';
+        console.log(`  ${auth} · 维度：${result.dimensions} · 耗时：${result.ms}ms`);
       }
     } catch (error) {
       console.error(`✗ ${error?.message ?? error}`);

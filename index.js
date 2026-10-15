@@ -186,10 +186,11 @@ const DEFAULTS = {
   semanticPool: 50,
   /**
    * 融合方式：`rrf`（默认）= 词面与提供方各一票，少赚不赔；`trust` = 提供方的顺序即最终顺序，
-   * 天花板最高（合成 @1 86.6% vs 词面 50.4%），但提供方不靠谱时结果会比纯词面更差。
-   * 两个数都是量出来的，见 semantic.js 文件头与 README「语义接缝」小节。
+   * 天花板最高（理想提供方 86.6% vs 词面 50.4%），但提供方不靠谱时会比纯词面更差 ——
+   * 实测：坏向量 trust 5.6% / rrf 19.4%（真库），真模型 trust 72.2% / rrf 86.1%。
+   * 结论：默认 rrf，量过端点再换 trust。见 semantic.js 文件头与 README「语义接缝」小节。
    */
-  semanticFusion: 'trust',
+  semanticFusion: 'rrf',
   // 只有 `semanticProvider: 'host-embed'` 用得上：指定复用哪条 DSH 路由（留空 = 当前默认模型的路由）。
   semanticHostRoute: '',
 };

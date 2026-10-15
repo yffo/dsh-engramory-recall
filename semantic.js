@@ -88,17 +88,20 @@ export const DEFAULT_POOL = 50;
 export const MAX_POOL = 200;
 /**
  * 融合模式：
- * · `trust`（默认）= 提供方给了顺序就按它的顺序走，词面只用来补满窗口；
- * · `rrf` = 词面与提供方各一票（等权），词面因此有一票否决权。
+ * · `rrf`（默认）= 词面与提供方各一票（等权），提供方只能往上顶、不能把词面的第 1 名挤掉；
+ * · `trust` = 提供方的顺序即最终顺序（词面只用来补满窗口）。
  *
- * 默认选 `trust` 是量出来的（合成 704 条、池 20、窗口 5；`npm run bench:seam` 可复算）：
- * 真提供方返回的是一份**全量排名**，等权 RRF 会让它自己第 2 名以后的名次去稀释第 1 名 ——
- * 完美提供方在 rrf 下只有 52.7%/76.3%（比纯词面 50.4%/70.3% 几乎没赚），trust 下是 86.6%/86.6%；
- * 反过来，坏提供方在 trust 下会一路砸到底（倒排：1.0%/4.7%），这时 rrf 是安全档（26.0%/63.9%）。
- * 结论：可信的提供方配 trust；不确定它靠不靠谱时配 rrf。
+ * **默认选 rrf 是三条实测压出来的**（`npm run bench:seam` 与 `npm run bench:embed` 可复算）：
+ * 1. 理想提供方（全量且完美的排名，oracle 实验）确实 trust 更高：合成 86.6%/86.6% vs rrf 52.7%/76.3%；
+ * 2. 但**最坏的**提供方（哈希假向量）在 trust 下会砸到底：真库探针 72.2% → 5.6%（rrf 19.4%）；
+ * 3. **真模型**（本机 qwen3-embedding:0.6b @ Ollama，2026-10-15 实测）trust 同样亏：
+ *    真库探针 hit@1 72.2%（与纯词面持平），而 rrf 是 86.1%（池 10 时 hit@4 100%）。
+ * 也就是说 trust 的收益只在「提供方比词面更准」时兑现，而噪音会**全额**转成损失；
+ * rrf 的代价是天花板低一点（上面第 1 条），但坏提供方也拖不垮它。
+ * 结论：默认 rrf；**量过你的端点、确认它确实更准**，再换 trust（README 有对照表）。
  */
 export const FUSION_MODES = ['rrf', 'trust'];
-export const DEFAULT_FUSION = 'trust';
+export const DEFAULT_FUSION = 'rrf';
 
 /** 配置里能写的提供方：空 = 关闭；`host-llm` = 走宿主模型（llm.js）；其余当本地模块路径。 */
 export function describeSeam(config = {}) {

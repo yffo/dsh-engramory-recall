@@ -101,8 +101,12 @@ if (fake) {
   cleanup = async () => { await new Promise((r) => fakeHandle.server.close(r)); };
 } else {
   const cfg = readConfig();
-  if (!cfg.apiKey) {
-    console.error(`✗ 没找到密钥：设置 ENGRAMORY_EMBED_API_KEY，或写 ${DEFAULT_CONFIG_PATH}；想先验证管线就跑 --fake`);
+  // 本机端点（Ollama / LM Studio）不需要密钥 —— 和提供方保持同一套判断，别在这里多设一道闸
+  if (!cfg.apiKey && !cfg.local) {
+    console.error(
+      `✗ 没找到密钥：设置 ENGRAMORY_EMBED_API_KEY，或写 ${DEFAULT_CONFIG_PATH}；`
+        + '本机端点（如 http://127.0.0.1:11434/v1）不需要密钥；想先验证管线就跑 --fake',
+    );
     process.exit(1);
   }
   console.log(`真端点：${cfg.baseUrl} · 模型 ${cfg.model}（密钥来自配置，脚本不打印它）\n`);

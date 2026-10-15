@@ -11,6 +11,7 @@ import {
   DEFAULT_CONFIG_PATH,
   check,
   createProvider,
+  isLocalEndpoint,
   readConfig,
   readConfigFile,
   rerank,
@@ -253,13 +254,47 @@ test('参考提供方：没配密钥时给出可照做的提示（两种自检�
     ENGRAMORY_EMBED_CONFIG: '/nonexistent/embed.json',
     ENGRAMORY_EMBED_API_KEY: undefined,
     ENGRAMORY_EMBED_API_KEY_FILE: undefined,
-    ENGRAMORY_EMBED_BASE_URL: 'http://127.0.0.1:9/v1',
+    ENGRAMORY_EMBED_BASE_URL: 'https://api.example.com/v1',
   });
   try {
     await assert.rejects(() => rerank({ query: '发布', docs: [{ id: 'a.md', snippet: 'x' }] }), /没配密钥/);
     await assert.rejects(() => check(), /没配密钥/);
   } finally {
     restore();
+  }
+});
+
+test('参考提供方：本机端点不需要密钥，且不发 Authorization 头（Ollama 那条零成本试法）', async () => {
+  const server = await fakeServer();
+  const restore = withEnv({
+    ENGRAMORY_EMBED_CONFIG: '/nonexistent/embed.json',
+    ENGRAMORY_EMBED_API_KEY: undefined,
+    ENGRAMORY_EMBED_API_KEY_FILE: undefined,
+    ENGRAMORY_EMBED_BASE_URL: server.baseUrl,
+    ENGRAMORY_EMBED_MODEL: 'fake-embed-3',
+  });
+  try {
+    const ranked = await rerank({
+      query: '怎么发布到 npm',
+      docs: [
+        { id: 'a.md', snippet: '发布流程：打 tag 后 npm publish' },
+        { id: 'b.md', snippet: '缓存命中率怎么算' },
+      ],
+    });
+    assert.equal(ranked[0].id, 'a.md', '本机端点照样按余弦排序');
+    assert.ok(server.requests.length > 0);
+    assert.ok(
+      server.requests.every((r) => r.headers.authorization === undefined),
+      '没有密钥就不该伪造一个 Authorization 头',
+    );
+    const result = await check();
+    assert.equal(result.keySource, '', '本机端点没有密钥来源一说');
+    assert.equal(isLocalEndpoint('http://127.0.0.1:11434/v1'), true);
+    assert.equal(isLocalEndpoint('http://localhost:1234/v1'), true);
+    assert.equal(isLocalEndpoint('https://api.openai.com/v1'), false);
+  } finally {
+    restore();
+    await server.close();
   }
 });
 
