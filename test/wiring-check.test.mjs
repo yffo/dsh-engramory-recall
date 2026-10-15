@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -63,6 +63,17 @@ function run(fx) {
   } catch (error) {
     return { code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` };
   }
+}
+
+/**
+ * 这台机器上有没有正在跑的 DSH 进程？
+ * 「旧代码检测」那两条用例需要它：CI 上没有 App 在跑，那条规则整段跳过 —— 不是代码坏了。
+ */
+function hasDshProcess() {
+  const ps = spawnSync('ps', ['-axo', 'lstart=,command='], { encoding: 'utf8' });
+  return String(ps.stdout ?? '')
+    .split('\n')
+    .some((l) => /DeepSeek Harness\.app\/Contents\/MacOS\/DeepSeek Harness(\s|$)/.test(l) || /dsh\s+web/.test(l));
 }
 
 /** 把「被检仓库」里的运行时文件统一改成某个时刻（旧代码检测那两条用例要用）。 */
@@ -192,7 +203,8 @@ test('漏进 files 白名单的入口文件：必须变红（本地能跑、装�
   }
 });
 
-test('旧代码检测：整份运行时文件都比 App 旧时，明确说「跑的就是当前这份」', () => {
+test('旧代码检测：整份运行时文件都比 App 旧时，明确说「跑的就是当前这份」', (t) => {
+  if (!hasDshProcess()) return t.skip('这台机器上没有跑着的 DSH 进程（CI 上就是这样）');
   const fx = makeFixture();
   try {
     stampRuntimeFiles(fx.repo, Date.now() - 30 * 24 * 3600 * 1000);
@@ -203,7 +215,8 @@ test('旧代码检测：整份运行时文件都比 App 旧时，明确说「跑
   }
 });
 
-test('旧代码检测：不只看 index.js/semantic.js —— 任何一个运行时文件比 App 新都要报', () => {
+test('旧代码检测：不只看 index.js/semantic.js —— 任何一个运行时文件比 App 新都要报', (t) => {
+  if (!hasDshProcess()) return t.skip('这台机器上没有跑着的 DSH 进程（CI 上就是这样）');
   const fx = makeFixture({
     patchEdit: (p) => p.replace('        enabled: true', "        enabled: true\n        semanticProvider: 'dsh-engramory-recall/providers/openai-embeddings'"),
   });
