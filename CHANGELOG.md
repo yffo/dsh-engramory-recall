@@ -3,6 +3,22 @@
 本项目的所有重要变更都记在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.12.3] — 2026-10-15
+
+### 新增
+
+- **参考提供方会自动重试限流与临时故障**：`429 / 408 / 409 / 425 / 500 / 502 / 503 / 504` 重试 2 次，
+  尊重服务端 `Retry-After`（秒数或 HTTP 日期，上限 5 秒），等待可被接缝的超时预算打断；
+  `400 / 401 / 403` 不重试。重试到上限的错误写成 `embeddings HTTP 503（已重试 2 次）：<服务端原话>`。
+  新增 3 条测试（重试后成功 / 重试到上限 / 4xx 不重试），都打本地假服务。
+
+### 文档
+
+- README 补「哪些服务能用」：常见可用名单（OpenAI / 智谱 / 阿里百炼 / 硅基流动 / Mistral / Together /
+  本机 Ollama / 本机 LM Studio 的 `BASE_URL` + `MODEL`），以及**不能用的两家及其原因** ——
+  Anthropic 没有 embeddings 接口；**DeepSeek 官方 API 只有对话模型**（已对照官方模型表），
+  所以现有的 DeepSeek key 走不了这条路，零成本试法是把 Ollama / LM Studio 起在本机。
+
 ## [0.12.2] — 2026-10-15
 
 ### 新增

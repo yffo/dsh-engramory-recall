@@ -60,6 +60,11 @@ const DEFAULTS = {
 /** 默认配置文件位置（可用 ENGRAMORY_EMBED_CONFIG 换）。 */
 export const DEFAULT_CONFIG_PATH = '~/.config/engramory/embed.json';
 
+/** 可重试的状态码：限流与网关/服务端临时故障。真端点第一次限流就失败的话，接缝等于不能用。 */
+const RETRY_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+const RETRY_LIMIT = 2; // 首次 + 2 次重试
+const RETRY_BASE_MS = 250;
+
 function expandHome(value) {
   const text = String(value ?? '').trim();
   if (text === '~') return homedir();
@@ -147,19 +152,26 @@ function textOf(doc, cfg) {
 }
 
 async function embedBatch(cfg, texts, signal) {
-  const response = await fetch(endpoint(cfg.baseUrl), {
-    method: 'POST',
-    signal,
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${cfg.apiKey}`,
-    },
-    body: JSON.stringify({ model: cfg.model, input: texts }),
-  });
-  const body = await response.text();
+  let response;
+  let body = '';
+  for (let attempt = 0; ; attempt += 1) {
+    response = await fetch(endpoint(cfg.baseUrl), {
+      method: 'POST',
+      signal,
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify({ model: cfg.model, input: texts }),
+    });
+    body = await response.text();
+    if (response.ok || !RETRY_STATUS.has(response.status) || attempt >= RETRY_LIMIT) break;
+    await sleep(retryDelayMs(response, attempt), signal);
+  }
   if (!response.ok) {
-    // 状态码 + 服务端原话（截断）：密钥绝不进消息。
-    throw new Error(`embeddings HTTP ${response.status}：${body.replace(/\s+/g, ' ').slice(0, 200)}`);
+    // 状态码 + 服务端原话（截断）：密钥绝不进消息。重试过的话说明这是重试后的终态。
+    const tried = RETRY_STATUS.has(response.status) ? `（已重试 ${RETRY_LIMIT} 次）` : '';
+    throw new Error(`embeddings HTTP ${response.status}${tried}：${body.replace(/\s+/g, ' ').slice(0, 200)}`);
   }
   let parsed;
   try {
@@ -200,6 +212,35 @@ export async function embedTexts(cfg, texts, signal) {
     });
   }
   return out;
+}
+
+/** 等服务端让等的时间：优先 `Retry-After`（秒数或 HTTP 日期），否则指数退避。上限 5 秒。 */
+function retryDelayMs(response, attempt) {
+  const header = response?.headers?.get?.('retry-after');
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(5000, seconds * 1000);
+    const when = Date.parse(header);
+    if (Number.isFinite(when)) return Math.min(5000, Math.max(0, when - Date.now()));
+  }
+  return Math.min(5000, RETRY_BASE_MS * 2 ** attempt);
+}
+
+/** 可被 AbortSignal 打断的等待：接缝有超时预算，重试不许把预算吃光。 */
+function sleep(ms, signal) {
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error('aborted'));
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
 }
 
 function cosine(a, b) {

@@ -718,8 +718,38 @@ export ENGRAMORY_EMBED_MODEL=text-embedding-3-small
 `https://dashscope.aliyuncs.com/compatible-mode/v1` + `text-embedding-v4`、智谱
 `https://open.bigmodel.cn/api/paas/v4` + `embedding-3`、硅基流动 `https://api.siliconflow.cn/v1` + `BAAI/bge-m3`。
 
-**一句实话**：这条路径的代码、测试、失败降级都有，但**还没有在真 key 上量过召回**（要花token，得你先点头）。
-接缝本身的上限是量过的（上表 86.6%），提供方的质量只能真调一次才知道。
+#### 哪些服务能用（以及 DeepSeek 为什么不行）
+
+要求只有一条：提供 `POST {base}/embeddings`。常见可用名单（`BASE_URL` + `MODEL` 照填）：
+
+| 供应商 | BASE_URL | 模型示例 |
+|---|---|---|
+| OpenAI | `https://api.openai.com/v1` | `text-embedding-3-small` / `-large` |
+| 智谱 | `https://open.bigmodel.cn/api/paas/v4` | `embedding-3` |
+| 阿里百炼 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `text-embedding-v4` |
+| 硅基流动 | `https://api.siliconflow.cn/v1` | `BAAI/bge-m3` |
+| Mistral | `https://api.mistral.ai/v1` | `mistral-embed` |
+| Together | `https://api.together.xyz/v1` | `BAAI/bge-large-en-v1.5` |
+| 本机 Ollama | `http://localhost:11434/v1` | `nomic-embed-text` / `bge-m3` |
+| 本机 LM Studio | `http://localhost:1234/v1` | 你加载的那个 embedding 模型 |
+
+**不能用的两家**，原因不同：
+
+- **Anthropic（Claude）没有 embeddings 接口** —— 「Claude 协议」跟向量无关，填了也只会 404。
+  官方推荐的做法是另找一家 embeddings 服务。
+- **DeepSeek 官方 API 只有对话模型**（[官方模型表](https://api-docs.deepseek.com/quick_start/pricing)
+  里只有 `deepseek-flash` / `deepseek-v4-pro`，没有 `/embeddings`）⇒ **你现在这把 DeepSeek key 用不上这条路**。
+  想零成本试就把 Ollama / LM Studio 在本机起一个（完全不出网），想真量就挑上面任一家。
+
+一探便知：`node providers/openai-embeddings.mjs --check` —— **404 = 这家没这个接口；401 = 密钥不对**；
+成功了会报维度与一次往返耗时。
+
+**限流与临时故障会自动扛**：`429 / 500 / 502 / 503 / 504`（以及 408/409/425）重试 2 次，尊重服务端
+`Retry-After`（上限 5 秒，而且等待可被超时预算打断）；`400 / 401 / 403` 这类不重试 —— 重试改不了
+鉴权与请求体的问题。重试到上限的错误会写成 `embeddings HTTP 503（已重试 2 次）：<服务端原话>`。
+
+**一句实话**：这条路径的代码、测试、失败降级、重试都有，但**还没有在真 key 上量过召回**（要花 token，
+得你先点头）。接缝本身的上限是量过的（上表 86.6%），提供方的质量只能真调一次才知道。
 
 #### 真端点怎么量：`npm run bench:embed`
 

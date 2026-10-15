@@ -10,6 +10,7 @@ import test from 'node:test';
 import {
   DEFAULT_CONFIG_PATH,
   check,
+  createProvider,
   readConfig,
   readConfigFile,
   rerank,
@@ -33,9 +34,11 @@ async function fakeServer(options = {}) {
     req.on('end', () => {
       const parsed = body ? JSON.parse(body) : {};
       requests.push({ url: req.url, headers: req.headers, body: parsed });
-      if (options.failWith) {
+      // failTimes：前 N 次按 failWith 失败、之后成功（用来量重试）
+      if (options.failWith && (options.failTimes === undefined || requests.length <= options.failTimes)) {
         res.statusCode = options.failWith;
         res.setHeader('content-type', 'application/json');
+        if (options.retryAfter) res.setHeader('retry-after', String(options.retryAfter));
         res.end(JSON.stringify({ error: { message: '服务器说的原话' } }));
         return;
       }
@@ -321,6 +324,43 @@ test('参考提供方：走接缝的整条链（裸模块名 → 宽池 → 语�
     assert.ok(rrf.hits.length === 2);
   } finally {
     restore();
+    await server.close();
+  }
+});
+
+test('限流/服务端临时故障会重试，并在消息里说清「已重试」', async () => {
+  const server = await fakeServer({ failWith: 429, failTimes: 2, retryAfter: 0 });
+  try {
+    const provider = createProvider({ baseUrl: server.baseUrl, model: 'm', apiKey: 'k', batch: 2, maxChars: 100 });
+    const vectors = await provider.rerank({ query: '缓存 cache', docs: [{ id: 'a.md', snippet: '缓存 cache' }] });
+    assert.equal(server.requests.length, 3, '两次 429 → 第三次成功，一共 3 个请求');
+    assert.ok(vectors.length >= 1, '重试之后要拿到结果，而不是把限流当致命错');
+  } finally {
+    await server.close();
+  }
+});
+
+test('重试到上限才放弃，错误里带上「已重试 N 次」', async () => {
+  const server = await fakeServer({ failWith: 503, retryAfter: 0 });
+  try {
+    const provider = createProvider({ baseUrl: server.baseUrl, model: 'm', apiKey: 'k', batch: 2, maxChars: 100 });
+    await assert.rejects(
+      () => provider.rerank({ query: '缓存', docs: [{ id: 'a.md', snippet: '缓存' }] }),
+      /embeddings HTTP 503（已重试 2 次）/,
+    );
+    assert.equal(server.requests.length, 3, '首次 + 2 次重试');
+  } finally {
+    await server.close();
+  }
+});
+
+test('客户端错误（400/401）不重试 —— 重试改不了鉴权与请求体的问题', async () => {
+  const server = await fakeServer({ failWith: 401 });
+  try {
+    const provider = createProvider({ baseUrl: server.baseUrl, model: 'm', apiKey: 'k', batch: 2, maxChars: 100 });
+    await assert.rejects(() => provider.rerank({ query: '缓存', docs: [{ id: 'a.md', snippet: '缓存' }] }), /HTTP 401/);
+    assert.equal(server.requests.length, 1, '4xx（非 429）不许重试');
+  } finally {
     await server.close();
   }
 });
