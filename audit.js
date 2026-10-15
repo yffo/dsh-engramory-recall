@@ -43,7 +43,21 @@ export function appendAudit(storePath, entry) {
     } catch {
       // 文件还不存在：正常路径，不需要处理
     }
-    appendFileSync(file, `${JSON.stringify({ ts: Date.now(), epoch: GUARD_EPOCH, ...entry })}\n`);
+    // 序列化失败（循环引用、BigInt……）不能连「记过这一笔」都一起吞掉：
+    // 换成一条能落盘的降级记录，账本里留痕迹，调用方不必改。
+    let line;
+    try {
+      line = JSON.stringify({ ts: Date.now(), epoch: GUARD_EPOCH, ...entry });
+    } catch {
+      line = JSON.stringify({
+        ts: Date.now(),
+        epoch: GUARD_EPOCH,
+        tool: typeof entry?.tool === 'string' ? entry.tool : 'unknown',
+        file: typeof entry?.file === 'string' ? entry.file : 'unknown',
+        verdict: 'audit-unserializable',
+      });
+    }
+    appendFileSync(file, `${line}\n`);
   } catch {
     // 只读挂载、磁盘满、权限问题——都不该让一次记忆写入失败
   }

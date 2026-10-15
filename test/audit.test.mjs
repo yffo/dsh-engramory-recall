@@ -10,7 +10,8 @@
  * 其它写实行为（同样在下面钉住，疑似 bug 的地方都写了「疑似 bug」）：
  *   5. entry 不做任何校验：字段类型不对也照写（`bytes: '420'`、`tool: null`），
  *      但显式 `ts: undefined` 会把默认的落盘时刻整个抹掉（它覆盖默认值，又被 JSON 丢掉）；
- *   6. 序列化失败（BigInt / 循环引用）⇒ 整条记录静默消失，调用方拿不到任何信号；
+ *   6. 序列化失败（BigInt / 循环引用）⇒ 落一条 `verdict: 'audit-unserializable'` 的降级记录，
+ *      账本里留痕、调用方不必改（0.13.11 之前是静默消失，连「丢过」都看不见）；
  *   7. limit 只要求「slice 能强转」：NaN / null / -0 都是全量，小数被截断，布尔被当成 0/1；
  *   8. 空行不占 limit 名额（`filter(Boolean)` 在 `slice` 之前），只有空格的「空白行」与坏行占名额；
  *   9. 轮转按**行数**减半而非字节减半：大行落在后半时，轮转完仍可能在上限之上。
@@ -119,21 +120,57 @@ test('entry 不做校验：字段缺失/类型不对都原样落盘，但显式 
   });
 });
 
-test('序列化失败（BigInt / 循环引用）：不抛，但整条记录静默消失（疑似 bug：审计会无声少一条）', () => {
+test('序列化失败（BigInt / 循环引用）：不抛，落一条能读的降级记录，账本不留空白', () => {
   withDir((dir) => {
     appendAudit(dir, { tool: 'edit', verdict: 'allow', seq: 1 });
     assert.equal(rawLines(dir).length, 1);
 
-    // JSON.stringify 在 appendFileSync 之前求值 ⇒ 抛在外层 try 里被吞掉，调用方拿不到任何信号。
+    // 过去 JSON.stringify 抛在外层 try 里被吞掉 ⇒ 这一笔连「丢过」都不留痕；
+    // 现在降级成一条 audit-unserializable，tool/file 能留就留。
     const circular = { name: 'loop' };
     circular.self = circular;
-    for (const bad of [{ bytes: 10n }, { nested: circular }, { big: BigInt(Number.MAX_SAFE_INTEGER) }]) {
-      appendAudit(dir, { tool: 'edit', verdict: 'allow', ...bad }); // 不抛
+    const bads = [
+      { bytes: 10n },
+      { nested: circular },
+      { big: BigInt(Number.MAX_SAFE_INTEGER) },
+    ];
+    for (const bad of bads) {
+      appendAudit(dir, { tool: 'edit', file: 'a.md', verdict: 'allow', ...bad }); // 不抛
     }
 
-    assert.equal(rawLines(dir).length, 1, '三次失败一条都没落盘（也没有落半条）');
-    assert.deepEqual(parseAll(rawLines(dir)).map((row) => row.seq), [1], '先前那条完好，文件仍是合法 JSONL');
-    assert.deepEqual(readAudit(dir).map((row) => row.seq), [1], '读回来也看不出「刚才有三次审计丢了」');
+    assert.equal(rawLines(dir).length, 1 + bads.length, '三次失败落三条降级记录，没有半条');
+    const rows = parseAll(rawLines(dir));
+    assert.equal(rows[0].seq, 1, '先前那条完好');
+    for (const row of rows.slice(1)) {
+      assert.equal(row.verdict, 'audit-unserializable');
+      assert.equal(row.tool, 'edit');
+      assert.equal(row.file, 'a.md');
+      assert.equal(row.epoch, GUARD_EPOCH);
+      assert.ok(Number.isFinite(row.ts) && row.ts > 0);
+    }
+    assert.deepEqual(readAudit(dir).map((row) => row.verdict), [
+      'audit-unserializable',
+      'audit-unserializable',
+      'audit-unserializable',
+      'allow',
+    ], '读回来能看见「刚才有三次审计没能完整落盘」');
+  });
+});
+
+test('降级记录也保底：tool/file 不是字符串时写成 unknown；entry 为 null 仍是一次成功的序列化', () => {
+  withDir((dir) => {
+    const circular = { loop: null };
+    circular.loop = circular;
+    appendAudit(dir, { tool: null, file: 42, verdict: 'deny', payload: circular });
+    appendAudit(dir, null); // `{ ...null }` 合法 ⇒ 正常落盘一条只有 ts/epoch 的记录
+    const rows = parseAll(rawLines(dir));
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].tool, 'unknown');
+    assert.equal(rows[0].file, 'unknown');
+    assert.equal(rows[0].verdict, 'audit-unserializable');
+    assert.equal(rows[1].epoch, GUARD_EPOCH);
+    assert.ok(Number.isFinite(rows[1].ts));
+    assert.equal(rows[1].verdict, undefined, 'null 走的是正常路径，不会被当成「序列化失败」');
   });
 });
 
