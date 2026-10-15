@@ -291,13 +291,14 @@ export async function loadProvider(config = {}, deps = {}) {
 }
 
 function normalizeModule(module, source) {
-  const rerank = module?.rerank;
-  const expand = module?.expand;
-  if (typeof rerank === 'function') {
-    return { name: String(module.name ?? source.split('/').pop()), kind: 'rerank', rerank, source };
-  }
-  if (typeof expand === 'function') {
-    return { name: String(module.name ?? source.split('/').pop()), kind: 'expand', expand, source };
+  // 两种写法都收：命名导出（`export function rerank`）与默认导出对象（`export default { rerank }`）。
+  // 后者是第三方提供方最自然的写法（工厂函数 + 默认导出），不必逼人家改风格。
+  const fallback = String(source).split('/').pop();
+  for (const target of [module, module?.default]) {
+    if (!target || typeof target !== 'object') continue;
+    const name = String(target.name ?? module?.name ?? fallback);
+    if (typeof target.rerank === 'function') return { name, kind: 'rerank', rerank: target.rerank, source };
+    if (typeof target.expand === 'function') return { name, kind: 'expand', expand: target.expand, source };
   }
   return null;
 }
