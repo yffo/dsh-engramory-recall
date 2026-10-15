@@ -46,9 +46,21 @@ window.__ModuleLoader__.load({
       btn: { background: 'transparent', border: `1px solid ${dim(18)}`, borderRadius: '6px', color: 'inherit', cursor: 'pointer', padding: '1px 8px', fontSize: '11.5px' },
     };
 
-    /** minScore 代价曲线最多显示 6 行（均匀抽样，首尾必留）。 */
+    /**
+     * 列表兜底（0.13.9）：不是数组就当空列表，数组里的非对象元素（null / 字符串）滤掉 ——
+     * 渲染期读 `x.id` 抛异常 = 「记忆」页签整片白屏，只有人肉打开面板才看得见。
+     */
+    const objsOnly = (value) => (Array.isArray(value) ? value : []).filter((item) => item && typeof item === 'object');
+
+    /**
+     * 字符串清单兜底（0.13.9）：跟 objsOnly 同族，但只留字符串 —— 存**路径标签**的字段
+     * （finding.files）不能过 objsOnly：那一版按「必须是对象」过滤，会把整条路径都扔光。
+     */
+    const strsOnly = (value) => (Array.isArray(value) ? value : []).filter((item) => typeof item === 'string');
+
+    /** minScore 代价曲线最多显示 6 行（均匀抽样，首尾必留）；points 自己也过 objsOnly。 */
     const sampleCurve = (points) => {
-      const list = Array.isArray(points) ? points : [];
+      const list = objsOnly(points);
       if (list.length <= 6) return list;
       const step = (list.length - 1) / 5;
       const out = [];
@@ -56,15 +68,65 @@ window.__ModuleLoader__.load({
       return out;
     };
 
+    /**
+     * 显示层的数字净化（0.13.9）：进面板的数字先过这一道 —— 非有限数（NaN / Infinity /
+     * 根本不是数字的东西）显示成「—」，而不是把账本里的脏值原样摊给用户看。
+     * **只改显示、不动数据**：返回 null 表示「这个数不可信」。
+     */
+    const finiteNum = (value) => {
+      // 超出安全整数范围的数也当不可信：`1e+21` 这种值不是「一个能被相信的计数」，
+      // 面板里印出来只会让人以为真有其事。
+      const ok = (n) => Number.isFinite(n) && Math.abs(n) <= Number.MAX_SAFE_INTEGER;
+      if (typeof value === 'number') return ok(value) ? value : null;
+      if (typeof value === 'string' && value.trim() !== '') {
+        const n = Number(value);
+        return ok(n) ? n : null;
+      }
+      return null;
+    };
+
+    /** 数字 + 单位；不可信就只给「—」。 */
+    const fmtNum = (value, unit = '') => {
+      const n = finiteNum(value);
+      return n === null ? '—' : `${n}${unit}`;
+    };
+
+    /**
+     * 计数 + 单位：字段整个缺失时按 0 显示（老宿主没这个数，现状如此），
+     * 但**有值却不可信**（NaN / Infinity）时给「—」—— 不把坏数字洗成 0（0.13.9）。
+     */
+    const fmtCount = (value, unit = '') => fmtNum(value === undefined || value === null ? 0 : value, unit);
+
+    /** 比例 → 百分比文本；不可信就「—」（不假装 0%）。 */
+    const fmtPct = (ratio, digits = 0) => {
+      const n = finiteNum(ratio);
+      return n === null ? '—' : `${(n * 100).toFixed(digits)}%`;
+    };
+
+    /** 毫秒 → 「12s」；不可信就「—」。 */
+    const fmtSecs = (ms) => {
+      const n = finiteNum(ms);
+      return n === null ? '—' : `${Math.round(n / 1000)}s`;
+    };
+
+    /** 三位开关：on / off / —（不知道）。「关」和「不知道」是两回事（0.13.9）。 */
+    const fmtFlag = (value) => (value === undefined || value === null ? '—' : value ? 'on' : 'off');
+
+    /**
+     * 字节 → 人话。字段整个缺失按 0 显示（老宿主没这个数，现状如此），
+     * 但**有值却不可信**时给「—」—— 跟 fmtCount 一个道理：不把坏数字洗成 0 B（0.13.9）。
+     */
     const fmtBytes = (n) => {
-      const v = Number(n) || 0;
+      const v = n === undefined || n === null ? 0 : finiteNum(n);
+      if (v === null) return '—';
       if (v < 1024) return `${v} B`;
       if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
       return `${(v / 1024 / 1024).toFixed(2)} MB`;
     };
 
     const fmtTime = (ms) => {
-      const d = new Date(Number(ms) || Date.now());
+      const at = finiteNum(ms);
+      const d = new Date(at ? at : Date.now());
       const p = (n) => String(n).padStart(2, '0');
       return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     };
@@ -120,30 +182,32 @@ window.__ModuleLoader__.load({
 
     function LogEntry({ entry, expanded, onToggle }) {
       const tone = entry.kind === 'hit' ? 'hit' : entry.kind === 'skip' ? 'skip' : entry.kind === 'deny' ? 'deny' : (entry.kind === 'sediment' || entry.kind === 'archive-auto') ? 'sediment' : 'empty';
-      const label = entry.kind === 'hit' ? `注入 ${entry.injected} 条`
+      const label = entry.kind === 'hit' ? `注入 ${fmtNum(entry.injected, ' 条')}`
         : entry.kind === 'skip' ? '跳过'
         : entry.kind === 'deny' ? '拦截写入'
         : entry.kind === 'deny-error' ? '闸门异常'
         : entry.kind === 'sediment' ? '沉淀提醒'
         : entry.kind === 'archive-auto' ? '自动归档' : '无命中';
-      const hits = Array.isArray(entry.hits) ? entry.hits : [];
+      // 0.13.9 起连元素一起兜：hits 不是数组、或数组里混了 null / 字符串，都当「没有明细」，
+      // 不再读 hit.id 抛异常（渲染期抛异常 = 整片白屏）。
+      const hits = objsOnly(entry.hits);
 
       return h('div', { style: { padding: '7px 0', borderBottom: `1px solid ${dim(8)}` } },
         h('div', { style: S.row },
           h('span', { style: { ...S.mono, ...S.muted } }, fmtTime(entry.at)),
           h('span', { style: S.chip(tone) }, label),
           h('span', { style: { flex: '1 1 240px', minWidth: '180px' } }, entry.query || '（空）'),
-          entry.kind === 'hit' ? h('span', { style: { ...S.muted, ...S.mono } }, `${entry.chars} 字符`) : null,
+          entry.kind === 'hit' ? h('span', { style: { ...S.muted, ...S.mono } }, fmtNum(entry.chars, ' 字符')) : null,
           entry.nudge ? h('span', { style: S.chip('empty') }, '含记忆提示') : null,
           hits.length ? h('button', { style: S.btn, onClick: onToggle }, expanded ? '收起' : '展开') : null),
         hits.length ? h('div', { style: { ...S.row, marginTop: '3px' } },
           hits.slice(0, 4).map((hit, i) => h('span', {
             key: i,
             style: { ...S.mono, ...S.muted, fontSize: '11.5px' },
-          }, `${hit.id}${hit.section ? ` § ${hit.section}` : ''} · ${hit.score}`))) : null,
+          }, `${hit.id}${hit.section ? ` § ${hit.section}` : ''} · ${fmtNum(hit.score)}`))) : null,
         entry.reason ? h('div', { style: { ...S.muted, fontSize: '11.5px', marginTop: '4px' } }, entry.reason) : null,
         expanded ? h('pre', { style: { ...S.pre, ...S.mono, fontSize: '11.5px' } },
-          hits.map((hit, i) => `${i + 1}. ${hit.id}${hit.section ? ` § ${hit.section}` : ''}  score=${hit.score}  ${hit.bytes}B`).join('\n')) : null);
+          hits.map((hit, i) => `${i + 1}. ${hit.id}${hit.section ? ` § ${hit.section}` : ''}  score=${fmtNum(hit.score)}  ${fmtNum(hit.bytes, 'B')}`).join('\n')) : null);
     }
 
     function MemoryView() {
@@ -161,10 +225,16 @@ window.__ModuleLoader__.load({
           error ? h('div', { style: { color: '#c2803a' } }, `宿主路由不可用：${error}`) : null);
       }
 
-      const log = Array.isArray(state.log) ? state.log : [];
-      const notes = Array.isArray(state.notes) ? state.notes : [];
+      // 列表类字段一律过 objsOnly：**非数组当空列表，数组里的非对象元素滤掉**。
+      // 这四条都在页签分发**之前**被摸到（log 的统计累计、notes 的过滤器、findings 的
+      // 严重性排序、writeAudit 的拦截计数），元素是 null 时它们直接抛 —— 那是七个页签
+      // 一起白屏，连 return 都走不到（0.13.9）。
+      const log = objsOnly(state.log);
+      const notes = objsOnly(state.notes);
       const audit = state.audit || null;
-      const findings = Array.isArray(audit && audit.findings) ? audit.findings : [];
+      const findings = objsOnly(audit && audit.findings);
+      // 摘要行的严重性计数：半截 summary（有 notes 没 bySeverity）不许把体检页签打成白屏。
+      const sevCounts = (audit && audit.summary && audit.summary.bySeverity) || {};
       const SEV_ORDER = { error: 0, warn: 1, info: 2 };
       const SEV_COLOR = { error: '#c25a4a', warn: '#c2803a', info: dim(55) };
       const SEV_ICON = { error: '⛔', warn: '⚠️', info: 'ℹ️' };
@@ -172,11 +242,11 @@ window.__ModuleLoader__.load({
       const totals = state.totals || { notes: 0, docs: 0, bytes: 0 };
       const index = state.index || { lines: 0, bytes: 0, text: '' };
       const writeAudit = state.writeAudit || { epoch: '', entries: [] };
-      const auditEntries = Array.isArray(writeAudit.entries) ? writeAudit.entries : [];
+      const auditEntries = objsOnly(writeAudit.entries);
       const denied = auditEntries.filter((e) => e.verdict === 'deny').length;
       const archive = state.archive || { plans: [], skipped: [] };
-      const plans = Array.isArray(archive.plans) ? archive.plans : [];
-      const archSkipped = Array.isArray(archive.skipped) ? archive.skipped : [];
+      const plans = objsOnly(archive.plans);
+      const archSkipped = objsOnly(archive.skipped);
       const stats = log.reduce((acc, item) => {
         acc[item.kind] = (acc[item.kind] || 0) + 1;
         if (item.kind === 'hit') acc.chars += Number(item.chars) || 0;
@@ -187,6 +257,12 @@ window.__ModuleLoader__.load({
     // 使用账的字段可能来自旧版宿主（少字段）或半截日志 —— 这一节用到什么就先补齐什么，
     // 别让一个属性访问或 toFixed 把整个「记忆」页签打成白屏（回归测试盯着这条）。
     const rounds = (usage && usage.perRound) || {};
+    // 列表类字段统一过 objsOnly（0.13.9）：非数组当空列表、数组里的非对象元素滤掉。
+    const positions = objsOnly(usage && usage.positions);
+    const neverOpened = objsOnly(usage && usage.neverOpened);
+    const openLag = (usage && usage.openLag) || null;
+    // 页脚回显用的 config：整块缺失（老宿主 / 半截快照）与「字段是 false」是两件事 —— 「不知道」不能写成「关」。
+    const config = state.config && typeof state.config === 'object' ? state.config : null;
 
       const shown = filter
         ? notes.filter((note) => `${note.file} ${note.title} ${note.description}`.toLowerCase().includes(filter.toLowerCase()))
@@ -267,16 +343,16 @@ window.__ModuleLoader__.load({
         error ? h('div', { style: { color: '#c2803a', marginTop: '4px' } }, `状态过期：${error}`) : null,
 
         h('div', { style: { ...S.row, gap: '22px', marginTop: '12px' } },
-          h(Stat, { label: '笔记', value: totals.notes, hint: `${totals.docs} 个检索片段` }),
+          h(Stat, { label: '笔记', value: fmtNum(totals.notes), hint: fmtNum(totals.docs, ' 个检索片段') }),
           h(Stat, { label: '库大小', value: fmtBytes(totals.bytes) }),
-          h(Stat, { label: '索引', value: `${index.lines} 行`, hint: fmtBytes(index.bytes) }),
-          h(Stat, { label: '本轮注入', value: stats.hit ? `${stats.hit} 次` : '—', hint: stats.chars ? `共 ${stats.chars} 字符` : '尚无命中' }),
+          h(Stat, { label: '索引', value: fmtNum(index.lines, ' 行'), hint: fmtBytes(index.bytes) }),
+          h(Stat, { label: '本轮注入', value: stats.hit ? `${stats.hit} 次` : '—', hint: stats.chars ? `共 ${fmtNum(stats.chars)} 字符` : '尚无命中' }),
           h(Stat, { label: '闸门拦截', value: stats.deny ? `${stats.deny} 次` : '—', hint: stats.deny ? '写记忆库被拒' : '尚无拦截' })),
 
         h('div', { style: { ...S.row, gap: '6px', marginTop: '16px' } },
           tabBtn('log', `召回日志（${log.length}）`),
           tabBtn('usage', usage && usage.pointers
-            ? `使用账（${Math.round((usage.openRate || 0) * 100)}%）`
+            ? `使用账（${fmtPct(usage.openRate ?? 0)}）`
             : '使用账'),
           tabBtn('notes', `笔记（${notes.length}）`),
           tabBtn('audit', (() => {
@@ -308,21 +384,22 @@ window.__ModuleLoader__.load({
               '，攒够 20 条指针再回来看判据。')
           : h('div', null,
               h('div', { style: { ...S.row, gap: '20px', alignItems: 'flex-start' } },
-                h(Stat, { label: '注入指针', value: `${usage.pointers || 0} 条`, hint: `${usage.injectRounds || 0} 轮` }),
+                h(Stat, { label: '注入指针', value: fmtCount(usage.pointers, ' 条'), hint: fmtCount(usage.injectRounds, ' 轮') }),
                 h(Stat, {
                   label: '打开率',
-                  value: `${((usage.openRate || 0) * 100).toFixed(1)}%`,
-                  hint: `${usage.used || 0} 条被 read/edit`,
+                  // 缺字段（老宿主）按 0 显示，NaN 这种脏值给「—」—— 不假装 0%（0.13.9）。
+                  value: fmtPct(usage.openRate ?? 0, 1),
+                  hint: `${fmtCount(usage.used)} 条被 read/edit`,
                 }),
                 h(Stat, {
                   label: '注入过的笔记',
-                  value: `${usage.uniqueNotes || 0} 篇`,
-                  hint: usage.neverOpened && usage.neverOpened.length ? `${usage.neverOpened.length} 篇从未被打开` : '都至少打开过一次',
+                  value: fmtCount(usage.uniqueNotes, ' 篇'),
+                  hint: neverOpened.length ? `${neverOpened.length} 篇从未被打开` : '都至少打开过一次',
                 }),
                 h(Stat, {
                   label: '打开延迟',
-                  value: usage.openLag && usage.openLag.n ? `${Math.round(usage.openLag.median / 1000)}s` : '—',
-                  hint: usage.openLag && usage.openLag.n ? `p90 ${Math.round(usage.openLag.p90 / 1000)}s · n=${usage.openLag.n}` : '还没被打开过',
+                  value: openLag && openLag.n ? fmtSecs(openLag.median) : '—',
+                  hint: openLag && openLag.n ? `p90 ${fmtSecs(openLag.p90)} · n=${fmtNum(openLag.n)}` : '还没被打开过',
                 })),
 
               // 分母要按「谁在问」拆开：委派轮（子代理）的提示词里没有「先看记忆库」这回事，
@@ -338,7 +415,7 @@ window.__ModuleLoader__.load({
                   '按提问者：',
                   rows.map(([name, v], i) => h('span', { key: name },
                     i ? ' · ' : '',
-                    `${name} ${v.injectRounds} 轮 / ${v.pointers} 条 / 打开 ${v.used}（${((v.openRate || 0) * 100).toFixed(1)}%）`)));
+                    `${name} ${fmtCount(v.injectRounds, ' 轮')} / ${fmtCount(v.pointers, ' 条')} / 打开 ${fmtCount(v.used)}（${fmtPct(v.openRate ?? 0, 1)}）`)));
               })(),
 
               h('div', { style: { fontSize: '11.5px', marginTop: '10px' } },
@@ -350,14 +427,15 @@ window.__ModuleLoader__.load({
                 ? h('div', null,
                     h('div', { style: S.title }, '把 minScore 抬高会付出什么'),
                     h('div', { style: { ...S.muted, fontSize: '11.5px' } },
-                      `配对 ${usage.scoreCurve.n} 条指针 / ${usage.scoreCurve.rounds} 轮 —— 「其中被打开过的」那一列就是代价。`),
+                      // 半截 scoreCurve（有 n 没 rounds）以前会把 undefined 写进句子 —— 全部过格式化（0.13.9）。
+                      `配对 ${fmtNum(usage.scoreCurve.n)} 条指针 / ${fmtNum(usage.scoreCurve.rounds)} 轮 —— 「其中被打开过的」那一列就是代价。`),
                     h('table', { style: { ...S.table, marginTop: '4px' } },
                       h('tbody', null,
                         sampleCurve(usage.scoreCurve.points || []).map((p, i) => h('tr', { key: i },
-                          h('td', { style: { ...S.td, ...S.mono, whiteSpace: 'nowrap' } }, `≥ ${p.minScore}`),
-                          h('td', { style: S.td }, `留下 ${p.injected}`),
-                          h('td', { style: S.td }, `砍 ${(p.cutRate * 100).toFixed(0)}%`),
-                          h('td', { style: { ...S.td, ...(p.lost ? { color: 'var(--danger, #d33)' } : {}) } }, `丢过 ${p.lost}`)))))) 
+                          h('td', { style: { ...S.td, ...S.mono, whiteSpace: 'nowrap' } }, `≥ ${fmtNum(p.minScore)}`),
+                          h('td', { style: S.td }, `留下 ${fmtNum(p.injected)}`),
+                          h('td', { style: S.td }, `砍 ${fmtPct(p.cutRate)}`),
+                          h('td', { style: { ...S.td, ...(p.lost ? { color: 'var(--danger, #d33)' } : {}) } }, `丢过 ${fmtNum(p.lost)}`)))))) 
                 : null,
 
               h('div', { style: S.title }, '位置级曲线'),
@@ -365,31 +443,40 @@ window.__ModuleLoader__.load({
                 '第 N 条指针被打开的比例 —— 尾部长期是 0，说明窗口比需要的大。'),
               h('table', { style: { ...S.table, marginTop: '4px' } },
                 h('tbody', null,
-                  (usage.positions || []).filter((p) => p.injected > 0).map((p, i) => h('tr', { key: i },
-                    h('td', { style: { ...S.td, whiteSpace: 'nowrap' } }, `第 ${i + 1} 条`),
-                    h('td', { style: { ...S.td, ...S.mono } }, `${p.opened}/${p.injected}`),
-                    h('td', { style: { ...S.td, ...S.mono, whiteSpace: 'nowrap' } },
-                      p.injected ? `${Math.round((p.opened / p.injected) * 100)}%` : '—'),
-                    h('td', { style: { ...S.td, width: '45%' } },
-                      h('div', { style: { height: '6px', borderRadius: '3px', background: dim(12), overflow: 'hidden' } },
-                        h('div', {
-                          style: {
-                            height: '100%',
-                            width: `${Math.round((p.injected ? p.opened / p.injected : 0) * 100)}%`,
-                            background: '#2e9e63',
-                          },
-                        }))))))),
+                  positions.filter((p) => finiteNum(p.injected) > 0).map((p, i) => {
+                    const opened = finiteNum(p.opened);
+                    const injected = finiteNum(p.injected);
+                    const rate = opened === null || !injected ? null : opened / injected;
+                    // 标签取桶自己的 position：过滤之后的下标会把数据挂到错的标签上（0.13.9）。
+                    const pos = finiteNum(p.position);
+                    return h('tr', { key: i },
+                      h('td', { style: { ...S.td, whiteSpace: 'nowrap' } }, `第 ${pos === null ? i + 1 : pos} 条`),
+                      h('td', { style: { ...S.td, ...S.mono } }, `${fmtNum(opened)}/${fmtNum(injected)}`),
+                      h('td', { style: { ...S.td, ...S.mono, whiteSpace: 'nowrap' } },
+                        rate === null ? '—' : fmtPct(rate)),
+                      h('td', { style: { ...S.td, width: '45%' } },
+                        h('div', { style: { height: '6px', borderRadius: '3px', background: dim(12), overflow: 'hidden' } },
+                          h('div', {
+                            style: {
+                              height: '100%',
+                              // 条形宽度是样式不是文字：坏数字按 0 宽画，别让 NaN% 变成非法 CSS。
+                              width: `${Math.round((rate === null ? 0 : rate) * 100)}%`,
+                              background: '#2e9e63',
+                            },
+                          }))));
+                  }))),
 
               h('div', { style: S.title }, '预算与分数'),
               h('div', { style: { fontSize: '12px' } },
                 rounds.median === undefined
                   ? '还没有逐轮记录（这一节要重启一次 App 让新宿主开始写）。'
-                  : `每轮注入 ${rounds.median} 条（最少 ${rounds.min} / p90 ${rounds.p90} / 最多 ${rounds.max}）`,
-                rounds.windowLimit ? ` · 顶满窗口 ${rounds.fullRounds || 0}/${usage.injectRounds || 0} 轮` : '',
-                rounds.median === undefined ? '' : ` · 有内容被截断 ${usage.truncatedRounds || 0} 轮（缩成裸文件名 ${usage.collapsed || 0} 条、整条没列出 ${usage.dropped || 0} 条，涉及 ${usage.droppedRounds || 0} 轮）`),
+                  // 半截 perRound（有 median、缺 min/p90/max）以前会漏出 undefined —— 缺的印「—」（0.13.9）。
+                  : `每轮注入 ${fmtNum(rounds.median)} 条（最少 ${fmtNum(rounds.min)} / p90 ${fmtNum(rounds.p90)} / 最多 ${fmtNum(rounds.max)}）`,
+                rounds.windowLimit ? ` · 顶满窗口 ${fmtCount(rounds.fullRounds)}/${fmtCount(usage.injectRounds)} 轮` : '',
+                rounds.median === undefined ? '' : ` · 有内容被截断 ${fmtCount(usage.truncatedRounds)} 轮（缩成裸文件名 ${fmtCount(usage.collapsed)} 条、整条没列出 ${fmtCount(usage.dropped)} 条，涉及 ${fmtCount(usage.droppedRounds)} 轮）`),
               h('div', { style: { ...S.muted, fontSize: '11.5px', marginTop: '2px' } },
                 usage.scoreStats && usage.scoreStats.n
-                  ? `注入分：中位 ${usage.scoreStats.median} · p10 ${usage.scoreStats.p10} · p90 ${usage.scoreStats.p90} · 首尾落差中位 ${usage.scoreStats.spreadMedian}（共 ${usage.scoreStats.n} 轮）`
+                  ? `注入分：中位 ${fmtNum(usage.scoreStats.median)} · p10 ${fmtNum(usage.scoreStats.p10)} · p90 ${fmtNum(usage.scoreStats.p90)} · 首尾落差中位 ${fmtNum(usage.scoreStats.spreadMedian)}（共 ${fmtCount(usage.scoreStats.n)} 轮）`
                   : '还没有带分数的注入记录（早期日志没有 scores 字段）。'),
 
               (usage.skipReasons && Object.keys(usage.skipReasons).length) || (usage.emptyReasons && Object.keys(usage.emptyReasons).length)
@@ -397,9 +484,9 @@ window.__ModuleLoader__.load({
                     h('div', { style: S.title }, '为什么没注入'),
                     h('table', { style: { ...S.table, marginTop: '4px' } },
                       h('thead', null, h('tr', null,
-                        h('th', { style: S.th }, '跳过（' + (usage.skipRounds || 0) + ' 轮）'),
+                        h('th', { style: S.th }, '跳过（' + fmtCount(usage.skipRounds, ' 轮') + '）'),
                         h('th', { style: S.th }, '次数'),
-                        h('th', { style: S.th }, '零命中（' + (usage.emptyRounds || 0) + ' 轮）'),
+                        h('th', { style: S.th }, '零命中（' + fmtCount(usage.emptyRounds, ' 轮') + '）'),
                         h('th', { style: S.th }, '次数'))),
                       h('tbody', null, (() => {
                         const left = Object.entries(usage.skipReasons || {});
@@ -407,25 +494,25 @@ window.__ModuleLoader__.load({
                         const rows = Math.max(left.length, right.length);
                         return Array.from({ length: rows }, (_, i) => h('tr', { key: i },
                           h('td', { style: S.td }, left[i] ? REASON_LABELS[left[i][0]] || left[i][0] : ''),
-                          h('td', { style: { ...S.td, ...S.mono } }, left[i] ? left[i][1] : ''),
+                          h('td', { style: { ...S.td, ...S.mono } }, left[i] ? fmtNum(left[i][1]) : ''),
                           h('td', { style: S.td }, right[i] ? REASON_LABELS[right[i][0]] || right[i][0] : ''),
-                          h('td', { style: { ...S.td, ...S.mono } }, right[i] ? right[i][1] : '')));
+                          h('td', { style: { ...S.td, ...S.mono } }, right[i] ? fmtNum(right[i][1]) : '')));
                       })())))
                 : null,
 
-              usage.neverOpened && usage.neverOpened.length
+              neverOpened.length
                 ? h('div', null,
                     h('div', { style: S.title }, '注入过、但从没被打开'),
                     h('div', { style: { ...S.muted, fontSize: '11.5px' } },
                       '注入了却没被用上 —— 要么那条不该注入（词面太泛），要么它是被别的方式用掉了。'),
                     h('div', { style: { marginTop: '4px' } },
-                      usage.neverOpened.map((n, i) => h('div', {
+                      neverOpened.map((n, i) => h('div', {
                         key: i,
                         style: { ...S.row, gap: '8px', padding: '3px 0', borderTop: i ? `1px solid ${dim(8)}` : 'none' },
                       },
                         h('span', { style: { ...S.mono, fontSize: '11.5px' } }, n.id),
                         h('span', { style: { ...S.muted, fontSize: '11px' } },
-                          `注入 ${n.injected} 次${n.lastAt ? ` · 最近 ${fmtTime(n.lastAt)}` : ''}`)))))
+                          `注入 ${fmtCount(n.injected, ' 次')}${n.lastAt ? ` · 最近 ${fmtTime(n.lastAt)}` : ''}`)))))
                 : null))
           : null,
 
@@ -454,20 +541,27 @@ window.__ModuleLoader__.load({
         tab === 'audit' ? h('div', { style: S.card },
           audit && audit.summary
             ? h('div', { style: { ...S.muted, fontSize: '11.5px', marginBottom: '8px' } },
-                `${audit.summary.notes} 篇笔记 · 结构错 ${audit.summary.bySeverity.error} · 告警 ${audit.summary.bySeverity.warn} · 提示 ${audit.summary.bySeverity.info}`)
+                // 计数走 fmtCount（跟别处一个规矩）：半截 summary 缺哪个字段就印 0，
+                // 而不是 `undefined.error` 把体检页签打成白屏（0.13.9）。
+                `${fmtCount(audit.summary.notes)} 篇笔记 · 结构错 ${fmtCount(sevCounts.error)} · 告警 ${fmtCount(sevCounts.warn)} · 提示 ${fmtCount(sevCounts.info)}`)
             : null,
           sortedFindings.length
-            ? sortedFindings.map((f, i) => h('div', {
-                key: `${f.code}-${i}`,
-                style: { padding: '7px 0', borderTop: i ? `1px solid ${dim(10)}` : 'none' },
-              },
-                h('div', { style: { ...S.row, gap: '7px', alignItems: 'baseline' } },
-                  h('span', null, SEV_ICON[f.severity] || '•'),
-                  h('span', { style: { ...S.mono, fontSize: '10.5px', padding: '1px 6px', borderRadius: '999px', background: dim(8), border: `1px solid ${dim(16)}` } }, f.code),
-                  h('span', { style: { color: SEV_COLOR[f.severity] || 'inherit' } }, f.message)),
-                f.files && f.files.length
-                  ? h('div', { style: { ...S.muted, ...S.mono, fontSize: '11px', marginTop: '3px', paddingLeft: '20px' } }, f.files.join('  ·  '))
-                  : null))
+            ? sortedFindings.map((f, i) => {
+                // files 在契约里是**路径字符串数组**：不是数组就当没有清单（跟 hits 一个规矩），
+                // 元素只留字符串 —— 以前直接 .join，宿主换个形状就是体检页签白屏（0.13.9）。
+                const files = strsOnly(f.files);
+                return h('div', {
+                  key: `${f.code}-${i}`,
+                  style: { padding: '7px 0', borderTop: i ? `1px solid ${dim(10)}` : 'none' },
+                },
+                  h('div', { style: { ...S.row, gap: '7px', alignItems: 'baseline' } },
+                    h('span', null, SEV_ICON[f.severity] || '•'),
+                    h('span', { style: { ...S.mono, fontSize: '10.5px', padding: '1px 6px', borderRadius: '999px', background: dim(8), border: `1px solid ${dim(16)}` } }, f.code),
+                    h('span', { style: { color: SEV_COLOR[f.severity] || 'inherit' } }, f.message)),
+                  files.length
+                    ? h('div', { style: { ...S.muted, ...S.mono, fontSize: '11px', marginTop: '3px', paddingLeft: '20px' } }, files.join('  ·  '))
+                    : null);
+              })
             : h('div', { style: S.muted }, audit ? '✅ 没发现结构问题、失联路径或可疑重复。' : '还没拿到体检结果（宿主侧未就绪）。'))
           : null,
 
@@ -537,9 +631,10 @@ window.__ModuleLoader__.load({
                       onClick: () => runArchive(plan.file),
                     }, busy === plan.file ? '搬运中…' : busy === ALL ? '排队中' : '执行归档')),
                   h('div', { style: { ...S.muted, fontSize: '11.5px', marginTop: '3px' } },
-                    `${plan.batchCount} 个批次章节，搬走 ${plan.freshCount} 个 → `,
-                    (plan.historyFiles || []).map((hf) => `${hf.file}（${hf.batchCount} 批 / ${fmtBytes(hf.bytes)}）`).join('、'),
-                    plan.existingCount ? `（已有 ${plan.existingCount} 份归档文件，续写）` : ''),
+                    `${fmtNum(plan.batchCount)} 个批次章节，搬走 ${fmtNum(plan.freshCount)} 个 → `,
+                    // 0.13.9 起 historyFiles 也过 objsOnly：宿主换成非数组形状不再整片白屏。
+                    objsOnly(plan.historyFiles).map((hf) => `${hf.file}（${fmtNum(hf.batchCount)} 批 / ${fmtBytes(hf.bytes)}）`).join('、'),
+                    plan.existingCount ? `（已有 ${fmtNum(plan.existingCount)} 份归档文件，续写）` : ''),
                   res ? h('div', {
                     style: { color: res.ok ? '#2e9e63' : '#d24b4b', fontSize: '11.5px', marginTop: '3px' },
                   }, res.text) : null);
@@ -566,12 +661,16 @@ window.__ModuleLoader__.load({
           : null,
 
         // 配置回显：面板要能回答「现在到底按哪套参数在召回」。
+        // 0.13.9 起：整块缺失就明说「配置未回显」，半截时缺的字段印「—」，只有真拿到 falsy 才写 off ——
+        // 「关」和「不知道」是两回事（以前是 undefined / off，等于替宿主撒谎）。
         h('div', { style: { ...S.muted, marginTop: '14px', ...S.mono, fontSize: '11px' } },
-          `maxPointers=${state.config?.maxPointers} maxChars=${state.config?.maxChars} ` +
-          `minScore=${state.config?.minScore} nudge=${state.config?.nudge ? 'on' : 'off'} ` +
-          `guardWrites=${state.config?.guardWrites ? 'on' : 'off'} ` +
-          `autoArchive=${state.config?.autoArchive ? 'on' : 'off'} ` +
-          `enabled=${state.config?.enabled ? 'on' : 'off'}`));
+          !config
+            ? '配置未回显（宿主这一侧的 state 里没有 config）—— 重启一次 App 再看。'
+            : `maxPointers=${fmtNum(config.maxPointers)} maxChars=${fmtNum(config.maxChars)} ` +
+              `minScore=${fmtNum(config.minScore)} nudge=${fmtFlag(config.nudge)} ` +
+              `guardWrites=${fmtFlag(config.guardWrites)} ` +
+              `autoArchive=${fmtFlag(config.autoArchive)} ` +
+              `enabled=${fmtFlag(config.enabled)}`));
     }
 
     return {
