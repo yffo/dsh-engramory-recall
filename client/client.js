@@ -46,6 +46,16 @@ window.__ModuleLoader__.load({
       btn: { background: 'transparent', border: `1px solid ${dim(18)}`, borderRadius: '6px', color: 'inherit', cursor: 'pointer', padding: '1px 8px', fontSize: '11.5px' },
     };
 
+    /** minScore 代价曲线最多显示 6 行（均匀抽样，首尾必留）。 */
+    const sampleCurve = (points) => {
+      const list = Array.isArray(points) ? points : [];
+      if (list.length <= 6) return list;
+      const step = (list.length - 1) / 5;
+      const out = [];
+      for (let i = 0; i < 6; i += 1) out.push(list[Math.round(i * step)]);
+      return out;
+    };
+
     const fmtBytes = (n) => {
       const v = Number(n) || 0;
       if (v < 1024) return `${v} B`;
@@ -172,7 +182,7 @@ window.__ModuleLoader__.load({
         if (item.kind === 'hit') acc.chars += Number(item.chars) || 0;
         return acc;
       }, { hit: 0, empty: 0, skip: 0, deny: 0, chars: 0 });
-      // 落盘的使用账（宿主侧 summarizeUsage 的汇总 + 三句判据）。老宿主没这个字段就整块不显示。
+      // 落盘的使用账（宿主侧 summarizeUsage 的汇总 + 四句判据）。老宿主没这个字段就整块不显示。
       const usage = state.usage && typeof state.usage === 'object' ? state.usage : null;
     // 使用账的字段可能来自旧版宿主（少字段）或半截日志 —— 这一节用到什么就先补齐什么，
     // 别让一个属性访问或 toFixed 把整个「记忆」页签打成白屏（回归测试盯着这条）。
@@ -316,9 +326,23 @@ window.__ModuleLoader__.load({
                 })),
 
               h('div', { style: { fontSize: '11.5px', marginTop: '10px' } },
-                [usage.verdicts && usage.verdicts.open, usage.verdicts && usage.verdicts.budget, usage.verdicts && usage.verdicts.reason]
+                [usage.verdicts && usage.verdicts.open, usage.verdicts && usage.verdicts.budget, usage.verdicts && usage.verdicts.reason, usage.verdicts && usage.verdicts.curve]
                   .filter(Boolean)
                   .map((v, i) => h('div', { key: i, style: S.muted }, `· ${v}`))),
+
+              usage.scoreCurve && usage.scoreCurve.n
+                ? h('div', null,
+                    h('div', { style: S.title }, '把 minScore 抬高会付出什么'),
+                    h('div', { style: { ...S.muted, fontSize: '11.5px' } },
+                      `配对 ${usage.scoreCurve.n} 条指针 / ${usage.scoreCurve.rounds} 轮 —— 「其中被打开过的」那一列就是代价。`),
+                    h('table', { style: { ...S.table, marginTop: '4px' } },
+                      h('tbody', null,
+                        sampleCurve(usage.scoreCurve.points || []).map((p, i) => h('tr', { key: i },
+                          h('td', { style: { ...S.td, ...S.mono, whiteSpace: 'nowrap' } }, `≥ ${p.minScore}`),
+                          h('td', { style: S.td }, `留下 ${p.injected}`),
+                          h('td', { style: S.td }, `砍 ${(p.cutRate * 100).toFixed(0)}%`),
+                          h('td', { style: { ...S.td, ...(p.lost ? { color: 'var(--danger, #d33)' } : {}) } }, `丢过 ${p.lost}`)))))) 
+                : null,
 
               h('div', { style: S.title }, '位置级曲线'),
               h('div', { style: { ...S.muted, fontSize: '11.5px' } },

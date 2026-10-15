@@ -19,9 +19,11 @@ import {
   appendUsage,
   budgetVerdict,
   noteIdFromPath,
+  minScoreCurve,
   pickInjected,
   reasonVerdict,
   readUsage,
+  scoreCurveVerdict,
   summarizeUsage,
   usageVerdict,
 } from '../usage.js';
@@ -179,6 +181,76 @@ test('召回汇总：判据在样本太小时不下结论', () => {
   assert.match(usageVerdict({ pointers: 100, openRate: 0.45 }), /中间档/);
 });
 
+test('minScore 代价曲线：零代价上限 = 砍得掉、又没丢过「被打开过」的那道最高门槛', () => {
+  const t = 1_700_000_000_000;
+  const lines = [
+    { ts: t, kind: 'hit', ids: ['a.md', 'b.md', 'c.md'], scores: [9, 6, 2], injected: 3 },
+    { ts: t + 10, kind: 'used', id: 'b.md', via: 'read', lagMs: 10 },
+    { ts: t + 20, kind: 'hit', ids: ['d.md', 'e.md'], scores: [4, 3.5], injected: 2 },
+    { ts: t + 30, kind: 'hit', ids: ['f.md'], injected: 1 },
+    { ts: t + 40, kind: 'hit', ids: ['g.md', 'h.md'], scores: [5], injected: 2 },
+  ];
+  const curve = minScoreCurve(lines);
+  assert.equal(curve.n, 5, '只有 a~e 五条能配对（f 是没分数的老日志、g/h 对不上号）');
+  assert.equal(curve.rounds, 2);
+  assert.equal(curve.legacy, 1);
+  assert.equal(curve.unaligned, 1);
+  assert.equal(curve.opened, 1, 'b.md 是唯一被打开过的配对');
+  // 「≥ 6」恰好留下 b.md（门槛是 `score >= minScore` 保留，不是 >）⇒ 零代价上限就是 6
+  assert.deepEqual(curve.freeCap, { minScore: 6, injected: 2, cut: 3, cutRate: 0.6, lost: 0 });
+  const at6 = curve.points.find((p) => p.minScore === 6);
+  assert.equal(at6.lost, 0, 'b.md 的分数正好是 6，抬到 6 还留着它');
+  assert.equal(at6.injected, 2, '只剩 a(9) 与 b(6)');
+  const last = curve.points.at(-1);
+  assert.equal(last.minScore, 9.001, '网格末尾补一行「最高分 + 0.001」，保证「全砍掉」那一行总在');
+  assert.equal(last.injected, 0);
+  assert.equal(last.lost, 1, 'b.md 也丢了');
+});
+
+test('minScore 代价曲线：没分数、没打开都给人话，不是 NaN', () => {
+  const blank = minScoreCurve([]);
+  assert.equal(blank.n, 0);
+  assert.equal(blank.rounds, 0);
+  assert.equal(blank.opened, 0);
+  assert.deepEqual(blank.points, []);
+  assert.equal(blank.freeCap, null);
+  assert.match(blank.note, /只能看形状/, '空数据也要带一句人话（面板/尺子直接印它）');
+  const onlyLegacy = minScoreCurve([{ ts: 1, kind: 'hit', ids: ['a.md'] }]);
+  assert.equal(onlyLegacy.n, 0);
+  assert.equal(onlyLegacy.legacy, 1);
+  assert.match(scoreCurveVerdict(onlyLegacy), /还没有能校准 minScore 的日志/);
+
+  const noOpens = minScoreCurve([
+    { ts: 1, kind: 'hit', ids: ['a.md', 'b.md'], scores: [5, 1] },
+  ]);
+  assert.equal(noOpens.opened, 0);
+  assert.match(scoreCurveVerdict(noOpens), /只能看形状/, '样本太小时不下结论');
+});
+
+test('minScore 判据：有零代价上限 / 没有零代价 两种话术', () => {
+  const t = 1_700_000_000_000;
+  // 五条被打开的都排在前面，低分那头全是没人看的 ⇒ 抬门槛有零代价的空间
+  const cheap = minScoreCurve([
+    { ts: t, kind: 'hit', ids: ['a.md', 'b.md', 'x.md'], scores: [9, 6, 1] },
+    { ts: t + 1, kind: 'hit', ids: ['d.md', 'e.md', 'y.md'], scores: [8, 7, 1.5] },
+    { ts: t + 2, kind: 'hit', ids: ['f.md', 'z.md'], scores: [5, 2] },
+    ...['a.md', 'b.md', 'd.md', 'e.md', 'f.md'].map((id, i) => ({ ts: t + 10 + i, kind: 'used', id, via: 'read' })),
+  ]);
+  assert.equal(cheap.opened, 5);
+  assert.equal(cheap.freeCap.minScore, 5, '门槛 5 能砍掉 x(1)、y(1.5)、z(2) 而不碰任何被打开过的（f 正好是 5，留着）');
+  assert.equal(cheap.freeCap.cut, 3);
+  assert.match(scoreCurveVerdict(cheap), /零代价上限：minScore ≥ 5 能砍掉 3 条注入/);
+
+  // 被打开过的就在最低分那头 ⇒ 抬一点就丢真的，没有零代价的门槛
+  const costly = minScoreCurve([
+    { ts: t, kind: 'hit', ids: ['x.md', 'a.md', 'b.md', 'c.md', 'd.md', 'e.md'], scores: [9, 1.8, 1.5, 1.2, 1.1, 1.05] },
+    ...['a.md', 'b.md', 'c.md', 'd.md', 'e.md'].map((id, i) => ({ ts: t + 10 + i, kind: 'used', id, via: 'read' })),
+  ]);
+  assert.equal(costly.opened, 5);
+  assert.equal(costly.freeCap, null);
+  assert.match(scoreCurveVerdict(costly), /没有「砍掉又不丢」的门槛/);
+});
+
 // ── 插件层：注入 → 打开 的完整链路 ─────────────────────────────────────────
 
 function fixtureStore() {
@@ -319,4 +391,6 @@ test('分数分布：注入分的中位/p10/p90 与首尾落差', () => {
   const legacy = summarizeUsage([{ ts: 1, kind: 'hit', ids: ['a.md'] }]);
   assert.equal(legacy.scoreStats.n, 0);
   assert.equal(legacy.scoreStats.median, 0);
+  assert.ok(summary.scoreCurve, '汇总里要带上 minScore 代价曲线（面板与尺子同一份）');
+  assert.ok(Array.isArray(summary.scoreCurve.points));
 });

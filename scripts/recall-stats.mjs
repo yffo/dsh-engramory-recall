@@ -18,7 +18,7 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { budgetVerdict, readUsage, reasonVerdict, summarizeUsage, usageVerdict, USAGE_FILE } from '../usage.js';
+import { budgetVerdict, readUsage, reasonVerdict, scoreCurveVerdict, summarizeUsage, usageVerdict, USAGE_FILE } from '../usage.js';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -115,6 +115,21 @@ for (const [code, n, kind] of reasonRows) {
 }
 console.log(`\n注入分：中位 ${summary.scoreStats.median} · p10 ${summary.scoreStats.p10} · p90 ${summary.scoreStats.p90}`
   + `（第 1 条与最后一条的落差中位 ${summary.scoreStats.spreadMedian}）—— minScore 就照这排数字定`);
+
+console.log('\n## 把 minScore 抬高会付出什么');
+const curve = summary.scoreCurve;
+if (!curve.n) {
+  console.log(`还没有可用的（分, 是否被打开）配对 —— ${curve.legacy} 轮日志没有 scores 字段（0.13.3 之前的写法），`
+    + `${curve.unaligned} 轮分数与文件名对不上号。`);
+} else {
+  console.log('| 门槛 | 留下注入 | 砍掉 | 砍掉比例 | 其中被打开过的 |');
+  console.log('| --- | --- | --- | --- | --- |');
+  for (const point of curve.points) {
+    console.log(`| ≥ ${point.minScore} | ${point.injected} | ${point.cut} | ${(point.cutRate * 100).toFixed(1)}% | ${point.lost} |`);
+  }
+  console.log(`\n（配对 ${curve.n} 条指针 / ${curve.rounds} 轮；进不了曲线的：${curve.legacy} 轮老日志、${curve.unaligned} 轮对不上号）`);
+}
+console.log(`- ${scoreCurveVerdict(curve)}`);
 
 console.log('\n## 判据');
 console.log(`- ${usageVerdict(summary)}`);

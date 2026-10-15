@@ -26,7 +26,7 @@ import { checkIndexWrite, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES } fro
 import { registerSkill, skillStatus } from './skill.js';
 import { appendAudit, readAudit, GUARD_EPOCH } from './audit.js';
 import {
-  appendUsage, readUsage, summarizeUsage, usageVerdict, budgetVerdict, reasonVerdict,
+  appendUsage, readUsage, summarizeUsage, usageVerdict, budgetVerdict, reasonVerdict, scoreCurveVerdict,
   noteIdFromPath, pickInjected,
 } from './usage.js';
 import { readDocs } from './store.js';
@@ -1129,7 +1129,7 @@ export function apply(ctx, config = {}) {
           sendJson(res, 200, {
             ...storeSnapshot(),
             log: recallLog,
-            // 落盘日志的汇总（打开率/位置级曲线/预算压力/原因分布/注入分）与三句判据 ——
+            // 落盘日志的汇总（打开率/位置级曲线/预算压力/原因分布/注入分/minScore 代价曲线）与四句判据 ——
             // 面板与 `npm run recall:stats` 走同一套算法（usage.js），免得两处口径漂移。
             usage: (() => {
               const summary = summarizeUsage(readUsage(settings.storePath), {
@@ -1141,6 +1141,7 @@ export function apply(ctx, config = {}) {
                   open: usageVerdict(summary),
                   budget: budgetVerdict(summary),
                   reason: reasonVerdict(summary),
+                  curve: scoreCurveVerdict(summary.scoreCurve),
                 },
               };
             })(),

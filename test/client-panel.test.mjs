@@ -133,7 +133,40 @@ const richUsage = () => ({
   skipReasons: { chitchat: 5, duplicate: 2 },
   emptyReasons: { 'no-hits': 3, 'below-min-score': 1, 'made-up-code': 1 },
   scoreStats: { n: 6, median: 12.345, p10: 4.1, p90: 30.2, spreadMedian: 8.888 },
-  verdicts: { open: '打开率 37.5% 在中间档', budget: '窗口基本用满', reason: '跳过以寒暄为主' },
+  scoreCurve: {
+    n: 20, rounds: 4, legacy: 19, unaligned: 0, opened: 0,
+    points: [
+      { minScore: 3.051, injected: 20, cut: 0, cutRate: 0, lost: 0 },
+      { minScore: 3.152, injected: 19, cut: 1, cutRate: 0.05, lost: 0 },
+      { minScore: 3.745, injected: 17, cut: 3, cutRate: 0.15, lost: 0 },
+      { minScore: 5.441, injected: 15, cut: 5, cutRate: 0.25, lost: 1 },
+      { minScore: 7.52, injected: 10, cut: 10, cutRate: 0.5, lost: 2 },
+      { minScore: 9.372, injected: 5, cut: 15, cutRate: 0.75, lost: 3 },
+      { minScore: 12.493, injected: 3, cut: 17, cutRate: 0.85, lost: 3 },
+      { minScore: 14.754, injected: 0, cut: 20, cutRate: 1, lost: 4 },
+    ],
+  },
+  verdicts: {
+    open: '打开率 37.5% 在中间档',
+    budget: '窗口基本用满',
+    reason: '跳过以寒暄为主',
+    curve: '被打开过的指针只有 0 条 —— 曲线只能看形状',
+  },
+});
+
+test('面板：minScore 代价曲线最多显示 6 行，首尾必留', async () => {
+  const long = {
+    n: 40, rounds: 9, legacy: 0, unaligned: 0, opened: 3,
+    points: Array.from({ length: 12 }, (_, i) => ({
+      minScore: i + 1, injected: 12 - i, cut: i, cutRate: i / 12, lost: 0,
+    })),
+  };
+  const text = await render(fakeState({ ...richUsage(), scoreCurve: long }));
+  const rows = text.match(/≥ \d+/g) || [];
+  assert.equal(rows.length, 6, `12 个门槛只该抽 6 行，实际 ${rows.length} 行`);
+  assert.match(text, /≥ 1(?![0-9])/, '首行必留');
+  assert.match(text, /≥ 12(?![0-9])/, '尾行必留');
+  assert.match(text, /配对 40 条指针 \/ 9 轮/);
 });
 
 /** 渲染一次：返回抠出来的文本（渲染抛异常时测试自然失败）。 */
@@ -153,7 +186,7 @@ async function renderWith(values) {
   return textsOf(tree).join(' | ');
 }
 
-test('面板：使用账页签把打开率、位置级曲线、预算、原因分布、三句判据都渲染出来', async () => {
+test('面板：使用账页签把打开率、位置级曲线、预算、原因分布、minScore 代价曲线、四句判据都渲染出来', async () => {
   const text = await render(fakeState(richUsage()));
   assert.match(text, /注入指针/, '应当有四张卡片的第一张');
   assert.match(text, /打开率/);
@@ -172,9 +205,16 @@ test('面板：使用账页签把打开率、位置级曲线、预算、原因�
   assert.match(text, /made-up-code/, '没列过的原因码要原样显示，不能藏起来');
   assert.match(text, /注入过、但从没被打开/);
   assert.match(text, /b\.md/);
-  assert.match(text, /打开率 37\.5% 在中间档/, '三句判据要照搬宿主的原话');
+  assert.match(text, /打开率 37\.5% 在中间档/, '四句判据要照搬宿主的原话');
   assert.match(text, /窗口基本用满/);
   assert.match(text, /跳过以寒暄为主/);
+  assert.match(text, /曲线只能看形状/, '第四句判据（minScore 曲线）要照搬宿主的原话');
+  assert.match(text, /把 minScore 抬高会付出什么/);
+  assert.match(text, /配对 20 条指针 \/ 4 轮/);
+  assert.match(text, /≥ 3\.152/);
+  assert.match(text, /砍 5%/);
+  assert.match(text, /丢过 1/);
+  assert.doesNotMatch(text, /≥ 3\.745/, '8 个门槛抽 6 行，第 3 行应当被抽样跳过');
 });
 
 test('面板：老宿主没有 usage 字段时给一句「重启后就有」，而不是白屏或崩', async () => {

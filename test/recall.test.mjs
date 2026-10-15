@@ -376,7 +376,7 @@ test('宿主路由：状态接口返回记忆库快照，且每次召回都留�
     assert.equal(emptyLog[0].kind, 'empty');
     assert.ok(emptyLog.every((entry) => entry.at > 0 && typeof entry.query === 'string'));
 
-    // 使用账（面板「使用账」页签的数据源）：宿主侧汇总 + 三句判据都得在，
+    // 使用账（面板「使用账」页签的数据源）：宿主侧汇总 + 四句判据都得在，
     // 否则前端只能显示一个空壳。maxPointers 不传进去，窗口用满了几轮就永远是 0。
     const usageBody = JSON.parse(afterEmpty.body).usage;
     assert.ok(usageBody && typeof usageBody === 'object', 'state 路由应当带 usage 汇总');

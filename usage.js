@@ -228,6 +228,8 @@ export function summarizeUsage(lines, options = {}) {
     // no-hits / below-min-score …）。设计性的跳过与真问题混在一起就看不出异常。
     skipReasons: toCounts(skipReasons),
     emptyReasons: toCounts(emptyReasons),
+    // 「把 minScore 抬高会付出什么」——分数光有统计量没用，得能算成代价才可决策
+    scoreCurve: minScoreCurve(lines, options),
     // 注进来的分有多高、第 1 条比最后一条高多少 —— 校准 minScore 与窗口宽度的依据
     scoreStats: {
       n: topScores.length,
@@ -240,6 +242,124 @@ export function summarizeUsage(lines, options = {}) {
 }
 
 const round3 = (n) => (Number.isFinite(n) ? Number(n.toFixed(3)) : 0);
+
+/**
+ * 一句判据（尺子与面板共用）：`minScore` 该不该抬、能抬到哪。
+ * @param {ReturnType<typeof minScoreCurve>} curve
+ */
+export function scoreCurveVerdict(curve) {
+  if (!curve || !curve.n) {
+    return '还没有能校准 minScore 的日志（要 0.13.3 之后的 hit 行：带 scores）';
+  }
+  if (curve.opened < 5) {
+    return `被打开过的指针只有 ${curve.opened} 条 —— 曲线只能看形状，别据此定 minScore`;
+  }
+  if (curve.freeCap) {
+    return `零代价上限：minScore ≥ ${curve.freeCap.minScore} 能砍掉 ${curve.freeCap.cut} 条注入`
+      + `（${(curve.freeCap.cutRate * 100).toFixed(1)}%），且没丢过任何被打开过的指针`;
+  }
+  return '没有「砍掉又不丢」的门槛 —— 被打开过的指针分数并不比没被打开的集中，抬 minScore 只会伤到自己';
+}
+
+/**
+ * `minScore` 代价曲线：把「把门槛抬高」算成两个数 —— 砍掉几条注入、代价是丢掉几条
+ * **真的被打开过**的指针。
+ *
+ * 光有 `scoreStats`（中位/p10/p90）没法决策：中位 3.2 不代表门槛 3.2 划算 ——
+ * 要看被砍掉的那一撮里有没有人真的在用。数据全在召回日志里：`hit` 行的 `ids` 与
+ * `scores`（同一顺序、一一对应）、`used` 行的 `id` 与时间；归属规则与位置级打开率
+ * 一致（一次 `used` 算在它之前最近一次注入过这条的那一轮上）。
+ *
+ * 返回：
+ * - `points`：候选门槛（取观测到的分位点）各自的 砍掉/留下/丢掉被打开过的
+ * - `freeCap`：**零代价上限** —— 能砍掉最多注入、又没丢过任何被打开过的指针的那个门槛
+ * - `unaligned` / `legacy`：对不上号的轮数（`scores` 与 `ids` 长度不等、或老日志没有 `scores`），
+ *   它们不进曲线但要说出来 —— 静默少算比算错更坏。
+ *
+ * @param {object[]} lines 日志行（任意顺序）
+ * @param {{steps?: number}} [options]
+ */
+export function minScoreCurve(lines, options = {}) {
+  const steps = Math.min(40, Math.max(3, Number(options.steps) || 12));
+  const sorted = [...(lines ?? [])].sort((a, b) => Number(a?.ts ?? 0) - Number(b?.ts ?? 0));
+  const rounds = [];
+  const usedEvents = [];
+  let unaligned = 0;
+  let legacy = 0;
+  for (const line of sorted) {
+    const kind = String(line?.kind ?? '');
+    if (kind === 'used' && line?.id) {
+      usedEvents.push({ at: Number(line?.ts ?? 0), id: String(line.id) });
+      continue;
+    }
+    const ids = Array.isArray(line?.ids) ? line.ids.map(String).filter(Boolean) : [];
+    if (!ids.length) continue;
+    const scores = Array.isArray(line?.scores) ? line.scores.map(Number) : null;
+    if (!scores || !scores.length) {
+      // 0.13.3 之前的日志没有 scores 字段：这一轮只能进「无从校准」的计数。
+      legacy += 1;
+      continue;
+    }
+    if (scores.length !== ids.length || !scores.every(Number.isFinite)) {
+      unaligned += 1;
+      continue;
+    }
+    rounds.push({ at: Number(line?.ts ?? 0), ids, scores, opened: new Set() });
+  }
+
+  // 归属：一次 used 算在它之前最近一次注入过这条的那一轮上（与位置级打开率同规则）
+  for (const ev of usedEvents) {
+    let hit = null;
+    for (const round of rounds) {
+      if (round.at > ev.at) break;
+      if (round.ids.includes(ev.id)) hit = round;
+    }
+    if (hit) hit.opened.add(ev.id);
+  }
+
+  const pairs = [];
+  for (const round of rounds) {
+    round.ids.forEach((id, i) => pairs.push({ score: round.scores[i], opened: round.opened.has(id) }));
+  }
+  const injectedTotal = pairs.length;
+  const openedTotal = pairs.filter((p) => p.opened).length;
+  const observed = [...new Set(pairs.map((p) => p.score))].sort((a, b) => a - b);
+  // 候选门槛：从低到高取分位点（含最低分与「比最高分再高一点」= 全砍）
+  const candidates = [];
+  for (let i = 0; i < steps; i += 1) {
+    const idx = Math.floor((i / (steps - 1)) * (observed.length - 1));
+    if (observed.length) candidates.push(observed[idx]);
+  }
+  if (observed.length) candidates.push(Number((observed[observed.length - 1] + 0.001).toFixed(4)));
+  const points = [...new Set(candidates)].map((minScore) => {
+    const kept = pairs.filter((p) => p.score >= minScore);
+    const cut = injectedTotal - kept.length;
+    const lost = pairs.filter((p) => p.score < minScore && p.opened).length;
+    return {
+      minScore: round3(minScore),
+      injected: kept.length,
+      cut,
+      cutRate: injectedTotal ? round3(cut / injectedTotal) : 0,
+      lost,
+    };
+  });
+  // 零代价上限：lost === 0 里最大的那个门槛（严格大于最低分，否则「砍 0 条」也算零代价）
+  const free = points.filter((p) => p.lost === 0 && p.cut > 0);
+  const freeCap = free.length ? free[free.length - 1] : null;
+  return {
+    n: injectedTotal,
+    opened: openedTotal,
+    rounds: rounds.length,
+    unaligned,
+    legacy,
+    points,
+    freeCap,
+    note:
+      openedTotal < 5
+        ? `被打开过的指针只有 ${openedTotal} 条 —— 曲线现在只能看形状，别据此定 minScore`
+        : '',
+  };
+}
 
 /**
  * 一句判据（尺子与面板共用）：打开率该往哪边走。
