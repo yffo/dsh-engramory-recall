@@ -18,7 +18,7 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { budgetVerdict, readUsage, summarizeUsage, usageVerdict, USAGE_FILE } from '../usage.js';
+import { budgetVerdict, readUsage, reasonVerdict, summarizeUsage, usageVerdict, USAGE_FILE } from '../usage.js';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -31,6 +31,20 @@ const STORE = expandHome(opt('--store', '~/memory/engramory'));
 const POSITIONS = Math.max(1, Number(opt('--positions', '5')) || 5);
 const LIMIT = Math.max(10, Number(opt('--limit', '2000')) || 2000);
 const wantJson = argv.includes('--json');
+/** 原因码 → 人话（与 usage.js 的 reasonVerdict 用同一套口径）。 */
+const REASON_LABELS = {
+  chitchat: '寒暄 / 答话',
+  'too-short': '消息太短',
+  'empty-message': '空消息',
+  duplicate: '与上一轮重复',
+  'store-not-configured': '没配库路径',
+  'index-empty': '库里没有笔记',
+  'no-hits': '一条都不匹配',
+  'below-min-score': '被 minScore 拦住',
+  unspecified: '没记原因（早期日志）',
+};
+const reasonLabel = (code) => REASON_LABELS[code] ?? code;
+
 // 窗口上限只用于「用满了几轮」这一句；不给就不算（--max-pointers 5）
 const MAX_POINTERS = Math.max(0, Number(opt('--max-pointers', '0')) || 0);
 
@@ -88,9 +102,24 @@ console.log(`| 被缩成裸文件名 | ${summary.collapsed} 条（${summary.coll
 console.log(`| 因预算整条没列出 | ${summary.dropped} 条（${summary.droppedRounds} 轮） |`);
 console.log(`| 打开得多快（距注入） | 中位 ${summary.openLag.median ? `${(summary.openLag.median / 1000).toFixed(1)} 秒` : '—'} · p90 ${summary.openLag.p90 ? `${(summary.openLag.p90 / 1000).toFixed(1)} 秒` : '—'} |`);
 
+console.log('\n## 为什么会没注入（设计性的安静 vs 真漏）');
+console.log('| 原因 | 轮数 | 是哪一类 |');
+console.log('| --- | --- | --- |');
+const reasonRows = [];
+for (const [code, n] of Object.entries(summary.skipReasons ?? {})) reasonRows.push([code, n, '跳过']);
+for (const [code, n] of Object.entries(summary.emptyReasons ?? {})) reasonRows.push([code, n, '空手']);
+reasonRows.sort((a, b) => b[1] - a[1]);
+if (!reasonRows.length) console.log('| （还没有带原因的记录） | 0 | — |');
+for (const [code, n, kind] of reasonRows) {
+  console.log(`| ${reasonLabel(code)} | ${n} | ${kind} |`);
+}
+console.log(`\n注入分：中位 ${summary.scoreStats.median} · p10 ${summary.scoreStats.p10} · p90 ${summary.scoreStats.p90}`
+  + `（第 1 条与最后一条的落差中位 ${summary.scoreStats.spreadMedian}）—— minScore 就照这排数字定`);
+
 console.log('\n## 判据');
 console.log(`- ${usageVerdict(summary)}`);
 console.log(`- ${budgetVerdict(summary)}`);
+console.log(`- ${reasonVerdict(summary)}`);
 
 if (summary.neverOpened.length) {
   console.log('\n## 从没被打开过的注入（按注入次数排）');

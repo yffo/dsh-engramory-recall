@@ -20,6 +20,7 @@ import {
   budgetVerdict,
   noteIdFromPath,
   pickInjected,
+  reasonVerdict,
   readUsage,
   summarizeUsage,
   usageVerdict,
@@ -264,4 +265,58 @@ test('插件接线：关掉 usageLog 就只留内存日志，一个字都不落�
   } finally {
     rmSync(store, { recursive: true, force: true });
   }
+});
+
+test('原因分布：skip/empty 的原因码分类计数，没带码的归 unspecified', () => {
+  const summary = summarizeUsage([
+    { ts: 1, kind: 'skip', query: '继续', reason: 'chitchat' },
+    { ts: 2, kind: 'skip', query: '嗯', reason: 'chitchat' },
+    { ts: 3, kind: 'skip', query: '好的', reason: 'too-short' },
+    { ts: 4, kind: 'skip', query: '旧日志这行', ids: [] },
+    { ts: 5, kind: 'empty', reason: 'below-min-score', topScore: 0.4, minScore: 0.5 },
+    { ts: 6, kind: 'empty', reason: 'no-hits' },
+  ]);
+  assert.equal(summary.skipRounds, 4);
+  assert.equal(summary.emptyRounds, 2);
+  assert.deepEqual(summary.skipReasons, { chitchat: 2, 'too-short': 1, unspecified: 1 });
+  assert.deepEqual(summary.emptyReasons, { 'below-min-score': 1, 'no-hits': 1 });
+  assert.match(reasonVerdict(summary), /没注入的 6 轮/);
+});
+
+test('原因判据：设计性的安静与真漏分开说；早期日志不下结论', () => {
+  const quiet = summarizeUsage(
+    Array.from({ length: 6 }, (_, i) => ({ ts: i + 1, kind: 'skip', query: '继续', reason: 'chitchat' })),
+  );
+  assert.match(reasonVerdict(quiet), /设计性的安静占大头/);
+
+  const leaky = summarizeUsage([
+    { ts: 1, kind: 'skip', query: '继续', reason: 'chitchat' },
+    { ts: 2, kind: 'empty', reason: 'below-min-score', topScore: 1.2, minScore: 2 },
+    { ts: 3, kind: 'empty', reason: 'no-hits' },
+    { ts: 4, kind: 'empty', reason: 'below-min-score', topScore: 1.1, minScore: 2 },
+  ]);
+  assert.match(reasonVerdict(leaky), /才是真漏/);
+
+  const legacy = summarizeUsage([{ ts: 1, kind: 'skip', query: '旧', ids: [] }]);
+  assert.match(reasonVerdict(legacy), /没有原因码/);
+});
+
+test('分数分布：注入分的中位/p10/p90 与首尾落差', () => {
+  // 分位数用的是全仓同一套 q()（nearest-rank 取低），所以给 5 行才看得出高低
+  const summary = summarizeUsage([
+    { ts: 1, kind: 'hit', ids: ['a.md', 'b.md'], scores: [1, 1] },
+    { ts: 2, kind: 'hit', ids: ['a.md', 'c.md'], scores: [2, 2] },
+    { ts: 3, kind: 'hit', ids: ['a.md', 'd.md'], scores: [3, 1] },
+    { ts: 4, kind: 'hit', ids: ['a.md', 'e.md'], scores: [4, 0] },
+    { ts: 5, kind: 'hit', ids: ['a.md', 'f.md'], scores: [10, 0] },
+  ]);
+  assert.equal(summary.scoreStats.n, 5);
+  assert.equal(summary.scoreStats.median, 3);
+  assert.equal(summary.scoreStats.p10, 1);
+  assert.equal(summary.scoreStats.p90, 4);
+  assert.equal(summary.scoreStats.spreadMedian, 2); // [0,1,2,4,10] 的中位
+  // 老的日志行没有 scores：不能当成 0 分参与统计
+  const legacy = summarizeUsage([{ ts: 1, kind: 'hit', ids: ['a.md'] }]);
+  assert.equal(legacy.scoreStats.n, 0);
+  assert.equal(legacy.scoreStats.median, 0);
 });

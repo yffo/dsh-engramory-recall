@@ -1,3 +1,23 @@
+## 0.13.3
+
+**把「这轮为什么没注入」写成能统计的原因码，并量掉一条走到门口的路。**
+
+- 原因码：`skip` 行现在带 `chitchat` / `too-short` / `empty-message` / `duplicate` /
+  `store-not-configured`；`empty` 行分 `index-empty` / `no-hits` / `below-min-score`，
+  并带上 `minScore` 与 `topScore`（`index.js` 新增导出 `searchableReason(text)`；
+  `isSearchable` 变成它的一层薄封装）。此前 `skip` 行只有一个光秃秃的 `kind`，
+  「寒暄门控」和「消息太短」这两种完全不同的信号在账上长得一模一样。
+- 注入分落盘：`hit` 行的 `ids` 旁边多一个一一对应的 `scores`。
+- 尺子（`npm run recall:stats`，随包发布）新增一节「为什么会没注入」：原因分类计数 +
+  注入分的中位 / p10 / p90 / 首尾落差，以及**第三句判据**（寒暄占大头 = 设计性的安静，
+  先别动参数；`below-min-score` / `no-hits` 占大头 = 真漏，照分数定 `minScore`；
+  早期日志没有原因码时明说「再聊几轮」）。面板 `usage` 字段同一套算法。
+- 文档：README 补原因码表、注入分说明，并把「让每轮自动注入也走语义」写进**被证伪的路**
+  （十三条）：174 条卷子上 hit@5 93.1% → 95.4%，但要**每一轮**把最多 10 条候选片段发给端点
+  （云端出网 / 本机 +130ms 且常驻 5.5GB）—— 而漏掉的指针在按需检索里仍能找回来，分工不变。
+- 测试 +4（`test/usage.test.mjs` 3 例：原因分布、三档判据分流、分数分位与老日志兼容；
+  `test/recall.test.mjs` 1 例：原因码）。
+
 ## 0.13.2
 
 **打开率尺子补上「预算压力」这一维：窗口调宽了，字跟上了吗。**

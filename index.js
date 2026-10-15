@@ -232,10 +232,20 @@ const MIN_QUERY_CHARS = 4;
  * 宁可漏检也不注入噪音——没命中时一个字都不进上下文，正是这套方案的成本优势。
  */
 export function isSearchable(text) {
+  return searchableReason(text) === '';
+}
+
+/**
+ * 不值得检索的原因码（可落盘、可统计）。空串 = 值得检索。
+ * 为什么要有码：落盘的召回日志里 `skip` 一旦不带原因，「这轮为什么没注入」就答不上来
+ * —— 寒暄门控和「太短」是两种完全不同的信号，前者是设计，后者可能说明 queryChars 太小。
+ */
+export function searchableReason(text) {
   const s = String(text ?? '').trim();
-  if (!s) return false;
-  if (CHITCHAT.test(s)) return false;
-  return s.length >= MIN_QUERY_CHARS;
+  if (!s) return 'empty-message';
+  if (CHITCHAT.test(s)) return 'chitchat';
+  if (s.length < MIN_QUERY_CHARS) return 'too-short';
+  return '';
 }
 
 const textOf = (message) =>
@@ -342,6 +352,11 @@ export function apply(ctx, config = {}) {
         query: entry.query,
         reason: entry.reason,
         ids: (entry.hits ?? []).map((hit) => hit.id).filter(Boolean),
+        // 分数与门槛一起落盘：否则「minScore 该定多高」永远只能猜。
+        // `scores` 与 `ids` 一一对应（同一顺序），第 1 条与最后一条的落差也靠它算。
+        scores: (entry.hits ?? []).map((hit) => hit.score).filter((n) => Number.isFinite(n)),
+        minScore: entry.minScore,
+        topScore: entry.topScore,
         injected: entry.injected,
         collapsed: entry.collapsed,
         dropped: entry.dropped,
@@ -710,8 +725,9 @@ export function apply(ctx, config = {}) {
       const query = rawQuery.length <= queryChars ? rawQuery : `${headPart}\n${rawQuery.slice(-half)}`;
       // 寒暄 / 答话 / 极短消息直接放行不检索：这类消息里没有可检索的意图，
       // 检索只会把噪音塞进上下文（见 CHITCHAT 上方注释的实测数据）。
-      if (!isSearchable(query)) {
-        record({ kind: 'skip', query: brief(query), hits: [] });
+      const notSearchable = searchableReason(query);
+      if (notSearchable) {
+        record({ kind: 'skip', query: brief(query), hits: [], reason: notSearchable });
         return decision;
       }
 
@@ -727,7 +743,9 @@ export function apply(ctx, config = {}) {
       const rotating = rotationPenalty < 1 && recentInjected.length > 0;
       const pool = rotating ? Math.max(maxPointers * 3, maxPointers + 4) : maxPointers;
       const minScore = Number(settings.minScore || 0);
-      const scored = search(indexOf(storePath), query, pool).filter((hit) => hit.score > minScore);
+      const docs = indexOf(storePath);
+      const found = search(docs, query, pool);
+      const scored = found.filter((hit) => hit.score > minScore);
       // 注入去重的键取「轮换前」的命中集：同查询 + 同候选 = 上一轮那批指针还在上下文里。
       // ⚠️ 不能用降权后的结果算 key——轮换自己就会改掉它，去重等于永不生效
       // （2026-10-14 真实库探针实测到）。candidate 是未排序前的原始 top-N，与轮换无关。
@@ -747,7 +765,16 @@ export function apply(ctx, config = {}) {
         turnCount - sedimentNudgedAt >= SEDIMENT_COOLDOWN;
       if (wantsSediment) sedimentNudgedAt = turnCount;
       if (!hits.length && !wantsRemember && !wantsSediment) {
-        record({ kind: 'empty', query: brief(query), hits: [] });
+        // 三种「空」要分清：库里没东西、一条都不匹配、全被 minScore 拦掉。
+        // `topScore` 是校准 minScore 的唯一依据 —— 只写「空」等于把门槛高低的责任推给猜。
+        record({
+          kind: 'empty',
+          query: brief(query),
+          hits: [],
+          reason: !docs.length ? 'index-empty' : !found.length ? 'no-hits' : 'below-min-score',
+          minScore,
+          topScore: found[0] ? Number(found[0].score.toFixed(3)) : undefined,
+        });
         return decision;
       }
 

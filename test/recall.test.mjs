@@ -14,7 +14,7 @@ import { join } from 'node:path';
 
 import { SYNONYMS, tokenize, queryTerms, buildIndex, search, expandQuery } from '../bm25.js';
 import { corpusFingerprint, splitNote, readDocs, chunkBody } from '../store.js';
-import { apply, isSearchable } from '../index.js';
+import { apply, isSearchable, searchableReason } from '../index.js';
 import { readAudit, GUARD_EPOCH } from '../audit.js';
 
 function fixtureStore() {
@@ -1198,4 +1198,17 @@ test('同义表：查询扩展出来的词项，必须是分词器认得的形�
   assert.ok(expanded.includes('chrome'), '应当桥到 chrome');
   assert.ok(expanded.some((t) => t.startsWith('不可') || t.startsWith('可用')), '应当桥出汉字双字');
   assert.ok(!expanded.includes('不可用'), '不得把整词「不可用」当词项 —— 它永远查不到');
+});
+
+test('不值得检索时给出的原因码（落盘日志靠它回答「这轮为什么没注入」）', () => {
+  assert.equal(searchableReason('继续'), 'chitchat');
+  assert.equal(searchableReason('好的'), 'chitchat');
+  // 寒暄表是整句锚定的：带上正事的「好了，帮我看下部署脚本」不是寒暄
+  assert.equal(searchableReason('好了，帮我看下部署脚本'), '');
+  assert.equal(searchableReason('ab'), 'too-short');
+  assert.equal(searchableReason('   '), 'empty-message');
+  assert.equal(searchableReason('帮我看下部署脚本'), '');
+  assert.equal(isSearchable('帮我看下部署脚本'), true);
+  // 两种「不检索」的码必须能分开：一个是设计（寒暄），一个可能是 queryChars 太小
+  assert.notEqual(searchableReason('继续'), searchableReason('ab'));
 });

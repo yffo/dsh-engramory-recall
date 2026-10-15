@@ -110,6 +110,7 @@ export function summarizeUsage(lines, options = {}) {
 
   const stats = {
     injectRounds: 0, pointers: 0, zeroRounds: 0, dedupeRounds: 0, sedimentRounds: 0, denyRounds: 0,
+    skipRounds: 0, emptyRounds: 0,
     used: 0, coldOpens: 0, firstAt: 0, lastAt: 0,
     // 预算压力：collapsed = 被缩成裸文件名的那几条，dropped = 因预算整条没列出的条数
     collapsed: 0, collapsedRounds: 0, dropped: 0, droppedRounds: 0, truncatedRounds: 0,
@@ -119,6 +120,14 @@ export function summarizeUsage(lines, options = {}) {
   const perNote = new Map();
   const roundSizes = [];
   const lags = [];
+  // 「为什么没注入」与「注进来的分有多高」——两者都是调参的依据，缺了就只能猜。
+  const skipReasons = new Map();
+  const emptyReasons = new Map();
+  const topScores = [];
+  const spreads = [];
+  const bump = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
+  const toCounts = (map) =>
+    Object.fromEntries([...map.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]))));
 
   for (const line of sorted) {
     const ts = Number(line?.ts ?? 0);
@@ -127,8 +136,15 @@ export function summarizeUsage(lines, options = {}) {
       if (!stats.firstAt) stats.firstAt = ts;
       stats.lastAt = ts;
     }
-    if (kind === 'empty') stats.zeroRounds += 1;
-    else if (kind === 'skip') stats.dedupeRounds += 1;
+    if (kind === 'empty') {
+      stats.zeroRounds += 1;
+      stats.emptyRounds += 1;
+      bump(emptyReasons, String(line?.reason ?? 'unspecified'));
+    } else if (kind === 'skip') {
+      stats.dedupeRounds += 1;
+      stats.skipRounds += 1;
+      bump(skipReasons, String(line?.reason ?? 'unspecified'));
+    }
     else if (kind === 'sediment') stats.sedimentRounds += 1;
     else if (kind === 'deny' || kind === 'deny-error') stats.denyRounds += 1;
 
@@ -137,6 +153,11 @@ export function summarizeUsage(lines, options = {}) {
       stats.injectRounds += 1;
       stats.pointers += ids.length;
       roundSizes.push(ids.length);
+      const scores = Array.isArray(line?.scores) ? line.scores.map(Number).filter(Number.isFinite) : [];
+      if (scores.length) {
+        topScores.push(scores[0]);
+        if (scores.length > 1) spreads.push(scores[0] - scores[scores.length - 1]);
+      }
       const collapsed = Math.max(0, Number(line?.collapsed) || 0);
       const dropped = Math.max(0, Number(line?.dropped) || 0);
       if (collapsed > 0) {
@@ -203,8 +224,22 @@ export function summarizeUsage(lines, options = {}) {
     },
     // 打开得多快：lagMs = 注入到被打开之间的毫秒数（中位/p90）
     openLag: { n: lagSorted.length, median: q(lagSorted, 0.5), p90: q(lagSorted, 0.9) },
+    // 「为什么没注入」：按原因码计数（chitchat / too-short / duplicate / index-empty /
+    // no-hits / below-min-score …）。设计性的跳过与真问题混在一起就看不出异常。
+    skipReasons: toCounts(skipReasons),
+    emptyReasons: toCounts(emptyReasons),
+    // 注进来的分有多高、第 1 条比最后一条高多少 —— 校准 minScore 与窗口宽度的依据
+    scoreStats: {
+      n: topScores.length,
+      median: round3(q([...topScores].sort((a, b) => a - b), 0.5)),
+      p10: round3(q([...topScores].sort((a, b) => a - b), 0.1)),
+      p90: round3(q([...topScores].sort((a, b) => a - b), 0.9)),
+      spreadMedian: round3(q([...spreads].sort((a, b) => a - b), 0.5)),
+    },
   };
 }
+
+const round3 = (n) => (Number.isFinite(n) ? Number(n.toFixed(3)) : 0);
 
 /**
  * 一句判据（尺子与面板共用）：打开率该往哪边走。
@@ -243,4 +278,46 @@ export function budgetVerdict(summary) {
       + '，且几乎没有被预算砍掉 —— 想再放宽只需动 maxPointers，maxChars 还够';
   }
   return `预算没有明显压力（${summary.truncatedRounds}/${rounds} 轮被截断）——窗口没顶到上限，是命中不够或 minScore 挡住了`;
+}
+
+/** 原因码 → 人话。统计里出现没列过的码时原样显示（别把新码藏起来）。 */
+const REASON_LABELS = {
+  chitchat: '寒暄 / 答话（设计如此）',
+  'too-short': '消息太短',
+  'empty-message': '空消息',
+  duplicate: '与上一轮重复',
+  'store-not-configured': '没配库路径',
+  'index-empty': '库里没有笔记',
+  'no-hits': '一条都不匹配',
+  'below-min-score': '被 minScore 拦住',
+  unspecified: '没记原因（早期日志）',
+};
+
+/**
+ * 第三句判据：没注入的那些轮次，原因分布说明了什么。
+ * 关键是分清「设计性的安静」与「真出了问题」——寒暄门控占大头是好事，
+ * `below-min-score` 或 `no-hits` 占大头才是要动参数的信号。
+ * @param {ReturnType<typeof summarizeUsage>} summary
+ */
+export function reasonVerdict(summary) {
+  if (!summary) return '还没有召回判定可看';
+  const merged = {};
+  for (const [code, n] of Object.entries(summary.skipReasons ?? {})) merged[code] = (merged[code] ?? 0) + n;
+  for (const [code, n] of Object.entries(summary.emptyReasons ?? {})) merged[code] = (merged[code] ?? 0) + n;
+  const entries = Object.entries(merged).sort((a, b) => b[1] - a[1]);
+  const total = entries.reduce((sum, [, n]) => sum + n, 0);
+  if (!total) return '还没有「没注入」的轮次可比';
+  const [topCode, topCount] = entries[0];
+  const topLabel = REASON_LABELS[topCode] ?? topCode;
+  // 早期日志没带原因码时别急着下结论：那是缺数据，不是「设计性的安静」。
+  if (topCode === 'unspecified') {
+    return `没注入的 ${total} 轮里 ${topCount} 轮没有原因码（0.13.3 之前落的盘这样）——`
+      + '再聊几轮，新日志会区分寒暄门控 / 太短 / minScore / 库里没有';
+  }
+  const head = `没注入的 ${total} 轮里，最多的是「${topLabel}」${((topCount / total) * 100).toFixed(0)}%`;
+  const blocked = (summary.emptyReasons?.['below-min-score'] ?? 0) + (summary.emptyReasons?.['no-hits'] ?? 0);
+  if (blocked / total > 0.3) {
+    return `${head}；但 ${blocked} 轮是「有分却不够 / 一条都不匹配」——这两类才是真漏，看 scoreStats 决定 minScore`;
+  }
+  return `${head}——设计性的安静占大头，参数先别动`;
 }
