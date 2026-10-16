@@ -21,10 +21,16 @@ import { readAudit } from './audit.js';
 // 现在直接问 `planArchive` 要结果：体检说的每一句，都是按钮真做得到的事。
 import { HISTORY_FILE_RE, planArchive } from './archive.js';
 import { DEFAULT_MAX_NOTES, DEFAULT_MAX_BYTES } from './store.js';
+import { countLines, DEFAULT_MAX_INDEX_LINES, DEFAULT_MAX_INDEX_BYTES } from './index-guard.js';
 
 export const NOTE_KINDS = ['user', 'feedback', 'project', 'reference'];
 export const INDEX_FILE = 'MEMORY.md';
 export const MAX_NOTE_BYTES = 100 * 1024;
+/**
+ * 索引里一行超过这个字符数就值得压 —— 索引一行是「一句短钩子 + 链接」，不是摘要。
+ * 200 行 × 128 字符 ≈ 25KB，正好落在字节上限那一档；所以这条既是提示，也是可执行的第一步。
+ */
+export const INDEX_LINE_SOFT_CHARS = 128;
 export const STALE_TODO_DAYS = 30;
 export const DUPLICATE_TOPIC_THRESHOLD = 0.5;
 
@@ -138,6 +144,52 @@ export function auditStore(storePath, options = {}) {
   for (const p of uniquePointers) {
     if (!mdFiles.includes(p)) add('error', 'index-missing-file', `索引指向的笔记不存在：${p}`, [p]);
   }
+  // ---- 索引容量：到顶之前要有人喊，到顶之后要有出路 ----
+  // 索引每轮都要读，而闸门只在**超限**那一刻拒写（`index-guard.js`）。也就是说：从 90% 到
+  // 100% 这段路上没有任何信号 —— 用户第一次知道，是某次写入被拒的时候。这里提前喊。
+  const idxCapLines = Number(options.indexMaxLines) > 0 ? Math.floor(Number(options.indexMaxLines)) : DEFAULT_MAX_INDEX_LINES;
+  const idxCapBytes = Number(options.indexMaxBytes) > 0 ? Math.floor(Number(options.indexMaxBytes)) : DEFAULT_MAX_INDEX_BYTES;
+  const idxLines = countLines(indexText);
+  const idxBytes = Buffer.byteLength(indexText);
+  const overIndex = idxLines > idxCapLines || idxBytes > idxCapBytes;
+  const nearIndex = !overIndex && (idxLines >= idxCapLines * 0.9 || idxBytes >= idxCapBytes * 0.9);
+  const shrinkPath = '压缩路径：① 面板「归档」页签执行归档（先备份，把长笔记的历史块搬进 -history.md）'
+    + '；② 把索引里「第 N 批」级的长行压成一句钩子、删掉已失效条目的行'
+    + '；③ 重写索引 —— 缩小的重写永远放行。改完看面板首屏「索引已用 x/上限」或 engramory_status。';
+  if (overIndex) {
+    add(
+      'error',
+      'index-over-cap',
+      `索引已经超限（${idxLines} 行 / ${idxBytes} 字节，上限 ${idxCapLines} 行 / ${idxCapBytes} 字节）：`
+      + '超限的部分会被宿主静默地不再召回，而且下一次**增长**的写入会被直接拒。' + shrinkPath,
+      [INDEX_FILE],
+    );
+  } else if (nearIndex) {
+    add(
+      'warn',
+      'index-near-cap',
+      `索引快满了（${idxLines}/${idxCapLines} 行、${idxBytes}/${idxCapBytes} 字节 ≥ 90%）：再往里加条目就会被拒。` + shrinkPath,
+      [INDEX_FILE],
+    );
+  }
+
+  // 索引里「一行太长」的地方，就是最该压的地方（一行 = 一句钩子 + 链接，不是摘要正文）。
+  const longIndexLines = [];
+  indexText.split('\n').forEach((line, i) => {
+    if (line.length > INDEX_LINE_SOFT_CHARS && line.trim()) longIndexLines.push({ line: i + 1, chars: line.length });
+  });
+  if (longIndexLines.length) {
+    const worst = longIndexLines.slice().sort((a, b) => b.chars - a.chars).slice(0, 3);
+    add(
+      'info',
+      'index-long-lines',
+      `索引里有 ${longIndexLines.length} 行超过 ${INDEX_LINE_SOFT_CHARS} 字符（最长的一行在第 ${worst[0].line} 行、${worst[0].chars} 字符）：`
+      + `这些是要压的地方（最长的三行：第 ${worst.map((w) => `${w.line} 行 ${w.chars} 字符`).join('、')}）。`
+      + '索引一行只该是「一句短钩子 + 链接」，细节留在笔记里。',
+      [INDEX_FILE],
+    );
+  }
+
   const unreferenced = [];
   // 归档器亲自出的计划：体检不再自己判定「哪篇该归档」
   const { plans: archivePlans, skipped: archiveSkipped } = planArchive(storePath, options.archive);

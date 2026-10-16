@@ -288,6 +288,59 @@ test('读侧上限：总字节超过 maxBytes → store-over-byte-cap', (t) => {
   assert.match(cap.message, /maxBytes/);
 });
 
+test('索引容量：到 90% 就报 index-near-cap，并给出可执行的三步', (t) => {
+  const lines = Array.from({ length: 180 }, (_, i) => `- 第 ${i + 1} 行：\`reference-n${i}.md\``);
+  const dir = makeStore({ 'reference-a.md': note('reference-a') }, `${lines.join('\n')}\n`);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const r = auditStore(dir, { now: NOW });   // 默认 200 行，180 行 = 90%
+  const near = r.findings.find((f) => f.code === 'index-near-cap');
+  assert.ok(near, '90% 必须报出来 —— 闸门只在超限那一刻拒写，这段路上原本没有信号');
+  assert.equal(near.severity, 'warn');
+  assert.match(near.message, /180\/200 行/);
+  assert.match(near.message, /再往里加条目就会被拒/);
+  assert.match(near.message, /归档/, '要给出可执行的那一步（面板归档页）');
+  assert.match(near.message, /缩小的重写永远放行/, '出口必须写清楚');
+  assert.equal(has(r, 'index-over-cap'), false, '没超限就不许报超限');
+});
+
+test('索引容量：已经超限时报 error 级的 index-over-cap（而不是 warn）', (t) => {
+  const lines = Array.from({ length: 210 }, (_, i) => `- 第 ${i + 1} 行：\`reference-n${i}.md\``);
+  const dir = makeStore({ 'reference-a.md': note('reference-a') }, `${lines.join('\n')}\n`);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const r = auditStore(dir, { now: NOW });
+  const over = r.findings.find((f) => f.code === 'index-over-cap');
+  assert.ok(over, '超限必须报');
+  assert.equal(over.severity, 'error');
+  assert.match(over.message, /已经超限（210 行/);
+  assert.match(over.message, /下一次\*\*增长\*\*的写入会被直接拒/);
+  assert.equal(has(r, 'index-near-cap'), false, '已超限时不再重复报「快满了」');
+});
+
+test('索引容量：一行太长会被指出来（并点名最长的三行）', (t) => {
+  const long = '- ' + 'x'.repeat(200);
+  const dir = makeStore({ 'reference-a.md': note('reference-a') }, `- \`reference-a.md\` 一句钩子\n${long}\n`);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const r = auditStore(dir, { now: NOW });
+  const found = r.findings.find((f) => f.code === 'index-long-lines');
+  assert.ok(found, '长行是「该压哪里」的唯一线索，必须报');
+  assert.equal(found.severity, 'info');
+  assert.match(found.message, /1 行超过 128 字符/);
+  assert.match(found.message, /第 2 行 202 字符/);
+});
+
+test('索引容量：正常库不报任何索引容量告警（不许误报）', (t) => {
+  const dir = makeStore({ 'reference-a.md': note('reference-a') }, '- `reference-a.md` 一句钩子\n');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const r = auditStore(dir, { now: NOW });
+  assert.equal(has(r, 'index-near-cap'), false);
+  assert.equal(has(r, 'index-over-cap'), false);
+  assert.equal(has(r, 'index-long-lines'), false);
+});
+
 test('读侧上限：没到顶时两条告警都不出现（默认库不许误报）', (t) => {
   const dir = makeStore({ 'reference-a.md': note('reference-a'), 'reference-b.md': note('reference-b') });
   t.after(() => rmSync(dir, { recursive: true, force: true }));

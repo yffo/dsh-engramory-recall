@@ -74,7 +74,7 @@ the share of injected pointers that were later read.
 | 🖼️ | One human-readable panel | The **Memory** tab: **three answers first** (what was nudged, how much was used, what got blocked), then eight detail tabs — read-only, refreshed every 3s, plus a glossary and a "which switch do I need?" list. A dashboard nobody can read is not a dashboard |
 | 🔒 | Data stays on this machine | Needs file read/write only, never network. No database, no index files, plain markdown you can read and diff |
 | 🎚️ | Hard ceilings | Per-turn characters, pointer count, and index size all have limits — and exceeding one is a **refusal**, not a silent truncation |
-| 🛡️🩺 | Write gate + doctor | Non-conforming filenames, missing frontmatter, or suspected real credentials are rejected at write time with an audit line; 14 static checks report orphans, index duplicates, broken paths, stale todos, and notes carried into context 20 times without ever being read |
+| 🛡️🩺 | Write gate + doctor | Non-conforming filenames, missing frontmatter, or suspected real credentials are rejected at write time with an audit line; 20 static checks report orphans, index duplicates, broken paths, stale todos, notes carried into context 20 times without ever being read, and **which index lines to compress before the cap refuses your next write** |
 | 🧹 | Consumption-side gate | Notes carried into context many times and never opened get demoted (default). Only well-evidenced ones leave the injection set; "old" merely demotes, it never blocks |
 | 📊 | Open-rate ledger + memory report | Every injection and every open lands as a JSONL line. `npm run recall:stats` shows the ledger, `npm run recall:report` prints a one-page report |
 | 🧩 | Usable from other hosts | `mcp.js` is a zero-dependency stdio MCP server, so the same store can be mounted read-only into Claude Code / Codex / Cursor |
@@ -194,6 +194,15 @@ Past 200 lines or 25KB it is **refused outright** — the refusal message quotes
 index is read in full every turn, so the part past the cap would silently stop being recalled. A
 rewrite that shortens the index goes through, and the doctor reports the overflow.
 
+**Q: The index is nearly full — what do I do?**
+Three steps, all doable yourself: ① in the panel, open **Memory → Archive** and run the archive pass
+(it backs up first, then moves long notes' history blocks into `<note>-history.md`); ② compress long
+lines — an index line should be "one short hook + a link", and the doctor's `index-long-lines` names
+the worst offenders by length; ③ rewrite the whole file shorter — **a shrinking rewrite always goes
+through**, so you can compress step by step. The doctor also speaks up *before* the refusal:
+`index-near-cap` (warn) at 90%, `index-over-cap` (error) once you are over. Watch the panel header's
+"index used x / cap" line afterwards.
+
 **Q: What does the write gate actually stop?**
 `write` and `edit` only: malformed filenames, missing frontmatter, and suspected real credentials
 (private key blocks, `sk-`, `ghp_`, `AKIA`, `xox`, JWTs) are rejected on the spot, the reason goes
@@ -251,7 +260,7 @@ instance) recall keeps working — you just don't get panel data.
 | `bm25.js` | Lexical retrieval: Chinese segmentation, IDF term selection, 177 synonym entries, bucketing for oversized notes, length normalization |
 | `store.js` · `render.js` | Reads the store and index (markdown is the only source of truth); renders the pointer block, including the rank-weighted snippet budget |
 | `guard.js` · `audit.js` · `index-guard.js` | Write gate (fail-closed), `.engramory-audit.jsonl`, and the index ceiling gate (refuses writes past 200 lines / 25KB) |
-| `doctor.js` · `confidence.js` | 14 static checks, report-only; consumption-side gate, whose thresholds are derived from this store's own base open rate |
+| `doctor.js` · `confidence.js` | 20 static checks, report-only; consumption-side gate, whose thresholds are derived from this store's own base open rate |
 | `archive.js` | Append-style sections → `<note>-history.md`, backup first, two-phase |
 | `usage.js` + `scripts/recall-stats.mjs` / `scripts/recall-report.mjs` | Open-rate ledger, `npm run recall:stats` detail, `npm run recall:report` report |
 | `client/client.js` · `mcp.js` · `skill.js` | The Memory tab (hand-written bundle, no build tooling); a zero-dependency stdio MCP server for other hosts (read-only); and the `engramory` skill (when to record, and when not to) |
