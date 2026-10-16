@@ -1,6 +1,6 @@
 {
   "name": "dsh-engramory-recall",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "description": "Local BM25 auto-recall, fail-closed write guard, static doctor, account-keeping ledger and a memory panel for a local markdown memory store (Format v1) — no network, no model, no daemon, no dependencies.",
   "keywords": [
     "dsh",
@@ -65,6 +65,7 @@
     "README.md",
     "docs/",
     "scripts/recall-stats.mjs",
+    "scripts/recall-report.mjs",
     "usage.js"
   ],
   "dsh": {
@@ -97,6 +98,7 @@
     "release:verify": "node scripts/verify-release.mjs",
     "bench:probe": "node bench/probe.mjs",
     "recall:stats": "node scripts/recall-stats.mjs",
+    "recall:report": "node scripts/recall-report.mjs",
     "bench:guard": "node bench/guard-sweep.mjs",
     "bench:foundation": "node bench/foundation.mjs"
   },

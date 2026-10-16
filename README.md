@@ -52,7 +52,7 @@
 | 🛡️ | 写入保护 | 不合规文件名 / 缺 frontmatter / 疑似真实密钥，写进来的那一刻就被打回并留审计 |
 | 🗄️ | 可逆归档 | 追加式章节搬进 `<笔记>-history.md`，先备份、两段式确认，没有一步不可逆 |
 | 🩺 | 体检器 | 12 项静态检查：孤儿笔记、索引重复、失联路径、超 100KB、待办 30 天没更新… |
-| 📊 | 打开率账本 | 每次提醒、每次被打开都落一行 JSONL，`npm run recall:stats` 出报告 |
+| 📊 | 打开率账本 + 记忆周报 | 每次提醒、每次被打开都落一行 JSONL；`npm run recall:stats` 看账，`npm run recall:report` 出一页人话周报（谁在干活、花了多少上下文、「本轮一个字都没进」也可见） |
 | 🧩 | 别的宿主也能蹭 | `mcp.js` 是零依赖的 stdio MCP 服务器，同一份库挂给 Claude Code / Codex / Cursor（只读） |
 
 ## 🚀 怎么用
@@ -67,6 +67,9 @@ dsh plugin --profile desktop add dsh-engramory-recall
 
 # 3) 用一阵子之后查账：注入了几轮、被打开几次、哪些轮次零命中
 cd ~/.dsh/profiles/desktop/node_modules/dsh-engramory-recall && npm run recall:stats
+
+# 4) 想要一页人话周报（谁在干活、花了多少上下文、这块记忆值不值）
+npm run recall:report -- --days 30
 ```
 
 装完就该有的样子：
@@ -203,7 +206,7 @@ dsh plugin --profile desktop remove dsh-engramory-recall
 | `index-guard.js` | 索引上限闸门（200 行 / 25KB 拒绝写入） |
 | `doctor.js` | 12 项静态体检，只报告不动手 |
 | `archive.js` | 追加式章节 → `<笔记>-history.md`，先备份、两段式 |
-| `usage.js` + `scripts/recall-stats.mjs` | 打开率账本与 `npm run recall:stats` |
+| `usage.js` + `scripts/recall-stats.mjs` / `scripts/recall-report.mjs` | 打开率账本、`npm run recall:stats` 明细、`npm run recall:report` 周报 |
 | `client/client.js` | 「记忆」标签页（手写 bundle，不需要构建工具） |
 | `mcp.js` | 给别的宿主的零依赖 stdio MCP 服务器（只读） |
 | `skill.js` | 注册 `engramory` 技能：什么时候该记、什么时候不该记 |
@@ -217,10 +220,12 @@ npm run check       # 接线自检：配置键认不认、库路径对不对、�
 npm run bench:check # 合成基准对账（CI 跑的就是它，和 bench/expectations.json 比）
 npm run bench:foundation -- --check  # 地基句尺子：写进上下文的那一行里有没有决定性那句话
 npm run probe       # 召回质量探针：3 组 query + 三道对照，跑在真实记忆库上
+npm run recall:report -- --days 30   # 记忆周报：谁在干活、花了多少上下文、哪些轮次一个字都没进
 ```
 
-这几条要在**克隆下来的仓库里**跑：npm 包里只发了插件自己需要的文件和 `scripts/recall-stats.mjs`
-这一个脚本，`test/`、`bench/` 都没发；只有 `npm run recall:stats` 在已安装的插件目录里也能跑。
+这几条要在**克隆下来的仓库里**跑：npm 包里只发了插件自己需要的文件和 `scripts/recall-stats.mjs`、
+`scripts/recall-report.mjs` 这两个脚本，`test/`、`bench/` 都没发；只有 `npm run recall:stats` 与
+`npm run recall:report` 在已安装的插件目录里也能跑。
 全部命令（十几个基准尺子）在 [docs/release.md](docs/release.md#测试与自检)。
 
 ## 📚 文档

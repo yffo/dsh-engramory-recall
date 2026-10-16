@@ -258,8 +258,8 @@ test('片段口径：边界 —— 空 body / 单行 body / 无命中都不崩�
   for (const hit of byEmpty) {
     assert.deepEqual(
       Object.keys(hit).sort(),
-      ['id', 'matched', 'score', 'section', 'snippet'],
-      '命中形状必须与旧口径一致',
+      ['chars', 'id', 'matched', 'score', 'section', 'snippet'],
+      '命中形状必须与旧口径一致（chars = 整篇字数，不参与打分）',
     );
     assert.ok(Number.isFinite(hit.score) && hit.score > 0);
     assert.ok(typeof hit.snippet === 'string' && hit.snippet.length > 0);

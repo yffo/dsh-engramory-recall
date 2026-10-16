@@ -43,7 +43,14 @@ export const inject = ['tools'];
 /** 会话里的生产者标识用包名，便于在日志/时间线里一眼认出是谁注入的。 */
 const PRODUCER = 'dsh-engramory-recall';
 
-const DEFAULTS = {
+/**
+ * 插件内置默认配置。
+ *
+ * 导出是有意的：周报（`scripts/recall-report.mjs`）要能说「你 profile 里是 5 条 / 600 字，
+ * 插件默认是 4 条 / 480 字」—— 这份数字**只能有一个来源**，抄一份到报告里就等于埋了个
+ * 会过期的谎话。报告只读它，不改它。
+ */
+export const DEFAULTS = {
   enabled: true,
   storePath: '',
   maxPointers: 4,
@@ -407,6 +414,9 @@ export function apply(ctx, config = {}) {
         ...(Number.isFinite(entry.budget) && Number.isFinite(entry.spent)
           ? { budget: entry.budget, spent: entry.spent }
           : {}),
+        // 「整篇加起来多少字」（0.15.0 起落盘）：与 spent 相减就是这一轮**没进上下文**的字数。
+        // 只在真的算出来（> 0）时写；没写 ≠ 0，读的一侧必须能分得清「省了 0 字」与「没这一项」。
+        ...(Number.isFinite(entry.noteChars) && entry.noteChars > 0 ? { noteChars: entry.noteChars } : {}),
       });
     }
   };
@@ -907,6 +917,20 @@ export function apply(ctx, config = {}) {
         if (seenOrder.length > 500) seen.delete(seenOrder.shift());
       }
 
+      // 「省下多少上下文」的原料：这一轮带到的笔记**整篇**加起来多少字（同一篇只算一次 ——
+      // 长笔记切了桶，按桶累加会把省下的量算虚）。整篇字数由 store.js 读文件时记在文档上、
+      // 检索命中带上来。没有它的老行只能算「注入了多少」，算不出「省下多少」。
+      const noteChars = (() => {
+        const counted = new Set();
+        let sum = 0;
+        for (const hit of shown) {
+          if (!hit?.id || counted.has(hit.id)) continue;
+          counted.add(hit.id);
+          sum += Number(hit.chars) > 0 ? Number(hit.chars) : 0;
+        }
+        return sum;
+      })();
+
       recordRound({
         kind: lines.length ? 'hit' : 'sediment',
         query: brief(query),
@@ -929,6 +953,7 @@ export function apply(ctx, config = {}) {
         budget,
         spent: used,
         chars: text.length,
+        noteChars,
         // 本轮最高分：minScore 定得高不高，这是唯一能校准的依据（空轮走的是另一支，
         // 那里早就记了 topScore —— 有命中的轮次同样要记，否则「拦掉了多少好线索」两头都看不见）。
         topScore: Number((hits[0]?.score ?? 0).toFixed(3)),

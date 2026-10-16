@@ -122,6 +122,14 @@ export function summarizeUsage(lines, options = {}) {
   };
   // 预算用量的原始比例（spent / budget），逐轮收集、最后算中位/p90
   const budgetRatios = [];
+  // 上下文代价与「留在磁盘上的量」：0.15.0 起的 hit 行才有 `noteChars`（这一轮带到的笔记整篇
+  // 加起来多少字），老行只能算「注入了多少」。缺数据的轮**单列**计数，不拿 0 冒充
+  // —— 与 budget 同一纪律：宁可说「不知道」，也不能让「没这一项」看起来像「省了 0 字」。
+  const cost = { rounds: 0, legacyRounds: 0, pointerChars: 0, noteChars: 0, savedChars: 0 };
+  const savedPerRound = [];
+  // 「这一轮到底带没带记忆」的完整分母：宿主问过的每一轮都算进来。
+  // 「本轮没注入任何记忆」本身就是结论（设计性的安静 vs 真出问题），必须看得见。
+  const coverageRounds = { hit: 0, skip: 0, empty: 0, sediment: 0 };
   // 「缩成裸文件名的是哪几条」（0.13.15 起落盘）：截断的代价只能靠它算 ——
   // 只记「缩了几条」的话，没法知道被缩的那几条后来有没有被打开。
   const truncatedRounds = [];
@@ -154,18 +162,24 @@ export function summarizeUsage(lines, options = {}) {
     if (kind === 'empty') {
       stats.zeroRounds += 1;
       stats.emptyRounds += 1;
+      coverageRounds.empty += 1;
       bump(emptyReasons, String(line?.reason ?? 'unspecified'));
     } else if (kind === 'skip') {
       stats.dedupeRounds += 1;
       stats.skipRounds += 1;
+      coverageRounds.skip += 1;
       bump(skipReasons, String(line?.reason ?? 'unspecified'));
     }
-    else if (kind === 'sediment') stats.sedimentRounds += 1;
+    else if (kind === 'sediment') {
+      stats.sedimentRounds += 1;
+      coverageRounds.sediment += 1;
+    }
     else if (kind === 'deny' || kind === 'deny-error') stats.denyRounds += 1;
 
     const ids = Array.isArray(line?.ids) ? line.ids.map(String).filter(Boolean) : [];
     if (ids.length) {
       stats.injectRounds += 1;
+      coverageRounds.hit += 1;
       stats.pointers += ids.length;
       roundSizes.push(ids.length);
       const bucket = scopes[scopeOf(line)];
@@ -197,6 +211,22 @@ export function summarizeUsage(lines, options = {}) {
       if (Number.isFinite(budget) && budget > 0 && Number.isFinite(spent) && spent >= 0) {
         stats.budgetRounds += 1;
         budgetRatios.push(Math.min(1, spent / budget));
+      }
+      // 省下的上下文（0.15.0 起落盘）：整篇字数 − 真正送出去的字符数。
+      // 这是「记忆到底占了多少上下文」的可复算答案，不是形容词；老行没有这一项，
+      // 就单列 legacyRounds，让报告能说清「这个数只覆盖了哪几轮」。
+      const noteChars = Number(line?.noteChars);
+      if (Number.isFinite(noteChars) && noteChars > 0) {
+        cost.rounds += 1;
+        cost.noteChars += noteChars;
+        // spent 与 noteChars 同源（同一轮、同一支记的）；真缺了就按 0 记 —— 那一轮确实一个字都没送。
+        const pointerChars = Number.isFinite(spent) && spent >= 0 ? spent : 0;
+        cost.pointerChars += pointerChars;
+        const saved = Math.max(0, noteChars - pointerChars);
+        cost.savedChars += saved;
+        savedPerRound.push(saved);
+      } else {
+        cost.legacyRounds += 1;
       }
       injections.push({ at: ts, ids, scope: scopeOf(line) });
     }
@@ -273,8 +303,26 @@ export function summarizeUsage(lines, options = {}) {
   const sizes = [...roundSizes].sort((a, b) => a - b);
   const lagSorted = [...lags].sort((a, b) => a - b);
   const q = (arr, p) => (arr.length ? arr[Math.min(arr.length - 1, Math.floor(p * (arr.length - 1)))] : 0);
+  const coverageTotal =
+    coverageRounds.hit + coverageRounds.skip + coverageRounds.empty + coverageRounds.sediment;
   return {
     ...stats,
+    // 上下文代价：注入了多少字 / 这些笔记整篇多少字 / 差就是没进上下文的量。
+    // savedRate 只对**有 noteChars 的轮**成立 —— 老行算不进来，报告里必须写明覆盖了几轮。
+    cost: {
+      ...cost,
+      savedRate: cost.noteChars ? cost.savedChars / cost.noteChars : 0,
+      medianSaved: q([...savedPerRound].sort((a, b) => a - b), 0.5),
+    },
+    // 宿主一共问了多少轮、其中多少轮真的带了记忆、多少轮一个字都没进 ——
+    // 「本轮没注入任何记忆」是结论不是空白，所以它得有个明确的位置。
+    coverage: {
+      rounds: coverageTotal,
+      injected: coverageRounds.hit,
+      zeroInjected: coverageTotal - coverageRounds.hit,
+      injectedShare: coverageTotal ? coverageRounds.hit / coverageTotal : 0,
+      byKind: { ...coverageRounds },
+    },
     // 分子是**去重后**的打开条数（openRate ≤ 1 恒成立）；stats.used 仍是原始 used 行数。
     openRate: stats.pointers ? usedCounted / stats.pointers : 0,
     usedCounted,
@@ -534,7 +582,7 @@ export function truncationVerdict(summary) {
 }
 
 /** 原因码 → 人话。统计里出现没列过的码时原样显示（别把新码藏起来）。 */
-const REASON_LABELS = {
+export const REASON_LABELS = {
   chitchat: '寒暄 / 答话（设计如此）',
   'too-short': '消息太短',
   'empty-message': '空消息',
@@ -548,6 +596,42 @@ const REASON_LABELS = {
   'budget-too-small': '预算太小，一条都放不下',
   unspecified: '没记原因（早期日志）',
 };
+
+/** 原因码 → 人话（未知码原样返回，不编故事）。 */
+export const reasonLabel = (code) => REASON_LABELS[code] ?? String(code ?? '');
+
+/**
+ * 给人看的层里要翻译的键名（Node 侧唯一一份：CLI 周报、`recall-stats` 都读它）。
+ *
+ * ⚠️ 面板 `client/client.js` 里另有一份同内容的表 —— 它是浏览器 bundle，import 不到这里。
+ * 两份的**一致性由测试兜着**（`test/term-words.test.mjs` 逐对比较两边源码里的字面量），
+ * 谁改了一边忘了另一边，测试会红。别再手抄第三份。
+ *
+ * @type {ReadonlyArray<readonly [string, string]>}
+ */
+export const TERM_WORDS = [
+  ['minScore', '相关度门槛'],
+  ['maxChars', '字数上限'],
+  ['maxPointers', '每次提醒条数'],
+  ['collapsedIds', '缩掉的是哪几条'],
+  ['usedCounted', '真正被读过的条数'],
+  ['openRate', '被用上的比例'],
+  ['budgetUse', '预算用量'],
+  ['freeCap', '零代价上限'],
+  ['legacy', '早期记录'],
+  ['unaligned', '对不上号的旧记录'],
+];
+
+/**
+ * 把判据句里的专业键名换成人话（见 TERM_WORDS）。CLI 周报与面板同一套词。
+ * 顺带收掉中文之间多余的那个空格 —— 键名两侧本来带空格，直译会读成「抬 相关度门槛 只会…」。
+ */
+export function plainTerms(text) {
+  if (typeof text !== 'string' || !text) return text;
+  let out = text;
+  for (const [key, word] of TERM_WORDS) out = out.split(key).join(word);
+  return out.replace(/([\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])/g, '$1');
+}
 
 /**
  * 第三句判据：没注入的那些轮次，原因分布说明了什么。

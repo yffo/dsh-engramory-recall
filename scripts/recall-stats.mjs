@@ -18,7 +18,7 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { budgetVerdict, readUsage, reasonVerdict, scoreCurveVerdict, summarizeUsage, truncationVerdict, usageVerdict, USAGE_FILE } from '../usage.js';
+import { budgetVerdict, readUsage, reasonLabel, reasonVerdict, scoreCurveVerdict, summarizeUsage, truncationVerdict, usageVerdict, USAGE_FILE } from '../usage.js';
 
 const argv = process.argv.slice(2);
 const USAGE = `用法：node scripts/recall-stats.mjs [选项]
@@ -83,18 +83,6 @@ const POSITIONS = numOpt('--positions', 5);
 const LIMIT = numOpt('--limit', 2000, { min: 10 });
 const wantJson = argv.includes('--json');
 /** 原因码 → 人话（与 usage.js 的 reasonVerdict 用同一套口径）。 */
-const REASON_LABELS = {
-  chitchat: '寒暄 / 答话',
-  'too-short': '消息太短',
-  'empty-message': '空消息',
-  duplicate: '与上一轮重复',
-  'store-not-configured': '没配库路径',
-  'index-empty': '库里没有笔记',
-  'no-hits': '一条都不匹配',
-  'below-min-score': '被 minScore 拦住',
-  unspecified: '没记原因（早期日志）',
-};
-const reasonLabel = (code) => REASON_LABELS[code] ?? code;
 
 // 窗口上限只用于「用满了几轮」这一句；不给就不算（--max-pointers 5）
 const maxPointersOpt = opt('--max-pointers');

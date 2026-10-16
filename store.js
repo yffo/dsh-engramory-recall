@@ -74,8 +74,11 @@ export function readDocs(storePath) {
     bytes += fileBytes;
     const { title, description, body, aliases } = splitNote(text);
     const filePath = join(storePath, file);
+    // 整篇字数（含 frontmatter，用字符数而不是字节数：预算 `maxChars` 也是字符口径）。
+    // 账本要靠它算「这篇笔记整篇多少字、我们只送出去了多少字」—— 顺手记，不额外做 IO。
+    const chars = text.length;
     if (Buffer.byteLength(body) <= SECTION_BYTES) {
-      docs.push({ id: file, title, description, body, aliases, path: filePath, mtimeMs: mtimes.get(file) ?? 0 });
+      docs.push({ id: file, title, description, body, aliases, path: filePath, mtimeMs: mtimes.get(file) ?? 0, chars });
       continue;
     }
     // 长笔记切桶：同一 id 出现多次，检索侧按 id 聚合只留分最高的那一桶，
@@ -94,6 +97,8 @@ export function readDocs(storePath) {
         path: filePath,
         // 同一篇的所有桶共享同一 mtime，衰减倍率因此一致（不会靠碎桶各自「变新」）。
         mtimeMs: mtimes.get(file) ?? 0,
+        // 同一篇的所有桶共享「整篇字数」：一篇长笔记只送出一小段时，省下的量要按整篇算。
+        chars,
       });
     });
   }

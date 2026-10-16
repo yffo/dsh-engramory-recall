@@ -281,14 +281,16 @@ test('原因表：跳过与空手同一张表、已知码翻人话、未知码�
     { ts: 5000, kind: 'empty' },
   ]);
 
-  assert.match(out, /\| 寒暄 \/ 答话 \| 1 \| 跳过 \|/, '已知码翻成与 usage.js 同一套人话');
+  // 0.15.0 起这张表**只此一份**（usage.js 的 REASON_LABELS）：CLI 不再自带一套短文案，
+  // 面板与周报说同一句话。所以这里钉的是 usage.js 的原文，而不是 CLI 自己的措辞。
+  assert.match(out, /\| 寒暄 \/ 答话（设计如此） \| 1 \| 跳过 \|/, '已知码翻成 usage.js 那套人话');
   assert.match(out, /\| weird-code \| 1 \| 跳过 \|/, '没列过的码原样印出来，别把新码藏起来');
   assert.match(out, /\| 一条都不匹配 \| 1 \| 空手 \|/, '空手轮与跳过轮同一张表、靠「是哪一类」区分');
   assert.match(out, /\| 没记原因（早期日志） \| 1 \| 空手 \|/, '缺 reason 归 unspecified，不冒充设计性安静');
 
   // 只看这张表这一段：判据一节也会引用原因码，别把两处的位置混起来比。
   const table = out.slice(out.indexOf('## 为什么会没注入'), out.indexOf('\n注入分：'));
-  const order = ['寒暄 / 答话', 'weird-code', '一条都不匹配', '没记原因'].map((label) => table.indexOf(label));
+  const order = ['寒暄 / 答话（设计如此）', 'weird-code', '一条都不匹配', '没记原因'].map((label) => table.indexOf(label));
   assert.ok(
     order.every((at, i) => at > 0 && (i === 0 || at > order[i - 1])),
     `轮数相同时：跳过行在前、空手行在后（顺序稳定不抖），实际位置 ${order.join(',')}`,

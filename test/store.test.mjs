@@ -349,13 +349,15 @@ test('readDocs：返回顺序按文件名排序，稳定可复现', () => {
   assert.deepEqual(readDocs(dir).map((d) => d.id), first, '重复读必须同序');
 });
 
-test('readDocs：短笔记的字段形状（七个字段，没有 section/seq）', () => {
-  // 形状是下游契约：bm25 用 id/body，注入用 title/description，衰减用 mtimeMs。
+test('readDocs：短笔记的字段形状（八个字段，没有 section/seq）', () => {
+  // 形状是下游契约：bm25 用 id/body，注入用 title/description，衰减用 mtimeMs，
+  // 账本用 chars（整篇字数，算「省下多少上下文」）。
   // 注意没有 `bytes` 字段 —— 字节数由 body 现算（Buffer.byteLength）。
   const dir = mkStore({ 'a.md': '---\nname: 甲\ndescription: 描述\n---\n\n# 甲\n\n正文\n' });
   const [doc] = readDocs(dir);
 
-  assert.deepEqual(Object.keys(doc), ['id', 'title', 'description', 'body', 'aliases', 'path', 'mtimeMs']);
+  assert.deepEqual(Object.keys(doc), ['id', 'title', 'description', 'body', 'aliases', 'path', 'mtimeMs', 'chars']);
+  assert.equal(doc.chars, '---\nname: 甲\ndescription: 描述\n---\n\n# 甲\n\n正文\n'.length, 'chars = 整个文件的字符数');
   assert.equal(doc.id, 'a.md', 'id 就是文件名，召回注入靠它定位');
   assert.equal(doc.title, '甲');
   assert.equal(doc.description, '描述');
@@ -399,7 +401,8 @@ test('readDocs：长笔记按 ## 切桶，seq 连续、只有首桶带描述', (
 
   assert.equal(mine.length, 13, '前言 1 桶 + 12 个 ## 节');
   assert.deepEqual(mine.map((d) => d.seq), Array.from({ length: 13 }, (_, i) => i), 'seq 必须连续');
-  assert.deepEqual(Object.keys(mine[0]), ['id', 'section', 'seq', 'title', 'description', 'body', 'aliases', 'path', 'mtimeMs']);
+  assert.deepEqual(Object.keys(mine[0]), ['id', 'section', 'seq', 'title', 'description', 'body', 'aliases', 'path', 'mtimeMs', 'chars']);
+  assert.equal(new Set(mine.map((d) => d.chars)).size, 1, '同一篇的所有桶共享整篇字数');
   assert.equal(mine[0].section, '', '首桶装的是 h1 前言，没有 ## 标题');
   assert.equal(mine[0].description, '描述', '首桶带描述');
   assert.equal(mine.slice(1).every((d) => d.description === ''), true, '非首桶不带描述');

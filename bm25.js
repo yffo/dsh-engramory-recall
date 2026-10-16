@@ -763,6 +763,60 @@ function makeIdf(docFreq, docCount) {
 }
 
 /**
+ * 现行打分参数与片段策略的**活值**快照（只读）。
+ *
+ * 为什么要有它：报告、面板、文档都要回答「你现在到底按哪套参数在算」。
+ * 只要有人把这些数字复制成第二份，改了代码而报告不变，那份报告就是在撒谎。
+ * 所以这里不做任何计算，只把模块自己的常量端出来 —— 单一来源，读得到就是真的。
+ * 测试对它做快照断言：任何一项变了都必须有人主动改测试，等于强制「改参数要留痕」。
+ *
+ * @returns {{bm25: object, bridge: object, snippet: object, recency: object, phraseBonus: number, scoreFloor: number, defaultLimit: number}}
+ */
+export function scoringProfile() {
+  return {
+    bm25: {
+      k1: K1,
+      b: B,
+      // 标题重复是否排除在长度归一之外（见 TITLE_LEN_EXCLUDED）
+      titleLengthExcluded: TITLE_LEN_EXCLUDED,
+      // 标题/描述额外多计的词次数（字段加权；0 = 关）
+      titleExtra: TITLE_EXTRA,
+      // 单次查询最多参与打分的词项数
+      queryTermCap: QUERY_TERM_CAP,
+    },
+    bridge: {
+      // 命中同义键时，键自身字面碎片的降权（1 = 不降）
+      bridgedFragmentWeight: BRIDGED_FRAGMENT_WEIGHT,
+      // 桥到的技术词权重（没有键命中时退回 extraWeight）
+      bridgeWeight: BRIDGE_WEIGHT,
+      extraWeight: EXTRA_WEIGHT,
+      synonymKeys: SYNONYMS.size,
+    },
+    snippet: {
+      // 片段挑选口径：idf = 按 IDF 加权选句子；count = 老口径（命中词最多的那一行）
+      picker: 'idf',
+      // 标题/描述行在片段挑选里打的折（它们是复述提问，不是证据）
+      titleDiscount: SNIPPET_TITLE_DISCOUNT,
+      // 单条片段的字数上限
+      maxChars: SNIPPET_MAX,
+      // 邻句扩展：地基句短于这个长度才带上邻句（默认整机关闭）
+      neighborBelow: SNIPPET_NEIGHBOR_BELOW,
+      neighbor: false,
+    },
+    recency: {
+      // 时间衰减参考半衰期（默认不启用，等库跨度上来再复测）
+      suggestedHalfLifeDays: SUGGESTED_HALF_LIFE_DAYS,
+    },
+    // 整句子串命中奖励（0 = 机制在、已证伪、不启用，见 PHRASE_BONUS 注释）
+    phraseBonus: PHRASE_BONUS,
+    // 分数下限：低于它就当 0（衰减时的地板）
+    scoreFloor: SCORE_FLOOR,
+    // search 的默认返回条数
+    defaultLimit: 5,
+  };
+}
+
+/**
  * 召回：返回按分排序的命中（score > 0 才返回）。
  *
  * @param {{snippet?: 'idf'|'count', neighbor?: boolean}} [options]
@@ -770,7 +824,7 @@ function makeIdf(docFreq, docCount) {
  *   留着做对照与回退；`neighbor: true` 才开启邻句扩展（默认关：2026-10-16 实测它
  *   在合成题集与真实库上都不涨指标，只多花约 11 字/条，所以不默认付这笔钱）。三个参数的老调用方
  *   什么都不传，拿到的就是新默认。
- * @returns {Array<{id, score, snippet, matched}>}
+ * @returns {Array<{id, score, snippet, matched, chars}>} `chars` = 这篇笔记整篇字数（不参与打分）
  */
 export function search(index, query, limit = 5, options = {}) {
   const mode = options?.snippet === 'count' ? 'count' : 'idf';
@@ -846,7 +900,10 @@ export function search(index, query, limit = 5, options = {}) {
     score *= doc.boost ?? 1;
     // 整句子串命中：加在乘性调整之后，是纯粹的加法微调，不参与 BM25 的饱和曲线。
     if (usePhrase && score > 0 && doc.plain.includes(needle)) score += PHRASE_BONUS;
-    if (score > 0) hits.push({ id: doc.id, section: doc.section, score, snippet: pickSnippet(doc, matched), matched });
+    // `chars` = 这篇笔记的**整篇**字数（store.js 读文件时顺手记的）。它不参与打分，
+    // 只为了让账本能算「整篇多少字、这轮只送出去多少字」——「记忆省了多少上下文」
+    // 是可复算的事实，不该是个形容词。桶共享整篇字数，所以长笔记不会被算小。
+    if (score > 0) hits.push({ id: doc.id, section: doc.section, score, snippet: pickSnippet(doc, matched), matched, chars: doc.chars ?? 0 });
   }
   hits.sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id)));
   // 长笔记切桶后同一 id 会有多条命中，只留分最高的那一桶。否则 267KB 的巨兽靠几十个桶

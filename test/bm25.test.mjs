@@ -291,10 +291,10 @@ test('打分：空语料返回空命中且不除零；没有匹配时不返回�
   }
 });
 
-test('命中形状：只带 id/section/score/snippet/matched，matched 只列文档真有的词项', () => {
+test('命中形状：只带 id/section/score/snippet/matched/chars，matched 只列文档真有的词项', () => {
   const index = buildIndex([doc('a.md', '量子纠缠')]);
   const [hit] = search(index, '量子纠缠 火锅', 5);
-  assert.deepEqual(Object.keys(hit).sort(), ['id', 'matched', 'score', 'section', 'snippet']);
+  assert.deepEqual(Object.keys(hit).sort(), ['chars', 'id', 'matched', 'score', 'section', 'snippet']);
   assert.deepEqual(hit.matched, ['量子', '子纠', '纠缠']); // 「火锅」不在文档里，不进 matched
   assert.equal(hit.snippet, '量子纠缠');
   assert.equal(hit.section, undefined); // 没切桶的笔记没有 section 字段
