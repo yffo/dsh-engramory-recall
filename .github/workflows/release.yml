@@ -133,4 +133,7 @@ jobs:
       # 退出码不算数：直查版本端点，并把 registry 上的 shasum 与本地 pack 的逐字比对
       - name: 验证「发上去的就是这一份」
         if: steps.exists.outputs.skip != 'true'
-        run: node scripts/verify-release.mjs --timeout 300
+        # npm 在 PUT 之后会异步处理一段（实测 0.16.0 这次等了约 8 分钟才公开可见，
+        # 期间 202/404 都属正常）。窗口给到 15 分钟：宁可多等，也不要把「发上去了」
+        # 判成「没发上去」——那会诱使人重推 tag，而重推只会撞 403（版本已占）。
+        run: node scripts/verify-release.mjs --timeout 900

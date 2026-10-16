@@ -46,7 +46,13 @@ for (;;) {
   }
   last = { status: response.status };
   if (Date.now() - started > timeoutMs) {
-    console.error(`✖ 等了 ${(timeoutMs / 1000) | 0} 秒，${registry}/${pkg.name}/${version} 还是 ${response.status} —— 没发上去。`);
+    console.error(
+      `✖ 等了 ${(timeoutMs / 1000) | 0} 秒，${registry}/${pkg.name}/${version} 还是 ${response.status} —— 没发上去。\n` +
+        '  先别重推 tag：npm 的 PUT 是异步处理的（实测有过等 8 分钟才可见的），先看 `npm view ' +
+        `${pkg.name}@${version} version` +
+        '` 与 registry 网页；若 registry 回 403「cannot publish over the previously published versions」，' +
+        '说明这一版其实已经占位成功，只是还没公开可见 —— 再等一会儿重跑验证即可。',
+    );
     process.exit(1);
   }
   await sleep(5000);
