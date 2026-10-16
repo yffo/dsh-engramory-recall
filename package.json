@@ -47,6 +47,7 @@
     "index.js",
     "client/client.js",
     "bm25.js",
+    "render.js",
     "store.js",
     "guard.js",
     "doctor.js",
@@ -96,7 +97,8 @@
     "release:verify": "node scripts/verify-release.mjs",
     "bench:probe": "node bench/probe.mjs",
     "recall:stats": "node scripts/recall-stats.mjs",
-    "bench:guard": "node bench/guard-sweep.mjs"
+    "bench:guard": "node bench/guard-sweep.mjs",
+    "bench:foundation": "node bench/foundation.mjs"
   },
   "bin": {
     "engramory-recall-mcp": "mcp.js"

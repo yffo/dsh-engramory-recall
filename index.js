@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { buildIndex, search, clip } from './bm25.js';
+import { renderPointers, RECALL_HEADER } from './render.js';
 import { checkMemoryWrite } from './guard.js';
 import { checkIndexWrite, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES } from './index-guard.js';
 import { registerSkill, skillStatus } from './skill.js';
@@ -848,41 +849,10 @@ export function apply(ctx, config = {}) {
         return decision;
       }
 
-      const header = '[engramory 自动召回] 以下是记忆库里可能相关的既有条目（只是指针；需要细节时用 read 打开 ~/memory/engramory/<文件名>）：';
-      const budget = Math.max(160, Number(settings.maxChars) || 480);
-      const lines = [];
-      const shown = [];
-      let used = header.length;
-      let collapsed = 0;
-      let dropped = 0;
-      for (const hit of hits) {
-        const full = `- ${hit.id} — ${clip(hit.snippet, 64)}`;
-        if (used + full.length + 1 <= budget) {
-          used += full.length + 1;
-          lines.push(full);
-          shown.push({ ...hit, bytes: full.length });
-          continue;
-        }
-        // 预算装不下完整条目时先塌缩成「只有文件名」（mneme `src/inject.js:232` 的 render
-        // 就是这么降级的）：模型至少知道有这么一篇，比整条静默丢掉有用。
-        const bare = `- ${hit.id}`;
-        if (used + bare.length + 1 <= budget) {
-          used += bare.length + 1;
-          lines.push(bare);
-          shown.push({ ...hit, collapsed: true, bytes: bare.length });
-          collapsed += 1;
-          continue;
-        }
-        dropped += 1;
-      }
-      if (dropped) {
-        // 连文件名都装不下：补一句说明，别让「有命中却没显示」变成静默丢失。
-        const note = `（另有 ${dropped} 条命中因预算未列出）`;
-        if (used + note.length + 1 <= budget + 80) {
-          used += note.length + 1;
-          lines.push(note);
-        }
-      }
+      const header = RECALL_HEADER;
+      const { budget, lines, shown, used, collapsed, dropped } = renderPointers(hits, {
+        maxChars: settings.maxChars,
+      });
       const parts = lines.length ? [header, ...lines] : [];
       if (wantsRemember) {
         const nudge =
