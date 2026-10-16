@@ -35,5 +35,11 @@ jobs:
       - name: 基准自检（数字漂了必须有人解释）
         run: npm run bench:check
 
+      # 地基句尺子：注入的那一行里到底有没有决定性那句话。
+      # 地板写在 bench/foundation-expectations.json（默认档 / profile 档 / 留出组都要过），
+      # 破地板就是召回质量真的掉了，不是机器差异 —— 容差 0.02 已经吃掉抖动。
+      - name: 地基句尺子对账（召回质量不许悄悄退化）
+        run: npm run bench:foundation -- --check
+
       - name: 确认包能打包（files 字段漏文件会让别人装上直接崩）
         run: npm pack --dry-run

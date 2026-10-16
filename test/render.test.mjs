@@ -57,6 +57,16 @@ test('按名次分配：预算不够时先减少片段条数，而不是把每�
   assert.ok(plan.slice(withSnippet).every((n) => n === MIN_SNIPPET_CHARS));
 });
 
+test('按名次分配：decay 可关（0 = 人人一样多），单条上限可收紧', () => {
+  const flat = planSnippets(hits(3), { maxChars: DEFAULT_MAX_CHARS, decay: 0 });
+  assert.equal(new Set(flat).size, 1, `decay:0 还分了三档：${flat}`);
+  const tight = planSnippets(hits(3), { maxChars: DEFAULT_MAX_CHARS, maxSnippetChars: 40 });
+  assert.ok(tight.every((n) => n <= 40), `单条上限没兜住：${tight}`);
+  // 头部太长时，连第一名都只剩最小额度也不许出现负数。
+  const starved = planSnippets(hits(2), { maxChars: MIN_BUDGET, header: 'x'.repeat(MIN_BUDGET * 2) });
+  assert.ok(starved.every((n) => n >= MIN_SNIPPET_CHARS && Number.isFinite(n)), `${starved}`);
+});
+
 test('按名次分配：没有命中时不炸，也不产生负数', () => {
   assert.deepEqual(planSnippets([], { maxChars: 480 }), []);
   const plan = planSnippets(hits(3), { maxChars: 1 });

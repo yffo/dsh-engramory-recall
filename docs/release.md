@@ -35,6 +35,7 @@ npm run check   # 接线自检：配置键认不认、库路径对不对、装�
 npm run probe   # 召回质量探针：3 组 query + 三道对照，跑在真实记忆库上
 npm run probe -- --save   # 把这次结果存成基线，之后每次跑自动比对
 npm run bench:check       # 合成基准 + 和 bench/expectations.json 对账（CI 跑的就是它）
+npm run bench:foundation  # 地基句尺子：注入的那一行里有没有决定性那句话（--check 对账 / --store 真库 / --replay 账本重放）
 npm run bench:bridges     # 同义表覆盖率尺子：死值、覆盖、使用面、逐键消融（--ablate / --json / --store）
 npm run bench:seam        # 语义接缝的代价与天花板（四种坏提供方 + 作弊上界 + 融合模式对照）
 npm run bench:guard       # 把握度门槛（guarded）的尺子：保护集/争夺集拆开看，--fake-cos 量垃圾提供方
@@ -50,7 +51,7 @@ npm run mcp:smoke         # 拿脚本当 MCP 客户端，把服务器拉起来�
 node bench/longmemeval.mjs --data bench/.tmp/longmemeval_s_cleaned.json   # 公开基准（数据要自己下，264MB）
 ```
 
-CI 跑 `npm test` 和 `npm run bench:check` 两件事。后者是防「数字悄悄漂走」的：任何一项
+CI 跑 `npm test`、`npm run bench:check`、`npm run bench:foundation -- --check` 三件事。后者是防「数字悄悄漂走」的：任何一项
 跟期望值的偏差超过 2 个百分点就红；桥组容差 3pt、verbatim 组 1pt（它们掉下来多半是我们改坏了）。
 分数低不红 —— 绝对值会随语料演化，卡死绝对值只会逼人去改尺子；漂了才红，因为那说明
 要么是回归、要么是刻意改动而没人说清楚。

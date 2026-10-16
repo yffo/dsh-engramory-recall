@@ -528,7 +528,7 @@ export function apply(ctx, config = {}) {
       const hits = result.hits.map((hit) => ({
         file: hit.id,
         score: Number(hit.score.toFixed(3)),
-        snippet: clip(hit.snippet, 140),
+        snippet: clip(hit.snippet, 240), // 显式搜索的返回：给到句子级上限，别把决定性那句裁掉
       }));
       return {
         store: storePath,

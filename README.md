@@ -44,6 +44,7 @@
 | | 特性 | 人话说明 |
 |---|---|---|
 | 🧠 | 每轮自动想起 | 在每个用户轮的开头检索一次，命中就顺手提醒模型「库里有这几篇相关的」 |
+| 🎯 | 带的是那句话，不是提问的回声 | 注入行按 IDF 挑正文里的句子，标题/描述复述用户问话要被折扣；公开口径「地基句保住率」39.6% → **85.4%** |
 | 💸 | 没命中就是不花 | 命中了才塞指针，没命中一个 token 都不注入；寒暄（「继续」「嗯」）连检索都不做 |
 | 🔒 | 数据不出本机 | 只需要文件读写权限，不要网络；不建库、不生成索引文件、明文 markdown 可读可 diff |
 | 🙅 | 不替你写，也不替你删 | 不往库里写东西、没有自动遗忘、没有自动合并；归档只搬走，不删除 |
@@ -214,10 +215,11 @@ git clone https://github.com/yffo/dsh-engramory-recall.git && cd dsh-engramory-r
 npm test            # 全套测试：分词 / BM25 / 门控 / 闸门 / 体检 / 归档 / 面板渲染 / MCP / 脏数据 fuzz
 npm run check       # 接线自检：配置键认不认、库路径对不对、装的是哪一份、包清单漏没漏文件
 npm run bench:check # 合成基准对账（CI 跑的就是它，和 bench/expectations.json 比）
+npm run bench:foundation -- --check  # 地基句尺子：写进上下文的那一行里有没有决定性那句话
 npm run probe       # 召回质量探针：3 组 query + 三道对照，跑在真实记忆库上
 ```
 
-这四条要在**克隆下来的仓库里**跑：npm 包里只发了插件自己需要的文件和 `scripts/recall-stats.mjs`
+这几条要在**克隆下来的仓库里**跑：npm 包里只发了插件自己需要的文件和 `scripts/recall-stats.mjs`
 这一个脚本，`test/`、`bench/` 都没发；只有 `npm run recall:stats` 在已安装的插件目录里也能跑。
 全部命令（十几个基准尺子）在 [docs/release.md](docs/release.md#测试与自检)。
 
@@ -227,7 +229,7 @@ npm run probe       # 召回质量探针：3 组 query + 三道对照，跑在�
 |---|---|
 | [docs/format.md](docs/format.md) | **格式规范（Format v1）**：目录长什么样、一篇笔记有哪些字段、上限与治理、与上游规范的差异 |
 | [docs/how-it-works.md](docs/how-it-works.md) | 想弄清它内部到底怎么跑、每个旋钮什么意思（含完整配置表）、代价对照 |
-| [docs/measuring.md](docs/measuring.md) | 想看数字：四条选型否决线、跟同类插件的对照、三把可复算的尺子。公开数据集 LongMemEval-S 500 题上 RecallAny@1 **89.2%**（教科书 BM25 同口径 86.2%），合成基准 hit@1 50.4% vs 43.2% |
+| [docs/measuring.md](docs/measuring.md) | 想看数字：四条选型否决线、跟同类插件的对照、**四把可复算的尺子**（含「地基句保住率」39.6% → 85.4% 的对照与消融）。公开数据集 LongMemEval-S 500 题上 RecallAny@1 **89.2%**（教科书 BM25 同口径 86.2%），合成基准 hit@1 50.4% vs 43.2% |
 | [docs/limits.md](docs/limits.md) | **最该读的一份**：底线、真正的短板、路线图，以及十四条被实测证伪的路 |
 | [docs/release.md](docs/release.md) | 安装 / 卸载的坑、测试与自检的全部命令、发版流程与发布排错表、别的宿主用 MCP |
 | [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么 |

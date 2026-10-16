@@ -1,0 +1,24 @@
+{
+  "_comment": "地基句尺子的地板。CI 跑 `npm run bench:foundation -- --check` 对账：任一指标低于地板 0.02 以上就红。地板取 2026-10-16 实测值往下留约 5 个百分点 —— 够宽，不因机器差异抖动；够紧，机制悄悄退化会当场红。改地板必须在 CHANGELOG 里写清为什么。",
+  "_measured": {
+    "date": "2026-10-16",
+    "engine": "0.14.1（IDF 选句 ×0.6 标题折扣 + 名次加权预算；邻句扩展默认关）",
+    "corpus": "bench/foundation-corpus.mjs 合成题集 96 篇 / 96 题（seed 20261016，tune 66 / heldOut 30）",
+    "strict": { "overall": 0.854, "tune": 0.879, "heldOut": 0.800 },
+    "baseline": { "engine": "0.14.0（按命中词数选行 + 64 字均分）", "strict": 0.396, "tune": 0.455, "heldOut": 0.267 },
+    "ceiling": "hit@1 = 0.938：笔记找错的那 6.2% 谁也救不回，逐字率不可能越过它"
+  },
+  "tolerance": 0.02,
+  "settings": [
+    {
+      "label": "默认 480 字 / 4 条",
+      "metrics": { "hit1": 0.9, "hitK": 0.94, "strict": 0.8, "lenient": 0.8 },
+      "heldOut": { "hit1": 0.9, "hitK": 0.95, "strict": 0.72, "lenient": 0.72 }
+    },
+    {
+      "label": "profile 600 字 / 5 条",
+      "metrics": { "hit1": 0.9, "hitK": 0.94, "strict": 0.8, "lenient": 0.8 },
+      "heldOut": { "hit1": 0.9, "hitK": 0.95, "strict": 0.72, "lenient": 0.72 }
+    }
+  ]
+}

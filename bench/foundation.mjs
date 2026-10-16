@@ -39,6 +39,7 @@ const has = (name) => args.includes(`--${name}`);
 const MODE = flag('mode', null); // null = 引擎默认（改进后的做法）
 const SNIPPET_CHARS = Number(flag('snippet-chars', 0)) || 0;
 const NO_NEIGHBOR = has('no-neighbor');
+const NEIGHBOR = has('neighbor');
 const PLAN = has('no-plan') ? false : undefined;
 const STORE = flag('store', '');
 // 账本重放：拿真实历史轮次问「今天我们这条还答不答得出来」。账本默认在库里。
@@ -71,14 +72,15 @@ const keepsEvidence = (line, evidence) => {
 function searchOptions() {
   const options = {};
   if (MODE) options.snippet = MODE;
-  if (NO_NEIGHBOR) options.neighbor = false;
+  options.neighbor = NEIGHBOR && !NO_NEIGHBOR;
   return options;
 }
 
 function renderOptions(settings) {
   const options = { maxChars: settings.maxChars };
-  if (SNIPPET_CHARS) options.snippetChars = SNIPPET_CHARS;
-  if (PLAN === false) options.snippetPlan = new Array(settings.maxPointers).fill(SNIPPET_CHARS || 64);
+  // `--snippet-chars=N` 就是「平均额度 N 字」：给出等额计划，别让它被名次加权计划盖掉。
+  if (SNIPPET_CHARS) options.snippetPlan = new Array(settings.maxPointers).fill(SNIPPET_CHARS);
+  else if (PLAN === false) options.snippetPlan = new Array(settings.maxPointers).fill(64);
   return options;
 }
 
@@ -366,7 +368,7 @@ async function main() {
   const modeLine = [
     `mode=${MODE ?? 'default'}`,
     SNIPPET_CHARS ? `snippet-chars=${SNIPPET_CHARS}` : 'snippet-chars=plan',
-    NO_NEIGHBOR ? 'neighbor=off' : 'neighbor=on',
+    NO_NEIGHBOR || !NEIGHBOR ? 'neighbor=off' : 'neighbor=on',
   ].join(' · ');
   console.log(`\n口径：${modeLine}${STORE ? ' · store' : ''}`);
 
