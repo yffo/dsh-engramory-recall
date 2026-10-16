@@ -20,6 +20,7 @@ import { readAudit } from './audit.js';
 // 89KB 的归档产物说「可以一键执行」，而归档器根本不会碰它。
 // 现在直接问 `planArchive` 要结果：体检说的每一句，都是按钮真做得到的事。
 import { HISTORY_FILE_RE, planArchive } from './archive.js';
+import { DEFAULT_MAX_NOTES, DEFAULT_MAX_BYTES } from './store.js';
 
 export const NOTE_KINDS = ['user', 'feedback', 'project', 'reference'];
 export const INDEX_FILE = 'MEMORY.md';
@@ -105,6 +106,30 @@ export function auditStore(storePath, options = {}) {
     }
     const { fields, body } = parseFrontmatter(text);
     notes.push({ file, text, body, fields, bytes: Buffer.byteLength(text), mtimeMs });
+  }
+
+  // ---- 读侧上限（召回读不到的东西，只有体检看得见）----
+  // 召回一次只读前 `maxNotes` 篇 / 前 `maxBytes` 字节（`readDocsReport`），超出的笔记
+  // **在检索里根本不存在**。体检是唯一能看到「整库」的地方，所以这里必须报 ——
+  // 否则现象只是「召回变差」，原因（有 N 篇从没进过检索）没有任何界面会说出来。
+  const capNotes = Number(options.maxNotes) > 0 ? Math.floor(Number(options.maxNotes)) : DEFAULT_MAX_NOTES;
+  const capBytes = Number(options.maxBytes) > 0 ? Math.floor(Number(options.maxBytes)) : DEFAULT_MAX_BYTES;
+  const totalBytes = notes.reduce((sum, note) => sum + note.bytes, 0);
+  if (notes.length > capNotes) {
+    add(
+      'warn',
+      'notes-over-cap',
+      `库里有 ${notes.length} 篇，召回只读前 ${capNotes} 篇（按文件名排序），另外 ${notes.length - capNotes} 篇不会被检索到 —— 调大 maxNotes，或归档/合并掉不再用的笔记`,
+      [INDEX_FILE],
+    );
+  }
+  if (totalBytes > capBytes) {
+    add(
+      'warn',
+      'store-over-byte-cap',
+      `库共 ${Math.round(totalBytes / 1024)} KB，召回一次只读前 ${Math.round(capBytes / 1024)} KB（按文件名顺序），排在后面的笔记不会被检索到 —— 调大 maxBytes，或归档掉大文件`,
+      [INDEX_FILE],
+    );
   }
 
   // ---- 索引 ↔ 文件 ----

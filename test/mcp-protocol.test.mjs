@@ -538,24 +538,27 @@ test('MCP：搜索的 limit 逐档语义、多条命中的排序/score/长笔记
 test('MCP：status 的五个字段与索引超限提示（无索引/正常/超限三态）', async () => {
   await withStore(async (session, dir) => {
     const lines = textOf(await callTool(session, { name: 'engramory_status' })).split('\n');
-    assert.equal(lines.length, 5);
+    assert.equal(lines.length, 6, '读侧上限那一行也是 status 的一部分（2026-10-17 起）');
     assert.equal(lines[0], `库：${dir}`);
-    assert.equal(lines[1], '笔记：1 篇');
-    assert.equal(lines[2], '索引：没有 MEMORY.md（召回仍可用，但宿主没有索引可读）');
-    assert.match(lines[3], /^指纹：[0-9a-f]{12}$/);
-    assert.equal(lines[4], `服务器：${SERVER_NAME} ${SERVER_VERSION} · 只读 · 零模型调用`);
+    assert.equal(lines[1], '笔记：库里 1 篇');
+    // 读侧上限：以前这两条上限是静默的 —— 库大到读不完时用户只看到「召回变差」。
+    // 这一行是 MCP 侧唯一能报出来的地方，所以要连「没到顶」也印出来（否则读的人不知道有这条线）。
+    assert.match(lines[2], /^读侧上限：一次召回最多 \d+ 篇 \/ \d+ KB（当前读到 1 篇，没到顶）$/);
+    assert.equal(lines[3], '索引：没有 MEMORY.md（召回仍可用，但宿主没有索引可读）');
+    assert.match(lines[4], /^指纹：[0-9a-f]{12}$/);
+    assert.equal(lines[5], `服务器：${SERVER_NAME} ${SERVER_VERSION} · 只读 · 零模型调用`);
 
     assert.equal(`${DEFAULT_MAX_INDEX_LINES}/${DEFAULT_MAX_INDEX_BYTES}`, '200/25600', '上限变了要在这儿看见（守卫按这个数拒写）');
     const index = '# 索引\n- 一行指针\n';
     writeFileSync(join(dir, 'MEMORY.md'), index);
-    const normal = textOf(await callTool(session, { name: 'engramory_status' })).split('\n')[2];
+    const normal = textOf(await callTool(session, { name: 'engramory_status' })).split('\n')[3];
     assert.equal(normal, `索引：2 行 / ${Buffer.byteLength(index)} 字节（上限 ${DEFAULT_MAX_INDEX_LINES} 行 / ${DEFAULT_MAX_INDEX_BYTES} 字节）`);
 
     writeFileSync(join(dir, 'MEMORY.md'), 'x\n'.repeat(250));
-    const over = textOf(await callTool(session, { name: 'engramory_status' })).split('\n')[2];
+    const over = textOf(await callTool(session, { name: 'engramory_status' })).split('\n')[3];
     assert.equal(over, `索引：250 行 / 500 字节（上限 ${DEFAULT_MAX_INDEX_LINES} 行 / ${DEFAULT_MAX_INDEX_BYTES} 字节，已超限：250 行 > 200）`);
     // MEMORY.md 不是笔记：篇数不受影响
-    assert.equal(textOf(await callTool(session, { name: 'engramory_status' })).split('\n')[1], '笔记：1 篇');
+    assert.equal(textOf(await callTool(session, { name: 'engramory_status' })).split('\n')[1], '笔记：库里 1 篇');
   });
 });
 
@@ -566,7 +569,7 @@ test('MCP：库路径指向文件、目录不可读 —— 都收敛成同一句
     const res = await callTool(asFile, { name: 'engramory_search', arguments: { query: '钻头螺栓' } });
     assert.equal(res.isError, true);
     assert.equal(textOf(res), `库是空的或不存在：${join(asFileDir, 'a.md')}。用 --store <路径> 或环境变量 ENGRAMORY_STORE 指定。`);
-    assert.equal(textOf(await callTool(asFile, { name: 'engramory_status' })).split('\n')[1], '笔记：0 篇');
+    assert.equal(textOf(await callTool(asFile, { name: 'engramory_status' })).split('\n')[1], '笔记：库里 0 篇');
     assert.equal((await callTool(asFile, { name: 'engramory_status' })).isError, false, '库坏掉也要能看状态');
   } finally {
     rmSync(asFileDir, { recursive: true, force: true });
@@ -581,7 +584,7 @@ test('MCP：库路径指向文件、目录不可读 —— 都收敛成同一句
     if (!root) {
       assert.equal(res.isError, true, '读不到目录要给人话，不是 EACCES 栈');
       assert.match(textOf(res), /库是空的或不存在/);
-      assert.equal(textOf(await callTool(session, { name: 'engramory_status' })).split('\n')[1], '笔记：0 篇');
+      assert.equal(textOf(await callTool(session, { name: 'engramory_status' })).split('\n')[1], '笔记：库里 0 篇');
     } else {
       assert.equal(res.isError, false, 'root 无视权限位，这条在 root 下没有意义');
     }
@@ -874,3 +877,34 @@ test('MCP：入口判定——被 import 时绝不抢 stdin；当程序跑且 st
     rmSync(box, { recursive: true, force: true });
   }
 });
+
+test('MCP：status 报读侧上限 —— 超限时两个数都要有，且检索面真的变小', async () => {
+  const notes = { 'a.md': '# a\n\n正文\n', 'b.md': '# b\n\n正文\n', 'c.md': '# c\n\n正文\n' };
+
+  // 正常上限：印出「没到顶」，让人知道有这条线
+  await withStore(async (session) => {
+    const lines = textOf(await callTool(session, { name: 'engramory_status' })).split('\n');
+    assert.equal(lines[1], '笔记：库里 3 篇');
+    assert.match(lines[2], /一次召回最多 2000 篇/);
+    assert.match(lines[2], /没到顶/);
+  }, notes);
+
+  // 上限调到 1：库里有几篇 ≠ 这次读到几篇（两个数都要印，别把「读到」当「库里有」），
+  // 而且这一行必须自己说出「另外 2 篇不会被检索到」—— 这就是以前完全静默的那件事。
+  const dir = tempStore(notes);
+  try {
+    const small = createSession({ store: dir, maxNotes: 1 });
+    const lines = textOf(await callTool(small, { name: 'engramory_status' })).split('\n');
+    assert.equal(lines[1], '笔记：库里 3 篇 · 这次读到 1 篇');
+    assert.match(lines[2], /只读前 1 篇/);
+    assert.match(lines[2], /2 篇不会被检索到/);
+
+    // 检索面确实跟着小了：被上限挡掉的 c.md 搜不出来（不是「只是没印出来」）
+    const hits = textOf(await callTool(small, { name: 'engramory_search', arguments: { query: '正文' } }));
+    assert.match(hits, /a\.md/);
+    assert.doesNotMatch(hits, /c\.md/, '超过上限的笔记在检索里根本不存在');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

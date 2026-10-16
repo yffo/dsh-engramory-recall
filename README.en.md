@@ -164,6 +164,7 @@ not listed here (query budget, rotation demotion, dedup, semantic switches, …)
 | `autoArchive` | `false` | Runs archiving automatically instead of waiting for a click (still two-phase). Off by default because archiving modifies the store |
 | `storePath` | `~/memory/engramory` | Supports `~`. **Empty disables the plugin** — it does not guess a path |
 | `indexMaxLines` / `indexMaxBytes` | `200` / `25600` | `MEMORY.md` beyond this is **refused a write** (the index is read every turn; the part past the cap would silently stop being recalled) |
+| `maxNotes` / `maxBytes` | `2000` / `4194304` | How many notes / bytes a single recall pass may read (a guard against pathological directories). Notes past the cap **never enter search** — when a store grows that large, the doctor, the panel, and `engramory_status` all report the shortfall |
 
 ## FAQ
 

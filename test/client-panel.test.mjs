@@ -1712,3 +1712,65 @@ test('面板：给了 5 条却只列 4 条时写清「上面是前 4 条」，�
   assert.match(opened.text, /5\. n5\.md § s {2}score=5 {2}10B/, '展开后第 5 条要出来');
   assert.match(opened.text, /收起/);
 });
+
+// ── 读侧上限：库里有多少 ≠ 召回看得到多少 ─────────────────────────────
+// store.js 的 MAX_NOTES / MAX_BYTES 超出后，后面那些笔记**不进检索**。这件事以前完全
+// 不可见（现象只是「召回变差」），所以面板首屏必须挂出差额，且脏数据不许抛。
+
+test('面板：storeStats 说被截断时，首屏挂出「有 N 篇没进检索」，title 里带上限口径', async () => {
+  const state = fakeState(richUsage());
+  state.storeStats = {
+    found: 3000, considered: 2000, read: 2000, sections: 2500, bytes: 5 * 1024 * 1024,
+    droppedByCount: 1000, droppedByBytes: 0, droppedBySize: 2, truncated: true,
+    maxNotes: 2000, maxBytes: 4 * 1024 * 1024,
+  };
+  const text = await render(state);
+  assert.match(text, /有 1002 篇没进检索/, '差额 = 按条数丢 1000 + 单篇过大丢 2');
+
+  // 找那个带 title 的容器（宿主元素 type 是字符串 'span'，nodesOfType 只认函数组件，这里自己走）
+  const withTitle = [];
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.props && typeof node.props.title === 'string' && /超出的笔记不会被检索到/.test(node.props.title)) withTitle.push(node);
+    walk(node.children);
+  };
+  walk(lastTree);
+  assert.equal(withTitle.length, 1, '要正好有一个可见的点（挂两处就是重复说同一件事）');
+  assert.match(withTitle[0].props.title, /一次召回最多读 2000 篇 \/ 4096 KB/, 'title 要说清上限是多少');
+  assert.match(withTitle[0].props.title, /按条数丢 1000/, 'title 要能拆开丢的原因');
+});
+
+test('面板：没被截断时不许出现「没进检索」字样（不截断就不吓人）', async () => {
+  const state = fakeState(richUsage());
+  state.storeStats = {
+    found: 72, considered: 72, read: 72, sections: 90, bytes: 600000,
+    droppedByCount: 0, droppedByBytes: 0, droppedBySize: 0, truncated: false,
+    maxNotes: 2000, maxBytes: 4 * 1024 * 1024,
+  };
+  const text = await render(state);
+  assert.doesNotMatch(text, /没进检索/);
+});
+
+test('面板：storeStats 缺失 / 脏值时不抛、也不编出「有 N 篇没进检索」', async () => {
+  for (const bad of [undefined, null, 'x', 42, {}, { droppedByCount: 'x' }, { droppedByCount: -3 }, { maxNotes: 0, droppedByCount: 5 }]) {
+    const state = fakeState(richUsage());
+    state.storeStats = bad;
+    const text = await render(state);
+    // 脏值只允许出现两种结局：要么什么都不说，要么按 0 处理 —— 永远不许印 NaN/undefined
+    assert.doesNotMatch(text, /NaN|undefined/, `storeStats=${JSON.stringify(bad)} 时不许把脏值印上屏`);
+    if (!bad || typeof bad !== 'object' || !(Number(bad.droppedByCount) > 0)) {
+      assert.doesNotMatch(text, /没进检索/, `storeStats=${JSON.stringify(bad)} 没有可报的差额`);
+    }
+  }
+});
+
+test('面板：说明页签里有「召回读多少」这一行，并说清超出的笔记不会被检索', async () => {
+  const state = fakeState(richUsage());
+  state.storeStats = { found: 72, read: 72, sections: 90, bytes: 600000, droppedByCount: 0, droppedByBytes: 0, droppedBySize: 0, truncated: false, maxNotes: 2000, maxBytes: 4 * 1024 * 1024 };
+  const text = await renderTab('help', state, {});
+  assert.match(text, /召回读多少/);
+  assert.match(text, /一次召回最多读 2000 篇/);
+  assert.match(text, /归档掉/);
+});
+

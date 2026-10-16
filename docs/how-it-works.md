@@ -421,6 +421,8 @@ idempotent / mojibake / xpath / selenium / watchdog / dsn / backoff` 这一类**
         autoArchive: false       # 全自动归档（默认关：归档是改库，先手动点几轮再决定）
         indexMaxLines: 200       # 索引 MEMORY.md 的行数上限
         indexMaxBytes: 25600     # 索引的字节上限
+        maxNotes: 2000           # 一次召回最多读多少篇（超出的笔记不进检索，见下面「读取上限」一节）
+        maxBytes: 4194304        # 一次召回最多读多少字节
         registerSkill: true      # 注册 engramory 技能（写入纪律的正文）
         # 语义检索接缝（默认关闭）：本地模块路径，或 host-llm / host-embed
         semanticProvider: ''
@@ -430,6 +432,25 @@ idempotent / mojibake / xpath / selenium / watchdog / dsn / backoff` 这一类**
         semanticGuard: 0.5        # 只有 guarded 用：插队需要的分差门槛
         semanticHostRoute: ''     # 只有 host-embed 用
 ```
+
+### 读取上限：召回读不完的东西，必须有人替它说话
+
+一次召回（每轮一次）只读**前 `maxNotes` 篇 / 前 `maxBytes` 字节**，按文件名排序 —— 超出
+部分**不进检索**：不是排名靠后，而是根本不在索引里，`.engramory-recall.jsonl` 里也不会有它们。
+这两条是防病态目录的护栏（例如把整个笔记目录当库配进来），默认 2000 篇 / 4MB。
+
+**它们曾经是完全静默的**（2026-10-17 复查确认全仓没有任何一处报告过），后果是：库一旦长到
+这条线以上，用户看到的现象只有「召回变差」，而原因（有 N 篇从没进过检索）在任何界面都看不到。
+现在三处会报：
+
+| 在哪看 | 报什么 |
+|---|---|
+| 体检 | `notes-over-cap` / `store-over-byte-cap`（warn，附上「调大 `maxNotes`」或「归档掉」） |
+| 面板首屏 | 「有 N 篇没进检索」的警示点，鼠标悬停能看到按哪条上限丢的、丢了几篇 |
+| `engramory_status`（MCP） | `读侧上限：…（当前读到 N 篇）` 或 `…N 篇不会被检索到（按条数丢 x · 按字节丢 y · 单篇过大丢 z）` |
+
+`readDocsReport()` 是唯一的账本来源（`readDocs()` 现在就是它的 `docs` 字段），
+所以「读到几篇」在召回、面板、MCP、体检四处是同一个口径。
 
 `autoArchive` 打开后归档会在两处自动跑：每轮 pre-step 兜底（10 分钟 TTL，不会每轮扫库），
 以及写完记忆库的那一刻（触发源记为 `write`）。它仍然先备份、仍然过写入闸门，只是不再等你点按钮。

@@ -11,6 +11,10 @@ import { join } from 'node:path';
 const MAX_NOTES = 2000;
 const MAX_BYTES = 4 * 1024 * 1024;
 
+/** 两条读侧上限的默认值，导出给配置层与文档用（`readDocsReport` 支持按库覆盖）。 */
+export const DEFAULT_MAX_NOTES = MAX_NOTES;
+export const DEFAULT_MAX_BYTES = MAX_BYTES;
+
 /**
  * 单篇笔记的「桶」上限。超过就按 `##` / `###` / 行边界切桶，每桶独立成一条检索记录。
  *
@@ -23,17 +27,61 @@ const SECTION_BYTES = 6 * 1024;
 /** 单篇最多切多少桶：防病态文件把索引撑爆。 */
 const MAX_SECTIONS = 400;
 
-let cache = { key: '', docs: [] };
+let cache = { key: '', docs: [], stats: null };
 
-/** 读出笔记集合；storePath 不存在或为空时返回空数组。 */
-export function readDocs(storePath) {
-  let files;
+/**
+ * 上限口径的归一：非正数 / 非有限值一律退回默认。
+ * 配置里把 `maxNotes` 写成 0 或 "abc" 时，宁可照旧读 2000 篇，也不能把库读空。
+ */
+function capOf(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+/** 目录都没读到时也要给一份完整形状的账（调用方不必判空）。 */
+function emptyStats(maxNotes, maxBytes) {
+  return {
+    found: 0,
+    considered: 0,
+    read: 0,
+    sections: 0,
+    bytes: 0,
+    droppedByCount: 0,
+    droppedByBytes: 0,
+    droppedBySize: 0,
+    truncated: false,
+    maxNotes,
+    maxBytes,
+  };
+}
+
+/**
+ * 读出笔记集合；storePath 不存在或为空时返回空数组。
+ *
+ * 截断统计要用 `readDocsReport()` —— 数组形态是三十多处调用点的既有契约，不能改。
+ */
+export function readDocs(storePath, options) {
+  return readDocsReport(storePath, options).docs;
+}
+
+/**
+ * 与 `readDocs` 同一份结果，外加一份**上限账**。
+ *
+ * 为什么要这份账：`MAX_NOTES` / `MAX_BYTES` 两处上限都是**静默**的 —— 排序靠后的笔记
+ * 从此不再被召回，而全仓没有一处报告过它（2026-10-17 复核确认）。库长到 2000 篇以上时，
+ * 用户看到的是「召回变差」，看不到的是「有 N 篇根本没进检索」。这里把两者接上。
+ */
+export function readDocsReport(storePath, options = {}) {
+  const maxNotes = capOf(options.maxNotes, MAX_NOTES);
+  const maxBytes = capOf(options.maxBytes, MAX_BYTES);
+  let found;
   try {
-    files = readdirSync(storePath).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md').sort();
+    found = readdirSync(storePath).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md').sort();
   } catch {
-    return [];
+    return { docs: [], stats: emptyStats(maxNotes, maxBytes) };
   }
-  if (files.length > MAX_NOTES) files = files.slice(0, MAX_NOTES);
+  const files = found.length > maxNotes ? found.slice(0, maxNotes) : found.slice();
+  const droppedByCount = found.length - files.length;
 
   let indexMtime = 0;
   try {
@@ -53,11 +101,15 @@ export function readDocs(storePath) {
   // 缓存键必须覆盖「任意一篇被改动」：此前只盯首末两篇，改中间那篇不会失效
   // （2026-10-14 发现），会一直读到旧正文。用全部 mtime 之和换正确性，量级可忽略。
   const stamp = [...mtimes.values()].reduce((a, b) => a + b, 0);
-  const key = `${storePath}|${indexMtime}|${files.length}|${stamp}`;
-  if (cache.key === key) return cache.docs;
+  // 上限进缓存键：同一进程里改了配置就该重读，否则「调大上限」看不到效果。
+  const key = `${storePath}|${indexMtime}|${files.length}|${stamp}|${maxNotes}|${maxBytes}`;
+  if (cache.key === key) return { docs: cache.docs, stats: cache.stats };
 
   const docs = [];
   let bytes = 0;
+  let read = 0;
+  let droppedBySize = 0;
+  let droppedByBytes = 0;
   for (const file of files) {
     let text;
     try {
@@ -68,10 +120,18 @@ export function readDocs(storePath) {
     const fileBytes = Buffer.byteLength(text);
     // 单篇就超过总上限：跳过它，而不是 break —— break 会让它后面（以及它自己）的所有笔记
     // 一篇都读不到，症状是「库里 69 篇笔记，索引却是空的」，而原因只是有一篇大文件排在最前。
-    if (fileBytes > MAX_BYTES) continue;
+    if (fileBytes > maxBytes) {
+      droppedBySize += 1;
+      continue;
+    }
     // 总量到顶：排序在后面的干脆不读了（这才是 break 的本来意图）。
-    if (bytes + fileBytes > MAX_BYTES) break;
+    // 但**必须记账**：这一 break 丢掉的篇数要能被 status / doctor / 面板看见（7.2）。
+    if (bytes + fileBytes > maxBytes) {
+      droppedByBytes = files.length - files.indexOf(file);
+      break;
+    }
     bytes += fileBytes;
+    read += 1;
     const { title, description, body, aliases } = splitNote(text);
     const filePath = join(storePath, file);
     // 整篇字数（含 frontmatter，用字符数而不是字节数：预算 `maxChars` 也是字符口径）。
@@ -102,8 +162,21 @@ export function readDocs(storePath) {
       });
     });
   }
-  cache = { key, docs };
-  return docs;
+  const stats = {
+    found: found.length,
+    considered: files.length,
+    read,
+    sections: docs.length,
+    bytes,
+    droppedByCount,
+    droppedByBytes,
+    droppedBySize,
+    truncated: droppedByCount + droppedByBytes + droppedBySize > 0,
+    maxNotes,
+    maxBytes,
+  };
+  cache = { key, docs, stats };
+  return { docs, stats };
 }
 
 /** 解析 frontmatter 与正文；frontmatter 只取 name/description，不做 YAML 依赖。 */

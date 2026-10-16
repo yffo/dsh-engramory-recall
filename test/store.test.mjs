@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { chunkBody, corpusFingerprint, readDocs, splitNote } from '../store.js';
+import { chunkBody, corpusFingerprint, readDocs, readDocsReport, splitNote, DEFAULT_MAX_NOTES, DEFAULT_MAX_BYTES } from '../store.js';
 
 // store.js 里这两个常量没有导出（SECTION_BYTES / MAX_BYTES），只能在测试里抄一份。
 // 它们一旦被改动，下面的边界断言会失败 —— 这正是我们想要的提醒。
@@ -483,8 +483,9 @@ test('readDocs：超过 4MB 的那篇被丢掉，排在它前面的笔记仍然�
 });
 
 test('readDocs：超过 2000 篇时只取排序靠前的 2000 篇', () => {
-  // MAX_NOTES 是防病态目录把索引撑爆的上限。注意是**静默截断**（排序靠后的笔记消失），
-  // 所以这条钉的是「截断方向」：保留前 2000，丢弃排最后的那些。
+  // MAX_NOTES 是防病态目录把索引撑爆的上限。`readDocs()` 本身仍然**静默截断**（排序靠后的
+  // 笔记消失，这是老 API 的既定行为），但下面那批 `readDocsReport` 用例钉的是「这件事必须
+  // 有账可查」：丢了几篇、按哪条上限丢的。这条钉的是「截断方向」：保留前 2000，丢弃排最后的那些。
   const dir = mkStore();
   for (let i = 0; i < 2001; i += 1) writeFileSync(join(dir, `n${String(i).padStart(4, '0')}.md`), `# n${i}\n\n正文\n`);
 
@@ -493,6 +494,97 @@ test('readDocs：超过 2000 篇时只取排序靠前的 2000 篇', () => {
   assert.equal(docs[0].id, 'n0000.md');
   assert.equal(docs[docs.length - 1].id, 'n1999.md');
   assert.equal(docs.some((d) => d.id === 'n2000.md'), false, '排序最后的那篇被丢掉');
+});
+
+// ── readDocsReport：读侧上限的账 ────────────────────────────────────
+// 为什么要有这一层：`readDocs()` 的两条上限（MAX_NOTES / MAX_BYTES）以前是**静默**的 ——
+// 库大到某个量级后，一部分笔记永远不会进检索，而用户看到的现象只是「召回变差」。
+// 2026-10-17 复查确认全仓没有任何一处报告过它，所以这里把账钉死。
+
+test('readDocsReport：没超上限时账目与 readDocs 完全一致，truncated 为 false', () => {
+  const dir = mkStore({ 'a.md': '# a\n\n正文 a\n', 'b.md': '# b\n\n正文 b\n' });
+
+  const report = readDocsReport(dir);
+  assert.equal(report.stats.found, 2, '库里两篇');
+  assert.equal(report.stats.considered, 2);
+  assert.equal(report.stats.read, 2);
+  assert.equal(report.stats.droppedByCount, 0);
+  assert.equal(report.stats.droppedByBytes, 0);
+  assert.equal(report.stats.droppedBySize, 0);
+  assert.equal(report.stats.truncated, false);
+  assert.equal(report.stats.maxNotes, DEFAULT_MAX_NOTES, '默认值与导出的常量是同一个');
+  assert.equal(report.stats.maxBytes, DEFAULT_MAX_BYTES);
+  assert.deepEqual(report.docs.map((d) => d.id), readDocs(dir).map((d) => d.id), 'docs 就是 readDocs 会给的那批');
+});
+
+test('readDocsReport：maxNotes 把排序靠后的笔记挡在检索外，并说得出丢了几篇', () => {
+  const files = {};
+  for (let i = 0; i < 15; i += 1) files[`n${String(i).padStart(2, '0')}.md`] = `# n${i}\n\n正文 ${i}\n`;
+  const dir = mkStore(files);
+
+  const report = readDocsReport(dir, { maxNotes: 5 });
+  assert.equal(report.stats.found, 15);
+  assert.equal(report.stats.considered, 5, '按上限只考虑前 5 篇');
+  assert.equal(report.stats.read, 5);
+  assert.equal(report.stats.droppedByCount, 10, '另外 10 篇一篇都没进');
+  assert.equal(report.stats.truncated, true);
+  assert.deepEqual(report.docs.map((d) => d.id), ['n00.md', 'n01.md', 'n02.md', 'n03.md', 'n04.md'], '留下的是排序靠前的');
+  assert.deepEqual(readDocs(dir, { maxNotes: 5 }).map((d) => d.id), report.docs.map((d) => d.id), '两条 API 同一批');
+});
+
+test('readDocsReport：maxBytes 从后往前丢，前面的笔记照常读出', () => {
+  const files = {};
+  for (let i = 0; i < 12; i += 1) files[`n${String(i).padStart(2, '0')}.md`] = `# n${i}\n\n${'x'.repeat(1000)}\n`;
+  const dir = mkStore(files);
+
+  const report = readDocsReport(dir, { maxBytes: 3000 });
+  assert.equal(report.stats.found, 12);
+  assert.equal(report.stats.read, 2, '每篇约 1KB，3000 字节只装得下前两篇');
+  assert.equal(report.stats.droppedByBytes, 10, '按字节丢掉的篇数要记下来（不是无声无息）');
+  assert.equal(report.stats.droppedByCount, 0, '这次不是按条数丢的');
+  assert.equal(report.stats.truncated, true);
+  assert.deepEqual(report.docs.map((d) => d.id), ['n00.md', 'n01.md'], '留前不留后');
+});
+
+test('readDocsReport：单篇超过 4MB 记进 droppedBySize，不再无声跳过', () => {
+  const dir = mkStore({ 'a.md': '# a\n\n正文 a\n', 'huge.md': `# huge\n\n${'y'.repeat(5 * 1024 * 1024)}\n` });
+
+  const report = readDocsReport(dir);
+  assert.equal(report.stats.found, 2);
+  assert.equal(report.stats.droppedBySize, 1, '那篇 5MB 的被记为「单篇过大」');
+  assert.equal(report.stats.read, 1);
+  assert.equal(report.stats.truncated, true, '有东西没读进来就算被截断（不管是哪种原因）');
+  assert.deepEqual(report.docs.map((d) => d.id), ['a.md']);
+});
+
+test('readDocsReport：上限写错（0 / 负数 / NaN / 非数字）时退回默认，不把库读空', () => {
+  const dir = mkStore({ 'a.md': '# a\n\n正文 a\n', 'b.md': '# b\n\n正文 b\n' });
+
+  for (const bad of [0, -1, NaN, 'abc', null]) {
+    const report = readDocsReport(dir, { maxNotes: bad, maxBytes: bad });
+    assert.equal(report.stats.read, 2, `maxNotes=${String(bad)} 时仍然读得到两篇`);
+    assert.equal(report.stats.maxNotes, DEFAULT_MAX_NOTES, `maxNotes=${String(bad)} 回退默认`);
+    assert.equal(report.stats.maxBytes, DEFAULT_MAX_BYTES);
+  }
+});
+
+test('readDocsReport：缓存按上限分开 —— 同一目录换上限不会被上一份结果污染', () => {
+  const files = {};
+  for (let i = 0; i < 6; i += 1) files[`n${i}.md`] = `# n${i}\n\n正文\n`;
+  const dir = mkStore(files);
+
+  assert.equal(readDocsReport(dir, { maxNotes: 2 }).docs.length, 2);
+  assert.equal(readDocsReport(dir, { maxNotes: 2 }).docs.length, 2, '同一上限：缓存复用，结果不变');
+  assert.equal(readDocsReport(dir).docs.length, 6, '换回默认上限：必须重新读，不能沿用上一份 2 篇的结果');
+  assert.equal(readDocsReport(dir, { maxNotes: 2 }).docs.length, 2, '再切回去仍然对');
+});
+
+test('readDocsReport：同一上限下两次调用返回同一个数组引用（上层按引用缓存索引）', () => {
+  const dir = mkStore({ 'a.md': '# a\n\n正文\n' });
+
+  const first = readDocsReport(dir, { maxNotes: 7 });
+  const second = readDocsReport(dir, { maxNotes: 7 });
+  assert.equal(first.docs, second.docs, 'index.js 的 `indexCache.docs === docs` 依赖这条');
 });
 
 // ── corpusFingerprint：语料指纹 ──────────────────────────────────────

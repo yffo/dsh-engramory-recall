@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { auditStore, normalizePath, parseFrontmatter } from '../doctor.js';
+import { DEFAULT_MAX_BYTES } from '../store.js';
 
 const NOW = Date.parse('2026-10-14T00:00:00Z');
 
@@ -249,4 +250,49 @@ test('archive-suggestion：搬完仍超上限的，要直说「拆不动，得�
   assert.doesNotMatch(hit.message, /一键执行/, '搬不动就不能指路去点「执行」');
 
   rmSync(dir, { recursive: true, force: true });
+});
+
+// ── 读侧上限：召回读不到的东西，只有体检看得见 ────────────────────────
+// store.js 的 `MAX_NOTES`（2000 篇）与 `MAX_BYTES`（4MB）是召回一次能读的上限，
+// 超出的笔记**不会进检索**。这两条以前是静默的（2026-10-17 复查确认全仓没有报告点），
+// 所以体检里补了这两条告警 —— 它们是唯一能看见「整库」的地方。
+
+test('读侧上限：库里篇数超过 maxNotes → notes-over-cap，并说得出丢了几篇', (t) => {
+  const notes = {};
+  for (let i = 0; i < 6; i += 1) notes[`reference-n${i}.md`] = note(`reference-n${i}`);
+  const dir = makeStore(notes);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const r = auditStore(dir, { now: NOW, maxNotes: 3, maxBytes: DEFAULT_MAX_BYTES });
+  const cap = r.findings.find((f) => f.code === 'notes-over-cap');
+  assert.ok(cap, '必须报出来');
+  assert.equal(cap.severity, 'warn');
+  assert.match(cap.message, /库里有 6 篇/);
+  assert.match(cap.message, /只读前 3 篇/);
+  assert.match(cap.message, /另外 3 篇不会被检索到/);
+  assert.match(cap.message, /maxNotes/, '要给出可操作的那一行（改哪个配置）');
+});
+
+test('读侧上限：总字节超过 maxBytes → store-over-byte-cap', (t) => {
+  const dir = makeStore({
+    'reference-a.md': note('reference-a', { body: 'x'.repeat(3000) }),
+    'reference-b.md': note('reference-b', { body: 'y'.repeat(3000) }),
+  });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const r = auditStore(dir, { now: NOW, maxBytes: 4000 });
+  const cap = r.findings.find((f) => f.code === 'store-over-byte-cap');
+  assert.ok(cap, '必须报出来');
+  assert.equal(cap.severity, 'warn');
+  assert.match(cap.message, /KB/);
+  assert.match(cap.message, /maxBytes/);
+});
+
+test('读侧上限：没到顶时两条告警都不出现（默认库不许误报）', (t) => {
+  const dir = makeStore({ 'reference-a.md': note('reference-a'), 'reference-b.md': note('reference-b') });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const r = auditStore(dir, { now: NOW });
+  assert.equal(has(r, 'notes-over-cap'), false);
+  assert.equal(has(r, 'store-over-byte-cap'), false);
 });

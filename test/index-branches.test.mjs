@@ -1256,3 +1256,52 @@ test('状态路由：面板能读到门控档位与两份名单（总也用不�
   assert.equal(body.hygiene.counts.notes, 1);
   assert.deepEqual(body.hygiene.stale, [], '刚建的笔记不该被判过期');
 });
+
+// ── 15. 读侧上限：召回读不完的东西，状态路由必须说出来 ─────────────────
+
+test('状态路由：storeStats 把读侧上限的账透出来（没到顶时也说得出上限是多少）', async () => {
+  const dir = store({
+    'reference-a.md': note('reference-a'),
+    'reference-b.md': note('reference-b'),
+    'reference-c.md': note('reference-c'),
+  });
+  const { routes } = captureCtx({ storePath: dir });
+  const body = await stateOf(routes);
+
+  assert.equal(body.storeStats.found, 3, '库里三篇');
+  assert.equal(body.storeStats.read, 3);
+  assert.equal(body.storeStats.truncated, false);
+  assert.equal(body.storeStats.droppedByCount, 0);
+  assert.equal(body.storeStats.maxNotes, 2000, '上限值本身也要透出（面板要能印「上限多少」）');
+  assert.equal(body.storeStats.maxBytes, 4 * 1024 * 1024);
+});
+
+test('状态路由：把 maxNotes 调小后，面板看到的篇数真的变小，且账上说得出丢了几篇', async () => {
+  const dir = store({
+    'reference-a.md': note('reference-a'),
+    'reference-b.md': note('reference-b'),
+    'reference-c.md': note('reference-c'),
+  });
+  const { routes } = captureCtx({ storePath: dir, maxNotes: 1 });
+  const body = await stateOf(routes);
+
+  assert.equal(body.storeStats.maxNotes, 1, '配置值原样回显');
+  assert.equal(body.storeStats.found, 3);
+  assert.equal(body.storeStats.read, 1);
+  assert.equal(body.storeStats.droppedByCount, 2, '丢了两篇要记账，不能静默');
+  assert.equal(body.storeStats.truncated, true);
+  assert.equal(body.notes.length, 1, '面板的笔记列表也跟着变小（同一份口径）');
+  assert.equal(body.totals.docs, 1);
+});
+
+test('状态路由：上限配成脏值（0 / 负数 / 非数字）时退回默认，不把库读空', async () => {
+  const dir = store({ 'reference-a.md': note('reference-a'), 'reference-b.md': note('reference-b') });
+  for (const bad of [0, -5, 'abc']) {
+    const { routes } = captureCtx({ storePath: dir, maxNotes: bad, maxBytes: bad });
+    const body = await stateOf(routes);
+    assert.equal(body.storeStats.maxNotes, 2000, `maxNotes=${String(bad)} 要用默认值`);
+    assert.equal(body.storeStats.maxBytes, 4 * 1024 * 1024);
+    assert.equal(body.notes.length, 2, `maxNotes=${String(bad)} 时两篇都还在`);
+  }
+});
+

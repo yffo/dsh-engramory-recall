@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildIndex, search } from './bm25.js';
 import { countLines, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES, measureIndex } from './index-guard.js';
 import { describeSeam, semanticSearch } from './semantic.js';
-import { corpusFingerprint, readDocs } from './store.js';
+import { corpusFingerprint, readDocs, readDocsReport, DEFAULT_MAX_NOTES, DEFAULT_MAX_BYTES } from './store.js';
 import { readUsage, summarizeUsage, USAGE_FILE } from './usage.js';
 
 export const SERVER_NAME = 'dsh-engramory-recall';
@@ -170,6 +170,17 @@ export function expandHome(value) {
   return text.startsWith('~/') ? join(homedir(), text.slice(2)) : text;
 }
 
+/** 读侧上限也可以走环境变量：写错（0/NaN/负数）时退回默认 —— 配置错误不该把库读空。 */
+function capFromEnv(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
+/** 把 session 上的两条上限整理成 store.js 认的形状。 */
+function capsOf(session) {
+  return { maxNotes: session.maxNotes, maxBytes: session.maxBytes };
+}
+
 /** 库路径：命令行 > 环境变量 ENGRAMORY_STORE > 默认 `~/memory/engramory`。 */
 export function resolveStorePath(raw) {
   const expanded = expandHome(raw);
@@ -183,6 +194,11 @@ export function createSession(options = {}) {
     store: resolveStorePath(raw),
     storeRaw: String(raw ?? '').trim() || DEFAULT_STORE,
     semantic,
+    // 读侧上限：召回一次最多读多少篇 / 多少字节。默认与 DSH 插件一致（2000 篇 / 4MB），
+    // 可用 ENGRAMORY_MAX_NOTES / ENGRAMORY_MAX_BYTES 调 —— MCP 侧读不到 DSH 的配置，
+    // 所以「两处上限不一致」只能靠这两条环境变量对齐；status 会把实际值印出来。
+    maxNotes: Number(options.maxNotes) > 0 ? Math.floor(Number(options.maxNotes)) : capFromEnv('ENGRAMORY_MAX_NOTES', DEFAULT_MAX_NOTES),
+    maxBytes: Number(options.maxBytes) > 0 ? Math.floor(Number(options.maxBytes)) : capFromEnv('ENGRAMORY_MAX_BYTES', DEFAULT_MAX_BYTES),
     semanticTimeoutMs: Number(options.semanticTimeoutMs) || 2000,
     index: null,
     fingerprint: '',
@@ -191,7 +207,7 @@ export function createSession(options = {}) {
 
 /** 索引按语料指纹缓存：库被改过就重建，没改过就复用（readDocs 自己也有 mtime 缓存）。 */
 function indexFor(session) {
-  const docs = readDocs(session.store);
+  const docs = readDocs(session.store, capsOf(session));
   const fingerprint = corpusFingerprint(docs);
   if (!session.index || session.fingerprint !== fingerprint) {
     session.index = buildIndex(docs);
@@ -203,7 +219,7 @@ function indexFor(session) {
 /** 库里唯一的笔记（长笔记在索引里会切成多桶，这里按 id 折回一篇）。 */
 function notesOf(session) {
   const notes = new Map();
-  for (const doc of readDocs(session.store)) {
+  for (const doc of readDocs(session.store, capsOf(session))) {
     const existing = notes.get(doc.id);
     if (!existing) notes.set(doc.id, { file: doc.id, title: doc.title || doc.id, description: doc.description || '' });
     else if (!existing.description && doc.description) existing.description = doc.description;
@@ -244,7 +260,7 @@ function noteTypeOf(session, doc) {
  */
 function listNotes(session) {
   const notes = new Map();
-  for (const doc of readDocs(session.store)) {
+  for (const doc of readDocs(session.store, capsOf(session))) {
     if (notes.has(doc.id)) continue;
     notes.set(doc.id, {
       file: doc.id,
@@ -301,7 +317,7 @@ async function toolSearch(session, args) {
   if (!query) throw new McpError('需要非空的 query。');
   const raw = Number(args?.limit);
   const limit = Number.isFinite(raw) ? Math.min(MAX_LIMIT, Math.max(1, Math.trunc(raw))) : DEFAULT_LIMIT;
-  const docs = readDocs(session.store);
+  const docs = readDocs(session.store, capsOf(session));
   if (!docs.length) {
     throw new McpError(`库是空的或不存在：${session.store}。用 --store <路径> 或环境变量 ENGRAMORY_STORE 指定。`);
   }
@@ -334,11 +350,21 @@ function toolStatus(session) {
   const indexLine = indexText
     ? `索引：${countLines(indexText)} 行 / ${Buffer.byteLength(indexText)} 字节（上限 ${DEFAULT_MAX_INDEX_LINES} 行 / ${DEFAULT_MAX_INDEX_BYTES} 字节${over ? `，已超限：${over}` : ''}）`
     : '索引：没有 MEMORY.md（召回仍可用，但宿主没有索引可读）';
+  // 读侧上限账：超出了就必须说出来 —— 以前这两条上限是静默的，用户只看到「召回变差」，
+  // 看不到「有 N 篇根本没进检索」。这也是 MCP 侧唯一能报的地方。
+  const report = readDocsReport(session.store, capsOf(session));
+  const dropped = report.stats.droppedByCount + report.stats.droppedByBytes + report.stats.droppedBySize;
+  const capLine = dropped > 0
+    ? `读侧上限：一次召回只读前 ${session.maxNotes} 篇 / ${Math.round(session.maxBytes / 1024)} KB —— 这个库超出了，`
+      + `${dropped} 篇不会被检索到（按条数丢 ${report.stats.droppedByCount} · 按字节丢 ${report.stats.droppedByBytes} · 单篇过大丢 ${report.stats.droppedBySize}）`
+    : `读侧上限：一次召回最多 ${session.maxNotes} 篇 / ${Math.round(session.maxBytes / 1024)} KB（当前读到 ${report.stats.read} 篇，没到顶）`;
   return [
     `库：${session.store}`,
-    `笔记：${notes.length} 篇`,
+    // 库里有多少篇 ≠ 这次读到多少篇（读侧上限可能把后面截掉）：两个数都印，别让人把「读到」当「库里有」。
+    `笔记：库里 ${report.stats.found} 篇${report.stats.read < report.stats.found ? ` · 这次读到 ${report.stats.read} 篇` : ''}`,
+    capLine,
     indexLine,
-    `指纹：${corpusFingerprint(readDocs(session.store)).slice(0, 12) || '（空库）'}`,
+    `指纹：${corpusFingerprint(readDocs(session.store, capsOf(session))).slice(0, 12) || '（空库）'}`,
     `服务器：${SERVER_NAME} ${SERVER_VERSION} · 只读 · 零模型调用`,
   ].join('\n');
 }

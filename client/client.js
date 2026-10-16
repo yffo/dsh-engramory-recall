@@ -720,6 +720,16 @@ window.__ModuleLoader__.load({
       const indexComfy = indexLines !== null && indexMax > 0 && indexLines < indexMax * 0.6;
       const errFindings = Number(sevCounts.error) || 0;
       const warnFindings = Number(sevCounts.warn) || 0;
+      // 读侧上限的账（2026-10-17 补）：召回一次只读前 maxNotes 篇 / maxBytes 字节，
+      // 超出的笔记**不进检索** —— 这件事以前完全不可见，现象只是「召回变差」。
+      // 数据来自 /state 的 storeStats（readDocsReport 的账）；老宿主没这个字段就整块不渲染。
+      const storeStats = state.storeStats && typeof state.storeStats === 'object' ? state.storeStats : null;
+      const droppedTotal = storeStats
+        ? (Number(storeStats.droppedByCount) || 0) + (Number(storeStats.droppedByBytes) || 0) + (Number(storeStats.droppedBySize) || 0)
+        : 0;
+      const capNote = storeStats && Number(storeStats.maxNotes) > 0
+        ? `一次召回最多读 ${storeStats.maxNotes} 篇 / ${Math.round((Number(storeStats.maxBytes) || 0) / 1024)} KB`
+        : '';
       const infoFindings = Number(sevCounts.info) || 0;
 
       // 日志的两个筛子：文字（提问 / 笔记名 / 原因）与轮次类型。两个都要 ——
@@ -842,7 +852,17 @@ window.__ModuleLoader__.load({
           h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
             // 「已用 / 上限」而不是「余量」：80/200 到底是用了 80 还是剩 80，早先那句话说不清（走查发现 9）。
             h('span', null, '索引已用'),
-            h(Meter, { value: indexLines, max: indexMax, tone: indexNearlyFull ? 'note' : 'hit' }))),
+            h(Meter, { value: indexLines, max: indexMax, tone: indexNearlyFull ? 'note' : 'hit' })),
+          // 被上限挡住的笔记：这是「库里有多少」与「召回看得到多少」的差额，必须可见。
+          droppedTotal > 0
+            ? h('span', {
+              style: { display: 'inline-flex', alignItems: 'center', gap: '6px' },
+              title: `${capNote}。超出的笔记不会被检索到 —— 调大 maxNotes / maxBytes，或归档掉不再用的笔记。`
+                + `（按条数丢 ${Number(storeStats.droppedByCount) || 0} · 按字节丢 ${Number(storeStats.droppedByBytes) || 0} · 单篇过大丢 ${Number(storeStats.droppedBySize) || 0}）`,
+            },
+              h('span', dotStyle('note')),
+              h('span', { style: { color: toneColor('note') } }, `有 ${droppedTotal} 篇没进检索`))
+            : null),
 
         // ── 第一问：这一轮提醒了什么 ────────────────────────────────────────
         h(Question, {
@@ -1416,6 +1436,7 @@ window.__ModuleLoader__.load({
               ['提醒记录', '插件内存里最近 80 轮（重启 App 会清空）'],
               ['被用上的比例', '记忆库目录的 .engramory-recall.jsonl（跨会话累积，只追加）'],
               ['写入记录 / 拦下的改动', '同目录的 .engramory-audit.jsonl'],
+              ['召回读多少', `${capNote || '一次召回只读库里靠前的若干篇'}：超出的笔记不会进检索。库超过这条线时，首屏会多一个点写「有 N 篇没进检索」—— 那时调大 maxNotes / maxBytes，或把不再用的笔记归档掉。`],
               ['体检', '索引与每篇笔记的现状：行数、字节、行宽、类型'],
               ['命令行里的同一份数据', 'npm run recall:stats  ·  npm run recall:report'],
             ], { flex: '0 0 172px' })))

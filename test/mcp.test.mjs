@@ -237,7 +237,7 @@ test('MCP：库不存在时给的是「库在哪」的提示，不是崩', async
   try {
     const status = await server.request('tools/call', { name: 'engramory_status', arguments: {} });
     assert.equal(status.result.isError, false);
-    assert.match(status.result.content[0].text, /笔记：0 篇/);
+    assert.match(status.result.content[0].text, /笔记：库里 0 篇/);
     assert.match(status.result.content[0].text, /没有 MEMORY\.md/);
 
     const searchReply = await server.request('tools/call', { name: 'engramory_search', arguments: { query: '随便' } });

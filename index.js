@@ -30,7 +30,7 @@ import {
   appendUsage, readUsage, summarizeUsage, usageVerdict, budgetVerdict, reasonVerdict, scoreCurveVerdict, truncationVerdict,
   noteIdFromPath, pickInjected, USAGE_FILE,
 } from './usage.js';
-import { readDocs } from './store.js';
+import { readDocs, readDocsReport, DEFAULT_MAX_NOTES, DEFAULT_MAX_BYTES } from './store.js';
 import { describeSeam, semanticSearch } from './semantic.js';
 import { auditStore, NOTE_KINDS } from './doctor.js';
 import { applyGate, gateReport, markSelfTouches, noteLedgerStats, GATE_DEFAULTS, normalizeGate } from './confidence.js';
@@ -164,6 +164,17 @@ export const DEFAULTS = {
    */
   indexMaxLines: DEFAULT_MAX_INDEX_LINES,
   indexMaxBytes: DEFAULT_MAX_INDEX_BYTES,
+  /**
+   * 读侧上限：一次召回最多读多少篇笔记 / 多少字节（超出的**不进检索**，但会被记账）。
+   *
+   * 2000 篇 / 4MB 是防病态目录的护栏（例如把整个笔记目录当库配进来），不是口味问题：
+   * 超出的笔记**永远召不回来**。以前这两条上限是**静默**的 —— 用户只看到「召回变差」，
+   * 看不到「有 N 篇根本没进检索」，全仓也没有一处报告过它（2026-10-17 复核确认）。
+   * 现在 `readDocsReport()` 把「丢了几篇、因为哪条上限」记进 status / 体检 / 面板，
+   * 并且这两个值可以调（调大就多读，代价是每轮索引构建更慢）。
+   */
+  maxNotes: DEFAULT_MAX_NOTES,
+  maxBytes: DEFAULT_MAX_BYTES,
   /**
    * 注册 `engramory` 技能（写入纪律的正文）。默认开。
    *
@@ -321,6 +332,12 @@ const storePrefix = (storePath) => path.join(storePath, path.sep);
 
 export function apply(ctx, config = {}) {
   const settings = { ...DEFAULTS, ...(config ?? {}) };
+  // 读侧上限一次算好：每轮召回（热路径）与状态/体检必须用同一份口径，不许各处自己 Number()。
+  // 写错（0 / NaN / 负数）时退回默认 —— 配置错误不该把库读空。
+  const storeCaps = {
+    maxNotes: Number(settings.maxNotes) > 0 ? Math.floor(Number(settings.maxNotes)) : DEFAULT_MAX_NOTES,
+    maxBytes: Number(settings.maxBytes) > 0 ? Math.floor(Number(settings.maxBytes)) : DEFAULT_MAX_BYTES,
+  };
   settings.storePath = normalizeStorePath(expandHome(settings.storePath));
   // 档位在**入口**就归一：`applyGate` 内部也会归一（双保险），但账本与状态路由读的是
   // `settings.gate` —— 不在这里收口，配置里写错一个词就会出现「行为是 assist、账本写 zzz」
@@ -457,7 +474,7 @@ export function apply(ctx, config = {}) {
   const SEDIMENT_COOLDOWN = 24;
 
   const indexOf = (storePath) => {
-    const docs = readDocs(storePath);
+    const docs = readDocs(storePath, storeCaps);
     if (indexCache.docs === docs && indexCache.index) return indexCache.index;
     const halfLifeDays = Number(settings.decayHalfLifeDays) || 0;
     const recencyWeight = Number(settings.recencyWeight) || 0;
@@ -660,7 +677,7 @@ export function apply(ctx, config = {}) {
       async execute(args) {
         const storePath = settings.storePath;
         if (!storePath) return { store: storePath, notes: 0, findings: [] };
-        const docs = readDocs(storePath);
+        const docs = readDocs(storePath, storeCaps);
         const limit = Math.max(Number(args?.limit) || docs.length, 1);
         const picked = docs.slice(0, limit);
         const { detectConflicts } = await import('./llm.js');
@@ -702,7 +719,7 @@ export function apply(ctx, config = {}) {
         const file = String(args?.file ?? '').trim();
         const storePath = settings.storePath;
         if (!storePath || !file) return { file, summary: '', model: '', ms: 0, error: '需要 storePath 配置与非空 file' };
-        const docs = readDocs(storePath);
+        const docs = readDocs(storePath, storeCaps);
         const note = docs.find((doc) => doc.id === file || doc.file === file);
         if (!note) return { file, summary: '', model: '', ms: 0, error: `库里没有 ${file}` };
         const { summarizeNote } = await import('./llm.js');
@@ -1162,7 +1179,8 @@ export function apply(ctx, config = {}) {
 
   const storeSnapshot = () => {
     const storePath = settings.storePath;
-    const docs = storePath ? readDocs(storePath) : [];
+    const report = storePath ? readDocsReport(storePath, storeCaps) : null;
+    const docs = report ? report.docs : [];
     const byId = new Map();
     for (const doc of docs) {
       const prev = byId.get(doc.id);
@@ -1217,6 +1235,9 @@ export function apply(ctx, config = {}) {
 
     return {
       store: storePath,
+      // 读侧上限账：库大到 2000 篇 / 4MB 以上时，超出的笔记不进检索 —— 这件事必须可见，
+      // 否则现象是「召回变差」，原因是「有 N 篇根本没读」，而用户与面板都看不到后者。
+      storeStats: report ? report.stats : null,
       audit,
       // 写入审计（落盘、可回放）。体检回答「库现在什么样」，审计回答「谁把它改成这样的」。
       writeAudit: storePath ? { epoch: GUARD_EPOCH, entries: readAudit(storePath, 40) } : { epoch: GUARD_EPOCH, entries: [] },
@@ -1237,6 +1258,8 @@ export function apply(ctx, config = {}) {
         autoArchive: settings.autoArchive === true,
         indexMaxLines: Number(settings.indexMaxLines) || DEFAULT_MAX_INDEX_LINES,
         indexMaxBytes: Number(settings.indexMaxBytes) || DEFAULT_MAX_INDEX_BYTES,
+        maxNotes: storeCaps.maxNotes,
+        maxBytes: storeCaps.maxBytes,
         registerSkill: settings.registerSkill !== false,
         recencyWeight: Number(settings.recencyWeight) || 0,
         rotationPenalty: Number(settings.rotationPenalty ?? 0),

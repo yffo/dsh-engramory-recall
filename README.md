@@ -158,6 +158,7 @@ dsh plugin --profile desktop remove dsh-engramory-recall
 | 记忆库路径 | `storePath` | `~/memory/engramory` | 支持 `~`。**留空则插件不工作** —— 不猜路径，是刻意的 |
 | 召回账本 | `usageLog` | `true` | 每次注入 / 打开多写一行到 `<storePath>/.engramory-recall.jsonl`，打开率的数据源 |
 | 索引上限 | `indexMaxLines` / `indexMaxBytes` | `200` / `25600` | `MEMORY.md` 长过这个就**拒绝写入**（索引每轮都读，超限部分会被静默不再召回） |
+| 召回读多少 | `maxNotes` / `maxBytes` | `2000` / `4194304` | 一次召回最多读多少篇 / 多少字节（防病态目录的护栏）。**超出的笔记不进检索**，不是「排后面」—— 库大到这条线时，体检、首屏与 `engramory_status` 都会把差额说出来 |
 | 总开关 | `enabled` | `true` | 关掉它只需改成 `false` |
 
 其余键（查询预算、轮换降权、去重、语义开关…）连同默认值在
