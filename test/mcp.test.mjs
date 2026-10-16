@@ -113,7 +113,7 @@ test('MCP：initialize 回服务器名、工具能力与双方都支持的协议
   }
 });
 
-test('MCP：tools/list 给出三个工具与可校验的 inputSchema', async () => {
+test('MCP：tools/list 给出五个工具与可校验的 inputSchema', async () => {
   const store = makeStore();
   const server = startServer(store);
   try {
@@ -121,13 +121,18 @@ test('MCP：tools/list 给出三个工具与可校验的 inputSchema', async () 
     const tools = reply.result.tools;
     assert.deepEqual(
       tools.map((t) => t.name),
-      ['engramory_search', 'engramory_read', 'engramory_status'],
+      ['engramory_search', 'engramory_read', 'engramory_status', 'engramory_list', 'engramory_usage'],
     );
     const search = tools.find((t) => t.name === 'engramory_search');
     assert.deepEqual(search.inputSchema.required, ['query']);
     assert.equal(search.inputSchema.properties.limit.maximum, 20);
     assert.equal(search.inputSchema.additionalProperties, false);
     assert.equal(tools.find((t) => t.name === 'engramory_status').inputSchema.properties && Object.keys(tools.find((t) => t.name === 'engramory_status').inputSchema.properties).length, 0);
+    // engramory_list 的上限是它自己的一对常量：改搜索的 MAX_LIMIT 不该顺手改掉它
+    const list = tools.find((t) => t.name === 'engramory_list');
+    assert.equal(list.inputSchema.properties.limit.maximum, 50);
+    assert.equal(list.inputSchema.additionalProperties, false);
+    assert.equal(tools.find((t) => t.name === 'engramory_usage').inputSchema.additionalProperties, false);
   } finally {
     await server.close();
     rmSync(store, { recursive: true, force: true });
@@ -204,10 +209,13 @@ test('MCP：resources/list 与 resources/read 往返，URI 不对就报错', asy
   const server = startServer(store);
   try {
     const list = await server.request('resources/list');
-    const uris = list.result.resources.map((r) => r.uri);
-    assert.equal(uris.length, Object.keys(NOTES).length);
-    assert.ok(uris.every((uri) => uri.startsWith('engramory://note/')));
-    assert.ok(uris.includes('engramory://note/reference-stdio-protocol.md'));
+    // 索引（engramory://index）现在也是一条具体资源，所以总数 = 笔记数 + 1；
+    // 「笔记资源」那部分仍然只由 .md 文件名构成。
+    const noteUris = list.result.resources.map((r) => r.uri).filter((uri) => uri.startsWith('engramory://note/'));
+    assert.equal(noteUris.length, Object.keys(NOTES).length);
+    assert.ok(list.result.resources.some((r) => r.uri === 'engramory://index'), '索引是具体资源');
+    assert.ok(noteUris.every((uri) => uri.startsWith('engramory://note/')));
+    assert.ok(noteUris.includes('engramory://note/reference-stdio-protocol.md'));
 
     const read = await server.request('resources/read', { uri: 'engramory://note/user-short-sentences.md' });
     assert.match(read.result.contents[0].text, /偏好中文短句/);

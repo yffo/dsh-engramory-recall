@@ -1,8 +1,15 @@
 # dsh-engramory-recall
 
+[![npm](https://img.shields.io/npm/v/dsh-engramory-recall?color=blue)](https://www.npmjs.com/package/dsh-engramory-recall)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![dsh-xray](https://img.shields.io/endpoint?url=https%3A%2F%2Funstone.github.io%2Fdsh-xray%2Fbadge%2Fyffo__dsh-engramory-recall.json)](https://unstone.github.io/dsh-xray/registry.html#yffo__dsh-engramory-recall)
+[English →](README.en.md)
+
 > **记忆库就在磁盘上，可模型每轮都像失忆** —— 除非你亲口提醒它「你先读一下记忆」。
 > 装上这个插件：相关的老笔记会在**每一轮自己浮上来**（最多 4 条提醒、总共不超过 480 字），
 > 不用你再手动投喂。
+
+一条命令装上（重启一次宿主生效）：`dsh plugin --profile desktop add dsh-engramory-recall`
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的**本地记忆插件**。记忆库就是一份普通 markdown 文件夹（默认 `~/memory/engramory`），
 布局遵循本仓库自己维护并冻结的 **Format v1**（[`docs/format.md`](docs/format.md)）—— 它**借鉴**了
@@ -26,7 +33,7 @@
 3. **看得见有没有用上。** 会话里多一个「记忆」标签页：这轮为什么提醒 / 为什么没提醒、
    提醒过的后来有没有被打开、库里有哪些笔记、写得干不干净，都在里面。
 
-顺带还管住三件事（都能关）：**写入保护**（不合规的笔记当场拒写）、**静态体检**（12 项检查，
+顺带还管住三件事（都能关）：**写入保护**（不合规的笔记当场拒写）、**静态体检**（14 项检查，
 只报告不动手）、**可逆归档**（把「第 N 批」这类追加式章节整段搬进 `-history.md`，不删历史）。
 
 有几个词，下面统一说人话：
@@ -54,7 +61,7 @@
 | 🩺 | 体检器 | 14 项检查：孤儿笔记、索引重复、失联路径、超 100KB、待办 30 天没更新、「带进上下文 20 次一次没被读过」… |
 | 🧹 | 消费侧门控 | 带进上下文很多次、一次都没被读过的笔记会被降权（默认），证据确凿的才移出注入；「过期」只降权不拦 —— 旧不等于没用 |
 | 📊 | 打开率账本 + 记忆周报 | 每次提醒、每次被打开都落一行 JSONL；`npm run recall:stats` 看账，`npm run recall:report` 出一页人话周报（谁在干活、花了多少上下文、「本轮一个字都没进」也可见） |
-| 🧩 | 别的宿主也能蹭 | `mcp.js` 是零依赖的 stdio MCP 服务器，同一份库挂给 Claude Code / Codex / Cursor（只读） |
+| 🧩 | 别的宿主也能蹭 | `mcp.js` 是零依赖的 stdio MCP 服务器：五个只读工具 + 索引资源 + 两个提示（`recall` / `curate`），同一份库挂给 Claude Code / Codex / Cursor |
 
 ## 🚀 怎么用
 
@@ -185,7 +192,12 @@ dsh plugin --profile desktop remove dsh-engramory-recall
 
 **Q：我只用 Claude Code / Codex / Cursor，能用吗？**
 能，但**只读**：`mcp.js` 是一个零依赖的 stdio MCP 服务器（`engramory-recall-mcp` 命令），
-同一份记忆库可以挂给支持 MCP 的宿主做检索和读笔记。写入治理留在家用版里 ——
+挂上之后对面拿到五样东西：`engramory_search`（检索）、`engramory_read`（读原文）、
+`engramory_status`（确认读的是哪个库）、`engramory_list`（先看库里有什么）、
+`engramory_usage`（账本摘要）；再加一个索引资源 `engramory://index` 与两个提示
+（`recall` 先搜再答、`curate` 把这次会话里定下来的事实整理成草稿）。
+一条命令挂进 Claude Code：`claude mcp add engramory -- engramory-recall-mcp --store ~/memory/engramory`。
+写入治理留在家用版里 ——
 别的宿主没有那套守卫接口，硬做等于把 fail-closed 的闸门换成一句口头约定。
 见 [docs/release.md](docs/release.md#别的宿主mcp-服务器只读)。
 
@@ -206,12 +218,29 @@ dsh plugin --profile desktop remove dsh-engramory-recall
 | `store.js` | 读记忆库与索引（markdown 是唯一真相源，不建第二份存储） |
 | `guard.js` / `audit.js` | 写入闸门（fail-closed）+ `.engramory-audit.jsonl` 审计 |
 | `index-guard.js` | 索引上限闸门（200 行 / 25KB 拒绝写入） |
-| `doctor.js` | 12 项静态体检，只报告不动手 |
+| `doctor.js` | 14 项静态体检，只报告不动手 |
 | `archive.js` | 追加式章节 → `<笔记>-history.md`，先备份、两段式 |
 | `usage.js` + `scripts/recall-stats.mjs` / `scripts/recall-report.mjs` | 打开率账本、`npm run recall:stats` 明细、`npm run recall:report` 周报 |
 | `client/client.js` | 「记忆」标签页（手写 bundle，不需要构建工具） |
-| `mcp.js` | 给别的宿主的零依赖 stdio MCP 服务器（只读） |
+| `mcp.js` | 给别的宿主的零依赖 stdio MCP 服务器（只读）：五工具 + 索引资源 + 两个提示 |
 | `skill.js` | 注册 `engramory` 技能：什么时候该记、什么时候不该记 |
+
+### 🔍 别人怎么体检我们
+
+[dsh-xray](https://github.com/unStone/dsh-xray) 每天静态扫描 `dsh-plugin` 话题下的全部插件（一万八千多个），
+只读代码、不执行，给每个插件出一张**能力卡**。我们那张卡是
+[**C2 · 3 flags**](https://unstone.github.io/dsh-xray/registry.html#yffo__dsh-engramory-recall)，三条标记逐条对得上：
+
+| 扫描器看到的 | 是什么 |
+|---|---|
+| `runtime_patch · cordis.patch.yml` | 配置示例文件（默认参数），不是偷偷改运行时 |
+| `exec_tooling ×18` | 全部在 `bench/` 里 —— 基准尺子会起子进程，**这些文件不进 npm 包** |
+| `net_server_tooling ×2` | 同上，在 `bench/embed-live.mjs`（试真·语义检索的实测脚本） |
+| outbound domains: `api.openai.com` / `api.mistral.ai` / … | **可选**语义检索后端的地址：默认关闭，开了才会出网 |
+| env: `ENGRAMORY_STORE` / `ENGRAMORY_SEMANTIC_PROVIDER` | 我们的两个开关：库路径、语义后端选谁 |
+
+原则就一句：**我们的能力面欢迎别人读**。想自己验，扫描器是开源的（`scanner/`），也可以直接读
+[`docs/limits.md`](docs/limits.md) 里我们自陈的短板。
 
 ## 🛠 开发
 

@@ -102,19 +102,35 @@ try {
   const tools = await request('tools/list');
   const names = (tools.result?.tools ?? []).map((t) => t.name);
   show('tools/list', names.join(' / '));
-  if (names.length !== 3) failures += 1;
+  // 名字写死是故意的：工具面是对外契约，少一个多一个都要有人看见。
+  const expected = ['engramory_search', 'engramory_read', 'engramory_status', 'engramory_list', 'engramory_usage'];
+  if (names.length !== expected.length || expected.some((n) => !names.includes(n))) failures += 1;
 
   await tool('engramory_status');
   await tool('engramory_search', { query, limit: 3 });
+  await tool('engramory_list', { limit: 3 });
+  await tool('engramory_usage', { top: 3 });
 
   const list = await request('resources/list');
-  const first = list.result?.resources?.[0];
-  show('resources/list', `${list.result?.resources?.length ?? 0} 个资源${first ? `，第一个：${first.uri}` : ''}`);
+  const resources = list.result?.resources ?? [];
+  const first = resources[0];
+  show('resources/list', `${resources.length} 个资源${first ? `，第一个：${first.uri}` : ''}`);
+  if (!resources.some((r) => r.uri === 'engramory://index')) failures += 1;
   if (first) {
     const read = await request('resources/read', { uri: first.uri });
     const text = read.result?.contents?.[0]?.text ?? '';
     show('resources/read', `${first.uri} → ${text.length} 字符`);
+    if (!text) failures += 1;
   }
+
+  const prompts = await request('prompts/list');
+  const promptNames = (prompts.result?.prompts ?? []).map((p) => p.name);
+  show('prompts/list', promptNames.join(' / '));
+  if (!promptNames.includes('recall') || !promptNames.includes('curate')) failures += 1;
+  const prompt = await request('prompts/get', { name: 'recall', arguments: { query } });
+  const promptText = prompt.result?.messages?.[0]?.content?.text ?? '';
+  show('prompts/get', `recall → ${promptText.length} 字符`);
+  if (!promptText.includes('engramory_search')) failures += 1;
 
   const bad = await request('tools/call', { name: 'engramory_read', arguments: { file: '../escaped.md' } });
   show('越界读被拒 ✓', bad.result?.content?.[0]?.text ?? JSON.stringify(bad.error));
@@ -128,5 +144,5 @@ try {
 }
 
 console.log(`\n── stderr（日志只该出现在这里）──\n${stderrLines.join('\n') || '（空）'}`);
-console.log(failures ? `\n✗ 有 ${failures} 处不对` : '\n✓ 全程走通：标准 MCP 客户端能用的三个工具 + 资源读取');
+console.log(failures ? `\n✗ 有 ${failures} 处不对` : '\n✓ 全程走通：五个工具 + 索引资源 + 两个提示，越界读被拒');
 process.exit(failures ? 1 : 0);

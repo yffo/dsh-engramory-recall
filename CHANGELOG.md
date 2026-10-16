@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.17.0
+
+**跨宿主那一层补齐：同一份记忆库，别的宿主也能读得明白。** 之前的 MCP 服务器只有三个工具，
+对面（Claude Code / Codex / Cursor）挂上之后得靠猜：库是陌生的、不知道有哪些笔记、也看不到
+「这些提醒到底有没有被用上」。这一版把只读视图补成一套完整的入口，并把「门面」也修了 ——
+README 首屏一条命令、英文版、以及第三方静态扫描给我们的能力卡。
+
+一句话结论：**我们没有在别人的宿主里写任何东西**（写入治理只有一个家），但把「读」这件事
+做到了对面不用猜。
+
+- **`mcp.js` 431 → 777 行**，五工具 + 一资源 + 两提示：
+  - `engramory_list`：清单（文件名 · 类型 · 描述 · 字符数，新的在前），`kind` 可按 user /
+    feedback / project / reference 筛，`limit` 1–50 默认 20 —— 库陌生时先看这个，再决定搜什么。
+  - `engramory_usage`：账本摘要（注入过几条 / 打开率 / 一个字都没进的轮次 / 按来源拆分 /
+    预算用量 / 被打开最多的几篇）。
+  - 资源 `engramory://index`：`MEMORY.md` 全文，客户端可以先读它再决定搜什么。
+  - 提示 `recall`（先搜、再打开最相关的一篇、带着它回答）与 `curate`（把这次会话里定下来的
+    事实整理成 Format v1 草稿，**交给你确认后自己写文件**）。
+- **「缺数据不是 0」这条纪律进了新工具**：账本不存在 / 窗口内一行都没有 / 老行没有用量字段，
+  三种情况说三种不同的话；`used` 与 `usedCounted` 两个口径都印出来并说明差别；末尾永远带一句
+  「这是代理指标 —— 它证明笔记后来被打开了，证明不了被用进了回答」。
+- **一个实现上的取舍（写在这里免得后人踩）**：`store.js` 的文档对象里**没有 `type`**
+  （`splitNote` 只取 name / description / aliases），而类型只活在 frontmatter 原文里。为了不动
+  `store.js`，`noteTypeOf()` 自己读一遍头部认 `^type:`（按 mtime 缓存）。代价是 `engramory_list`
+  比别的工具多一轮文件读 —— 只在这一个工具里付。
+- **测试 818 → 839 例全绿**（新增 `test/mcp-view.test.mjs` 21 例）；`mcp.js` 覆盖率
+  99.23% 行 / 92.26% 分支 / 100% 函数。既有那三件套的名字、顺序、输出、错误码、协议协商与
+  `--print-config` **一字未改**。
+- **这一层怎么验的（如实写）**：本机没有可用的第三方已登录宿主 —— Claude Code 2.1.142 报
+  `401 Invalid API key`（`~/.claude.json` 里没有 `oauthAccount`），Gemini CLI 也没有凭据。
+  于是换了三条硬证据：① **官方 `@modelcontextprotocol/sdk@1.32.1` 当客户端**，连**发布出去的
+  那份产物**（`npm pack` → 临时前缀安装 → 调 `.bin/engramory-recall-mcp`），5 工具 / 3 资源 +
+  1 模板 / 2 提示全部走通、路径穿越被拒、全程 61 ms；② `npm run mcp:smoke` 扩到覆盖新面
+  （帧序、错误码、越界读逐条断言）；③ 宿主配置片段按官方文档写，其中 Claude Code 的
+  `claude mcp add engramory -- engramory-recall-mcp --store ~/memory/engramory` 一行待你在
+  已登录的机器上补最后一步。
+- **门面**：README 首屏加 npm / MIT / **dsh-xray 能力卡**三枚徽章、一条安装命令、`English →` 链接；
+  新增英文 `README.en.md`（285 行，逐个数字标出处，算不出来源的宁可不写）。
+- **第三方体检**：[dsh-xray](https://github.com/unStone/dsh-xray) 每天静态扫描 `dsh-plugin`
+  话题下的全部仓库（18 697 个），**我们已被收录**（首次收录 2026-10-15，能力卡
+  **C2 · 3 flags**）。README 新增「别人怎么体检我们」一节，把三条 flag 逐条对上：
+  `runtime_patch` 是配置示例、`exec_tooling ×18` 与 `net_server_tooling ×2` 全在 `bench/`
+  （不进 npm 包）、outbound domains 全部来自**默认关闭**的可选语义后端探针。
+- **顺手修的文档漂移**：README 与 `docs/how-it-works.md` 里体检器项数还写着 12（实际 14，0.16.0
+  就加了 `never-used` / `stale-project`），已改正；仓库描述与话题更新（补 `deepseek-harness` /
+  `agent-memory` / `mcp-server`）。
+
 ## 0.16.0
 
 **消费侧门控：检索回答「像不像」，门控回答「值不值得占上下文」。** 上限（`maxPointers` /

@@ -132,16 +132,26 @@ npm run release:verify                                       # 发完必须验�
 
 ## 别的宿主：MCP 服务器（只读）
 
-`mcp.js` 是一个零依赖的 MCP（Model Context Protocol）stdio 服务器。它只做三件事，
-全部只读、全部本机、零模型调用：
+`mcp.js` 是一个零依赖的 MCP（Model Context Protocol）stdio 服务器。它只做一件事：**让你在别的宿主里也能读同一份记忆**。全部只读、全部本机、零模型调用。
 
 | 工具 | 作用 |
 |---|---|
 | `engramory_search` | 同一个 BM25 内核（中文分词、177 条同义桥、别名、字段加权） |
 | `engramory_read` | 按文件名读一篇笔记的原文（只认库里根目录的 `.md`，路径一律拒） |
 | `engramory_status` | 库在哪、多少篇、索引几行几字节、指纹 —— 先确认读的是不是你以为的那个库 |
+| `engramory_list` | 清单：文件名 · 类型 · 描述 · 字符数（`kind` 可按四类筛、`limit` 1–50 默认 20）。库陌生时先看这里 |
+| `engramory_usage` | 账本摘要：注入过几条、打开率、一个字都没进的轮次、按来源拆分、预算用量、被打开最多的几篇（`days` / `top`） |
 
-另外把每篇笔记也注册成 MCP 资源（`engramory://note/<文件名>`），客户端可以直接列出来读。
+资源与提示：
+
+| 类型 | 名字 | 说明 |
+|---|---|---|
+| 资源 | `engramory://index` | `MEMORY.md` 全文：库的入口地图，客户端可以先读它再决定搜什么 |
+| 资源 | `engramory://note/<文件名>` | 每篇笔记一篇资源，客户端可以直接列出来读 |
+| 提示 | `recall` | 参数 `query`：先搜、再挑最相关的一篇打开、带着它回答（提示里写死「只读，不许写文件」） |
+| 提示 | `curate` | 无参：把本次会话里定下来的事实整理成 Format v1 草稿，**交给你确认后自己写文件** |
+
+`engramory_usage` 只读账本，所以它有几条自我约束：账本不存在 / 窗口内一行都没有 / 老行没有用量字段，三种情况分别说三种不同的话，**都不印 0**（缺数据不是 0）；`used` 与 `usedCounted` 是两个口径，两个数都印出来并说明差别；末尾永远带一句「这是代理指标」。
 
 ```jsonc
 // Claude Code / Claude Desktop / Cursor 之类的 mcpServers 配置
@@ -160,21 +170,37 @@ npm run release:verify                                       # 发完必须验�
 engramory-recall-mcp --store ~/memory/engramory      # 库路径也可以用环境变量 ENGRAMORY_STORE
 npm run mcp:smoke                                    # 自证：拉起来走一遍完整对话，打印收发记录
 npm run bench:mcp                                    # 这一层的数字：冷启动、每步往返、协议帧多大
+
+# Claude Code 也可以一条命令挂上（等价于上面那段 JSON）
+claude mcp add engramory -- engramory-recall-mcp --store ~/memory/engramory
 ```
 
-这一层的代价（本机实测，64 篇的库、5 次冷启动取中位数）：
+这一层的代价（本机真实库 **71 篇**、5 次冷启动取中位数；`npm run bench:mcp` 复算）：
 
 | 指标 | 值 | 说明 |
 |---|---|---|
-| 冷启动 | 39 ms | 含 Node 启动、加载索引、`initialize` 往返 |
+| 冷启动 | 40 ms | 含 Node 启动、加载索引、`initialize` 往返 |
 | `tools/list` | < 1 ms | 清单是静态的 |
-| `engramory_search` | 74 ms | 首次检索要为 66 篇建一次索引，之后同进程走缓存 |
+| `engramory_search` | 103 ms | 首次检索要为 71 篇建一次索引，之后同进程走缓存 |
 | `engramory_status` | 3 ms | 只读索引头 |
-| 协议帧合计 | 3025 字节 | 一次完整对话（initialize + list + search + status）的 stdout 总量 |
+| 协议帧合计 | 5242 字节 | 一次完整对话（initialize + 五工具 + 资源 + 提示）的 stdout 总量 |
 | 依赖 | 0 | 不装任何东西，进程起来就能说 MCP |
 
-延迟随机器变化，能跨机复算的是**帧的字节数与依赖性**，以及 `npm run bench:mcp` 里的那条硬断言：
-stdout 上只准有 JSON-RPC 帧，混进任何一行非 JSON，这次运行就直接失败（顺带守住「日志只走 stderr」）。
+延迟随机器变化，能跨机复算的是**帧的字节数与依赖性**，以及两条常驻断言：`npm run bench:mcp`
+要求 stdout 上只准有 JSON-RPC 帧（混进任何一行非 JSON，这次运行就直接失败），
+`npm run mcp:smoke` 用脚本当客户端把五个工具、索引资源、两个提示与越界读全部走一遍。
+
+**这一层是怎么验的（如实写）**：本机没有可用的第三方已登录宿主 —— Claude Code 2.1.142 装是装了，
+但 `claude -p` 报 `401 Invalid API key`（`~/.claude.json` 里没有 `oauthAccount`），Gemini CLI 也没有凭据，
+所以「在别人的宿主里点一下」这一步不是在真宿主里完成的，而是这样做的：
+
+1. **官方 MCP SDK 当客户端**（`@modelcontextprotocol/sdk@1.32.1`，临时目录装的，不进仓库、不进包）
+   连**发布出去的那份产物**（`npm pack` → 装进临时前缀 → 调 `.bin/engramory-recall-mcp`）：
+   5 工具 / 3 资源 + 1 模板 / 2 提示全部走通，路径穿越被拒，全程 61 ms 无异常；
+2. **裸 stdio 帧**（`npm run mcp:smoke`，仓库自带）：12 帧一问一答，帧序与错误码逐条断言；
+3. 两个宿主配置片段按各自官方文档写（上面的 JSON、以及 `claude mcp add` 命令行形式），
+   **未在本机端到端跑过** —— 你那边登录后，`claude mcp add engramory -- engramory-recall-mcp --store ~/memory/engramory`
+   一条命令就能补上这最后一步。
 
 **为什么它是只读的**：写入闸门、归档、体检这些能力依赖宿主工具层的钩子（`tools/pre-execute`），
 别的宿主没有这套接口；硬做一个「谁都能写」的版本，等于把 fail-closed 的闸门换成一句口头约定。

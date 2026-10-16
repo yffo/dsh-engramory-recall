@@ -16,7 +16,7 @@
  * 用法：`node mcp.js [--store <路径>]`，或者看 README 里各宿主的配置片段。
  */
 
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -26,6 +26,7 @@ import { buildIndex, search } from './bm25.js';
 import { countLines, DEFAULT_MAX_INDEX_BYTES, DEFAULT_MAX_INDEX_LINES, measureIndex } from './index-guard.js';
 import { describeSeam, semanticSearch } from './semantic.js';
 import { corpusFingerprint, readDocs } from './store.js';
+import { readUsage, summarizeUsage, USAGE_FILE } from './usage.js';
 
 export const SERVER_NAME = 'dsh-engramory-recall';
 /** 声明支持的 MCP 协议版本。客户端报的版本在名单里就照它回，否则回我们最新的。 */
@@ -36,6 +37,18 @@ export const DEFAULT_STORE = '~/memory/engramory';
 export const MAX_OUTPUT_CHARS = 40000;
 export const MAX_LIMIT = 20;
 export const DEFAULT_LIMIT = 5;
+/**
+ * `engramory_list` 有自己的一对上下限：它是「先看一眼库里有什么」的入口，
+ * 一次多看几条很正常（让陌生宿主先建立地图），跟搜索的 MAX_LIMIT 是两回事 ——
+ * 改 MAX_LIMIT 不该顺手改掉搜索的语义，所以单开一对常量。
+ */
+export const MAX_LIST_LIMIT = 50;
+export const DEFAULT_LIST_LIMIT = 20;
+/** 每行只给 ~60 字描述：清单是目录不是正文，一行一条才扫得动。 */
+export const LIST_DESCRIPTION_CHARS = 60;
+/** `engramory_usage` 的 top 榜上限：榜单是佐证，不是报表。 */
+export const MAX_USAGE_TOP = 20;
+export const DEFAULT_USAGE_TOP = 5;
 
 const pkg = (() => {
   try {
@@ -84,6 +97,49 @@ export const TOOLS = [
     description: '汇报记忆库的位置、笔记数、索引用量与上限，用来确认客户端读的是不是你以为的那个库。',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },
   },
+  {
+    name: 'engramory_list',
+    description:
+      '列出记忆库里的笔记清单（文件名 · 类型 · 描述 · 字符数，按修改时间新的在前）。库是陌生的时先看这里，'
+      + '再决定搜什么词、读哪几篇。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['user', 'feedback', 'project', 'reference'],
+          description: '只看某一类：user（用户是谁）/ feedback（交互偏好）/ project（项目决策与踩坑）/ reference（外部资料指路）。不给就是全部。',
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: MAX_LIST_LIMIT,
+          description: `最多列几条，默认 ${DEFAULT_LIST_LIMIT}。`,
+        },
+      },
+    },
+  },
+  {
+    name: 'engramory_usage',
+    description:
+      '汇报记忆召回账本（只读）：注入过多少条指针、后来被打开过多少条（打开率）、一个字都没进的轮次、'
+      + '按提问来源拆分、预算用量与顶格轮次数、被打开最多的几篇。'
+      + '注意这是代理指标 —— 它证明「笔记后来被打开了」，证明不了「被用进了回答」。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        days: { type: 'integer', minimum: 0, description: '只看最近几天（0 = 账本里的全部，默认 0）。' },
+        top: {
+          type: 'integer',
+          minimum: 1,
+          maximum: MAX_USAGE_TOP,
+          description: `列出被真正打开过最多的几篇笔记，默认 ${DEFAULT_USAGE_TOP}。`,
+        },
+      },
+    },
+  },
 ];
 
 export const RESOURCE_TEMPLATE = {
@@ -91,6 +147,20 @@ export const RESOURCE_TEMPLATE = {
   name: '一篇笔记',
   description: '把 {file} 换成 <store> 下的文件名。',
   mimeType: 'text/markdown',
+};
+
+/**
+ * 库的入口地图：索引（MEMORY.md）本身是一等资源。它是宿主「先看一眼有没有相关的」
+ * 的那张地图，跟「库里某一篇笔记」不是一回事 —— 所以给它一个固定的、可枚举的 URI，
+ * 而不是藏在 note 模板里让调用方去猜文件名。
+ */
+export const INDEX_URI = 'engramory://index';
+export const INDEX_RESOURCE = {
+  uri: INDEX_URI,
+  name: '记忆索引',
+  title: '记忆索引（MEMORY.md）',
+  mimeType: 'text/markdown',
+  description: 'MEMORY.md 全文：库的入口地图，一行一条指针，先读它再决定打开哪几篇笔记。',
 };
 
 export function expandHome(value) {
@@ -139,6 +209,65 @@ function notesOf(session) {
     else if (!existing.description && doc.description) existing.description = doc.description;
   }
   return [...notes.values()];
+}
+
+/**
+ * `type:` 只活在笔记的 frontmatter 里，而 `store.js` 的 readDocs() 已经把 frontmatter
+ * 摘掉了（它只挑 name/description/aliases 三个字段），所以「这篇是 user 还是 project」
+ * 只能从原文的头部认。**不碰 store.js**，所以这里自己截一段头部来读。
+ * 缓存按 mtimeMs 失效：只留最近一次的那个库（一次 stdio 会话只读一个库）。
+ */
+let listMetaCache = { store: '', docs: new Map() };
+
+function noteTypeOf(session, doc) {
+  if (listMetaCache.store !== session.store) listMetaCache = { store: session.store, docs: new Map() };
+  const cached = listMetaCache.docs.get(doc.id);
+  if (cached && cached.mtimeMs === doc.mtimeMs) return cached.type;
+  let text = '';
+  try {
+    text = readFileSync(join(session.store, doc.id), 'utf8');
+  } catch {
+    /* 读不到的按「没写 type」算：清单里照样列出来，只是类型显示「—」。 */
+  }
+  const head = text.replace(/^\uFEFF/, '');
+  const end = head.indexOf('\n---', 3);
+  const frontmatter = head.startsWith('---') && end > 0 ? head.slice(0, end) : '';
+  const match = frontmatter.match(/^type[ \t]*:[ \t]*(.+)$/m);
+  const type = match ? match[1].trim().replace(/^["']|["']$/g, '') : '';
+  listMetaCache.docs.set(doc.id, { mtimeMs: doc.mtimeMs, type });
+  return type;
+}
+
+/**
+ * 清单的去重口径：长笔记在索引里会被切成多个桶（同一个 id 重复出现），
+ * 而清单是给「库里有什么」看的 —— 一篇就是一条，保留第一条。
+ */
+function listNotes(session) {
+  const notes = new Map();
+  for (const doc of readDocs(session.store)) {
+    if (notes.has(doc.id)) continue;
+    notes.set(doc.id, {
+      file: doc.id,
+      description: String(doc.description ?? '').replace(/\s+/g, ' ').trim(),
+      chars: Number(doc.chars) || 0,
+      mtimeMs: Number(doc.mtimeMs) || 0,
+      type: noteTypeOf(session, doc),
+    });
+  }
+  return [...notes.values()];
+}
+
+/** 描述截到 ~60 字（按码点切，别把 emoji 劈成两半）。 */
+function truncate(text, max) {
+  const chars = [...text];
+  return chars.length > max ? `${chars.slice(0, max).join('')}…` : text;
+}
+
+/** 可选的整数参数：没给 / 给了但不是数 → 用默认值；给了数就夹到 [min, max]。 */
+function optionalInt(value, { fallback, min, max }) {
+  const n = Number(value);
+  if (value === undefined || value === null || value === '' || !Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
 }
 
 function safeNotePath(session, file) {
@@ -214,6 +343,112 @@ function toolStatus(session) {
   ].join('\n');
 }
 
+const LIST_KINDS = ['user', 'feedback', 'project', 'reference'];
+
+/**
+ * 「库里有什么」——给陌生宿主的入口地图。刻意不做检索：检索的前提是知道该搜什么词，
+ * 而这一步的用处正是让模型先知道库里有什么，再决定搜索词。
+ */
+function toolList(session, args) {
+  const rawKind = args?.kind;
+  const kind = rawKind === undefined || rawKind === null || rawKind === '' ? '' : String(rawKind).trim();
+  if (kind && !LIST_KINDS.includes(kind)) {
+    throw new McpError(`kind 只认 ${LIST_KINDS.join(' / ')} 之一，收到的是：${kind}。不给就是全部。`);
+  }
+  const limit = optionalInt(args?.limit, { fallback: DEFAULT_LIST_LIMIT, min: 1, max: MAX_LIST_LIMIT });
+  const all = listNotes(session);
+  if (!all.length) {
+    throw new McpError(`库是空的或不存在：${session.store}。用 --store <路径> 或环境变量 ENGRAMORY_STORE 指定。`);
+  }
+  const typed = kind ? all.filter((note) => note.type === kind) : all;
+  // 按「改得最新」排，mtime 相同再按文件名 —— 排序必须确定，否则同一份库两次列出顺序不同。
+  const sorted = [...typed].sort((a, b) => (b.mtimeMs - a.mtimeMs) || a.file.localeCompare(b.file));
+  const shown = sorted.slice(0, limit);
+  const header = kind
+    ? `库：${session.store} · 类型：${kind}（全部 ${all.length} 篇里有 ${typed.length} 篇）`
+    : `库：${session.store} · 共 ${all.length} 篇`;
+  const lines = shown.map((note) => {
+    const description = note.description ? truncate(note.description, LIST_DESCRIPTION_CHARS) : '（没有描述）';
+    return `${note.file} · ${note.type || '—'} · ${description} · ${note.chars} 字符`;
+  });
+  const tail = `共 ${typed.length} 篇${kind ? `（类型 ${kind}）` : ''}，这里列了前 ${shown.length} 篇。`;
+  const footer = kind || shown.length === typed.length
+    ? tail
+    : `${tail}还有 ${typed.length - shown.length} 篇没列出来（用 limit 调大，上限 ${MAX_LIST_LIMIT}，或按 kind 过滤）。`;
+  // 说明行本身也是内容：limit 是调用方自己给的，被夹过就得说清楚按什么算的。
+  const asked = Number(args?.limit);
+  const clampNote = Number.isFinite(asked) && asked !== shown.length && (asked > MAX_LIST_LIMIT || asked < 1)
+    ? `（limit 收到 ${Math.trunc(asked)}，按 ${limit} 算）`
+    : '';
+  const body = [header, ...lines, footer + clampNote].join('\n');
+  if (body.length > MAX_OUTPUT_CHARS) {
+    return `${body.slice(0, MAX_OUTPUT_CHARS)}\n\n…（清单超过 ${MAX_OUTPUT_CHARS} 字符，这里截断了；把它调小或加 kind 过滤）`;
+  }
+  return body;
+}
+
+const usageDate = (ts) => new Date(ts).toISOString().slice(0, 10);
+
+/**
+ * 只读地念一遍召回账本。**不重新实现任何统计口径**：读盘用 usage.js 的 readUsage()，
+ * 统计用它的 summarizeUsage() —— 面板、尺子、这里必须是同一套数字，否则两边对不上时
+ * 没人知道该信哪个。这个函数只做两件事：按时间窗筛行、把已有字段组织成人话。
+ */
+function toolUsage(session, args) {
+  const days = optionalInt(args?.days, { fallback: 0, min: 0, max: 3650 });
+  const top = optionalInt(args?.top, { fallback: DEFAULT_USAGE_TOP, min: 1, max: MAX_USAGE_TOP });
+  const ledger = join(session.store, USAGE_FILE);
+  if (!existsSync(ledger)) {
+    // 缺数据 ≠ 0：印一堆 0 会让人以为「跑过但没打开任何笔记」，而事实是还没开始记。
+    return `还没有账本：${ledger} 不存在。\n`
+      + '账本由 DSH 那侧的插件在注入记忆时写（一行一条 JSONL）；这个服务器只读，不会替你创建它。';
+  }
+  const lines = readUsage(session.store, 2000);
+  if (!lines.length) return `账本还是空的：${ledger} 存在，但没有一行记录。`;
+  // 窗口口径就地做（usage.js 没有现成的 days 过滤）：先按 ts 筛，再喂给 summarizeUsage，
+  // 免得统计里混进窗口外的行。
+  const now = Date.now();
+  const cutoff = days > 0 ? now - days * 86400000 : 0;
+  const windowed = cutoff ? lines.filter((line) => Number(line?.ts ?? 0) >= cutoff) : lines;
+  if (cutoff && !windowed.length) {
+    return `最近 ${days} 天没有账本记录（${ledger} 共 ${lines.length} 行，最早一行在 ${usageDate(Number(lines.at(-1)?.ts) || now)}）。`;
+  }
+  const summary = summarizeUsage(windowed, { positions: 5, neverOpenedLimit: 5 });
+  const pct = (value) => `${(value * 100).toFixed(1)}%`;
+  const scope = (key) => summary.scopes?.[key] ?? { injectRounds: 0, pointers: 0, used: 0 };
+  const scopeLine = [['main', '主对话'], ['subagent', '子代理'], ['unknown', '未知']]
+    .map(([key, label]) => [label, scope(key)])
+    .filter(([, s]) => s.pointers > 0)
+    .map(([label, s]) => `${label} ${s.injectRounds} 轮 / ${s.pointers} 条 / 打开 ${s.used} 条`);
+  const budget = summary.budgetUse ?? { n: 0, median: 0, full: 0 };
+  const budgetText = budget.n
+    ? `预算（maxChars）：${summary.budgetRounds} 轮记了用量，中位用掉 ${Math.round(budget.median * 100)}%、顶格（≥95%）${budget.full} 轮`
+    : `预算（maxChars）：${summary.budgetRounds} 轮都没有用量字段（0.13.13 之前的行）—— 缺数据，不是用掉 0`;
+  // summarizeUsage 的 notes 是按「注入次数」排的，而这里要的是「被打开最多的几篇」——
+  // 自己再排一次（排完仍要标清 opened 是«被打开过的轮数»：同一轮里读三次只算一次）。
+  const ranked = summary.notes
+    .filter((note) => note.opened > 0)
+    .sort((a, b) => (b.opened - a.opened) || (b.injected - a.injected) || (b.lastAt - a.lastAt))
+    .slice(0, top);
+  const topText = ranked.length
+    ? ranked.map((note, i) => `${i + 1}. ${note.id} —— 被打开过 ${note.opened} 轮 / 注入过 ${note.injected} 轮`).join('\n')
+    : '（还没有任何一篇被打开过）';
+  const windowText = days > 0 ? `最近 ${days} 天窗口` : '全部';
+  const clampNote = days > 3650 ? `（days 收到 ${Math.trunc(Number(args.days))}，按 3650 天算）` : '';
+  return [
+    `账本：${ledger}（${windowText}${clampNote}：${windowed.length} 行，覆盖 ${usageDate(summary.firstAt || now)} → ${usageDate(summary.lastAt || now)}）`,
+    `轮次：${summary.injectRounds} 轮注入了指针，共 ${summary.pointers} 条`,
+    `被打开：usedCounted（同一轮里读三次只算一次）${summary.usedCounted} 条 / 打开率 ${pct(summary.openRate)}`
+      + ` —— 原始 used 行数 ${summary.used} 条，两者口径不同`,
+    `一个字都没进：${summary.zeroRounds} 轮（注入过 0 条）；另有去重跳过 ${summary.skipRounds} 轮、沉淀 ${summary.sedimentRounds} 轮`,
+    `按来源：${scopeLine.length ? scopeLine.join(' ｜ ') : '账本里没有带来源的行'}`,
+    budgetText,
+    `被真正打开最多的 ${top} 篇：`,
+    topText,
+    '这是代理指标：它证明「笔记后来被打开了」，证明不了「被用进了回答」——判断一套召回管不管用，还得看打开率之外的位置曲线与来源拆分。',
+  ].join('\n');
+}
+
 /** 关着（默认）时用的同步词面检索 —— 与插件里那条路径一字不差。 */
 function searchLexical(index, query, limit) {
   return buildIndex ? search(index, query, limit) : [];
@@ -223,6 +458,8 @@ const HANDLERS = {
   engramory_search: toolSearch,
   engramory_read: (session, args) => readNote(session, args?.file),
   engramory_status: toolStatus,
+  engramory_list: toolList,
+  engramory_usage: toolUsage,
 };
 
 export async function callTool(session, params) {
@@ -244,22 +481,125 @@ export async function callTool(session, params) {
 
 export function listResources(session) {
   return {
-    resources: notesOf(session).map((note) => ({
-      uri: `engramory://note/${note.file}`,
-      name: note.file,
-      title: note.title,
-      description: note.description || undefined,
-      mimeType: 'text/markdown',
-    })),
+    resources: [
+      // 索引排在最前：它是「先看这个」的那一个。注意 notesOf() 从来不含 MEMORY.md
+      // （store.js 只把非索引的 .md 当笔记），所以这里不会出现两条索引。
+      INDEX_RESOURCE,
+      ...notesOf(session).map((note) => ({
+        uri: `engramory://note/${note.file}`,
+        name: note.file,
+        title: note.title,
+        description: note.description || undefined,
+        mimeType: 'text/markdown',
+      })),
+    ],
   };
 }
 
 export function readResource(session, params) {
   const uri = String(params?.uri ?? '');
+  if (uri === INDEX_URI) {
+    // 固定文件名 + 固定库路径：这里没有调用方给的路径成分，拼接是安全的。
+    const full = join(session.store, 'MEMORY.md');
+    let text;
+    try {
+      text = readFileSync(full, 'utf8');
+    } catch {
+      throw new McpError(`读不到索引：${full}。用 engramory_status 确认库的位置，或先用 engramory_list 看库里有什么。`);
+    }
+    return { contents: [{ uri, mimeType: 'text/markdown', text }] };
+  }
   const prefix = 'engramory://note/';
-  if (!uri.startsWith(prefix)) throw new McpError(`只认得 ${prefix}<文件名> 这种 URI，收到的是：${uri}`);
+  if (!uri.startsWith(prefix)) throw new McpError(`只认得 ${prefix}<文件名> 与 ${INDEX_URI} 这两种 URI，收到的是：${uri}`);
   const file = decodeURIComponent(uri.slice(prefix.length));
   return { contents: [{ uri, mimeType: 'text/markdown', text: readNote(session, file) }] };
+}
+
+/**
+ * 提示（prompts）是 MCP 的第三个「面」：工具是「模型能做什么」，资源是「宿主能读什么」，
+ * 提示是**用户在客户端里点一下就能把一段工作流交给模型**。这两个都是只读工作流 ——
+ * 它们只组织「先搜、再读、最后回答」或「整理成草稿」，写文件那一步永远留给用户。
+ */
+export const PROMPTS = [
+  {
+    name: 'recall',
+    description: '先搜记忆库、再打开最相关的一篇，带着它回答当前问题（只读，不写任何文件）。',
+    arguments: [
+      { name: 'query', description: '要回答的问题或要查的事，用你自己的话写就行。', required: true },
+    ],
+  },
+  {
+    name: 'curate',
+    description: '把本次会话里值得长期记住的 settled 事实整理成一篇 Format v1 草稿，交给你确认后自己写文件（服务器不写）。',
+    arguments: [],
+  },
+];
+
+const NONE_READONLY =
+  '这一次是**只读**的：不要写文件、不要创建库或索引、不要改账本。'
+  + '你只能读 —— 任何落盘的动作都由人在确认之后自己做。';
+
+function recallText(query) {
+  return [
+    `请先查我的记忆库，再回答这个问题：${query}`,
+    '',
+    '1. 调 engramory_search（query 就用上面这句，可以拆成更准的几个词试第二次）；',
+    '2. 从返回的文件名里挑最相关的一篇，用 engramory_read 打开它（别只信片段）；',
+    '3. 如果那一篇只是提到了线索，可以再沿它指的名字多读一篇；最多读三篇就停；',
+    '4. 最后回答我：答案 + 你用的是哪一篇笔记（写文件名）。',
+    '',
+    '如果搜不到相关笔记，直接说「库里没有相关的」，不要编造库里的内容。',
+    NONE_READONLY,
+  ].join('\n');
+}
+
+function curateText() {
+  return [
+    '请把本次会话里值得长期记住的 settled 事实整理成待确认的笔记草稿。',
+    '',
+    '只记已经定下来的：决策与这么定的理由、踩过的坑与解法、我的偏好与纠正、外部资料的指路。'
+    + '别记当前状态（版本号、tip commit、测试通过数这类会腐烂的东西 —— 要记就记「去哪里读」），'
+    + '也别记临时结论。没有值得记的就直说没有，不要硬凑。',
+    '',
+    '每一条按 Format v1 写成草稿给我看：',
+    '- frontmatter: `type: user|feedback|project|reference`、`name`（也就是文件名，小写连字符）、`description`（一行、≤60 字）；',
+    '- 正文：一个主题一篇，写清楚「是什么 / 为什么」。',
+    '',
+    '写进库之前必须让我确认：**你来写文件** —— '
+    + '这个 MCP 服务器是只读的，不会替你创建或修改任何文件，也不会改库里的索引。',
+  ].join('\n');
+}
+
+/** prompts/get 的参数只需要「有没有值」：缺了 give 的名字就直接说清楚缺什么。 */
+function requireArg(args, name) {
+  const raw = args?.[name];
+  if (raw !== undefined && raw !== null && typeof raw !== 'string') {
+    throw new McpError(`${name} 必须是字符串：收到的是 ${typeof raw}。`);
+  }
+  const value = String(raw ?? '').trim();
+  // 'undefined' / 'null' 是客户端把参数序列化成字符串后最常见的坑，按「没给」算。
+  const usable = value && value !== 'undefined' && value !== 'null' ? value : '';
+  if (!usable) throw new McpError(`${name} 不能为空：这个提示词必须先知道你要查什么。`);
+  return usable;
+}
+
+export function getPrompt(params) {
+  const name = String(params?.name ?? '');
+  const args = params?.arguments && typeof params.arguments === 'object' ? params.arguments : {};
+  if (name === 'recall') {
+    const query = requireArg(args, 'query');
+    return {
+      description: PROMPTS[0].description,
+      messages: [{ role: 'user', content: { type: 'text', text: recallText(query) } }],
+    };
+  }
+  if (name === 'curate') {
+    return {
+      description: PROMPTS[1].description,
+      messages: [{ role: 'user', content: { type: 'text', text: curateText() } }],
+    };
+  }
+  throw new McpError(`没有这个提示：${name || '(空)'}。可用：${PROMPTS.map((p) => p.name).join(' / ')}`);
 }
 
 function initializeResult(params) {
@@ -270,6 +610,7 @@ function initializeResult(params) {
     serverInfo: { name: SERVER_NAME, version: SERVER_VERSION, title: 'Engramory 记忆召回（本地 markdown，只读）' },
     instructions:
       '这是本机 markdown 记忆库的只读检索。先用 engramory_search 找相关笔记，再用 engramory_read 打开需要的那些；' +
+      '不知道库里有什么时先看 engramory_list，想确认客户端读的是哪个库就调 engramory_status。' +
       '不要假设库里有什么，也不要通过它写任何东西。',
   };
 }
@@ -307,7 +648,10 @@ export async function handleMessage(session, message) {
       case 'resources/read':
         return reply(readResource(session, message.params));
       case 'prompts/list':
-        return reply({ prompts: [] });
+        return reply({ prompts: PROMPTS });
+      case 'prompts/get':
+        // 未知名字 / 缺必填参数都会抛 McpError，走下面的 -32603（与工具错误同一套人话文本）。
+        return reply(getPrompt(message.params));
       default:
         if (notification) return null;
         return fail(id, -32601, `Method not found: ${method}`);
@@ -353,7 +697,9 @@ export async function serveStdio(session, options = {}) {
 export const USAGE = `用法：node mcp.js [--store <路径>] [--semantic <本地模块路径>] [--print-config] [--version] [--help]
 
 零依赖、只读的 MCP stdio 服务器：把 Engramory markdown 记忆库暴露成
-engramory_search / engramory_read / engramory_status 三个工具。
+  · 工具：engramory_search / engramory_read / engramory_status / engramory_list / engramory_usage
+  · 资源：engramory://index（MEMORY.md 全文）与 engramory://note/{file}
+  · 提示：recall（先搜再读后回答）/ curate（整理成 Format v1 草稿，交用户确认）
 库路径优先级：--store > 环境变量 ENGRAMORY_STORE > ${DEFAULT_STORE}
 语义接缝（可选、默认关闭）：--semantic > 环境变量 ENGRAMORY_SEMANTIC_PROVIDER，
 只支持本地模块提供方（host-llm 需要 DSH 宿主运行时，这里会降级为词面）。

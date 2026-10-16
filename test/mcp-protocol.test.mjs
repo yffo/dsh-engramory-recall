@@ -12,6 +12,7 @@ import {
   listResources, readResource, parseArgs, main, McpError,
   MAX_OUTPUT_CHARS, DEFAULT_LIMIT, MAX_LIMIT, RESOURCE_TEMPLATE, SUPPORTED_PROTOCOL_VERSIONS,
   SERVER_NAME, SERVER_VERSION, PROTOCOL_VERSION, DEFAULT_STORE,
+  MAX_LIST_LIMIT, DEFAULT_LIST_LIMIT, MAX_USAGE_TOP, DEFAULT_USAGE_TOP, INDEX_URI, INDEX_RESOURCE,
 } from '../mcp.js';
 
 /** 一个临时记忆库；notes 为空表示「库是空目录」。 */
@@ -60,7 +61,11 @@ test('MCP：非法帧一律回 JSON-RPC 错误，不抛异常也不静默', asyn
 test('MCP：ping / prompts / templates 这些「有没有都行」的方法也给合规回包', async () => {
   await withStore(async (session) => {
     assert.deepEqual((await handleMessage(session, { id: 1, method: 'ping' })).result, {});
-    assert.deepEqual((await handleMessage(session, { id: 2, method: 'prompts/list' })).result, { prompts: [] });
+    assert.deepEqual(
+      (await handleMessage(session, { id: 2, method: 'prompts/list' })).result.prompts.map((p) => p.name),
+      ['recall', 'curate'],
+      '两个提示都要列出来（MCP 的第三个面，不是空数组）',
+    );
     const tpl = (await handleMessage(session, { id: 3, method: 'resources/templates/list' })).result;
     assert.deepEqual(tpl.resourceTemplates, [RESOURCE_TEMPLATE]);
     const list = (await handleMessage(session, { id: 4, method: 'resources/list' })).result;
@@ -248,8 +253,11 @@ test('MCP：initialize 回显协议版本、声明 capabilities 与身份', asyn
 test('MCP：tools/list 的 schema 与上限常量一致（模型看到的就是这些）', async () => {
   await withStore(async (session) => {
     const tools = (await handleMessage(session, { id: 1, method: 'tools/list' })).result.tools;
-    assert.deepEqual(tools.map((t) => t.name), ['engramory_search', 'engramory_read', 'engramory_status']);
-    const [searchTool, readTool, statusTool] = tools;
+    assert.deepEqual(
+      tools.map((t) => t.name),
+      ['engramory_search', 'engramory_read', 'engramory_status', 'engramory_list', 'engramory_usage'],
+    );
+    const [searchTool, readTool, statusTool, listTool, usageTool] = tools;
     for (const tool of tools) {
       assert.ok(tool.description.length > 20, `${tool.name} 得给模型一句人话`);
       assert.equal(tool.inputSchema.type, 'object');
@@ -266,6 +274,17 @@ test('MCP：tools/list 的 schema 与上限常量一致（模型看到的就是�
     assert.deepEqual(Object.keys(readTool.inputSchema.properties), ['file']);
     assert.equal(statusTool.inputSchema.required, undefined, 'status 没有必填参数');
     assert.deepEqual(statusTool.inputSchema.properties, {});
+    // 新增的两个工具：schema 里的上限同样要跟代码里的夹紧一致，否则模型看到的和实际执行的是两回事
+    assert.equal(listTool.inputSchema.required, undefined, 'list 两个参数都是可选的');
+    assert.deepEqual(Object.keys(listTool.inputSchema.properties), ['kind', 'limit']);
+    assert.deepEqual(listTool.inputSchema.properties.kind.enum, ['user', 'feedback', 'project', 'reference']);
+    assert.equal(listTool.inputSchema.properties.limit.maximum, MAX_LIST_LIMIT);
+    assert.match(listTool.inputSchema.properties.limit.description, new RegExp(`默认 ${DEFAULT_LIST_LIMIT}`));
+    assert.equal(usageTool.inputSchema.required, undefined, 'usage 两个参数都是可选的');
+    assert.deepEqual(Object.keys(usageTool.inputSchema.properties), ['days', 'top']);
+    assert.equal(usageTool.inputSchema.properties.days.minimum, 0, '0 = 全部，不是「最少看一天」');
+    assert.equal(usageTool.inputSchema.properties.top.maximum, MAX_USAGE_TOP);
+    assert.match(usageTool.inputSchema.properties.top.description, new RegExp(`默认 ${DEFAULT_USAGE_TOP}`));
     // 帧只能过 JSON：schema 里不能有 undefined（序列化后会凭空少字段）
     const roundTrip = JSON.parse(JSON.stringify(tools));
     assert.equal(JSON.stringify(roundTrip).includes('undefined'), false);
@@ -273,13 +292,13 @@ test('MCP：tools/list 的 schema 与上限常量一致（模型看到的就是�
   });
 });
 
-test('MCP：没实现的方法一律 -32601（prompts/get、logging、大小写），通知则静默', async () => {
+test('MCP：没实现的方法一律 -32601（logging、completion、大小写），通知则静默', async () => {
   await withStore(async (session) => {
     const unimplemented = [
-      ['prompts/get', { name: 'x' }],
       ['logging/setLevel', { level: 'debug' }],
       ['completion/complete', { ref: { type: 'ref/prompt', name: 'x' } }],
       ['tools/List', undefined],
+      ['prompts/List', undefined],
     ];
     for (const [method, params] of unimplemented) {
       const frame = await handleMessage(session, { id: 7, method, params });
@@ -288,8 +307,15 @@ test('MCP：没实现的方法一律 -32601（prompts/get、logging、大小写�
       assert.equal(frame.id, 7, '错误帧要带原样的 id');
       assert.equal(await handleMessage(session, { method, params }), null, `${method} 的通知必须静默`);
     }
-    // 现状：prompts/list 回空数组，却没有 prompts/get（0 个 prompt，客户端不该去 get）
-    assert.deepEqual((await handleMessage(session, { id: 8, method: 'prompts/list' })).result, { prompts: [] });
+    // prompts/get 从「没实现」变成「实现了」：未知名字不再是 -32601，而是说人话的失败
+    //（prompts/get 的形状与报错由 test/mcp-view.test.mjs 详测）
+    const unknownPrompt = await handleMessage(session, { id: 8, method: 'prompts/get', params: { name: 'x' } });
+    assert.equal(unknownPrompt.error.code, -32603);
+    assert.match(unknownPrompt.error.message, /没有这个提示：x。可用：recall \/ curate/);
+    assert.deepEqual(
+      (await handleMessage(session, { id: 9, method: 'prompts/list' })).result.prompts.map((p) => p.name),
+      ['recall', 'curate'],
+    );
   });
 });
 
@@ -302,8 +328,15 @@ test('MCP：resources/list 字段齐全、不含 MEMORY.md、标题回退文件�
   };
   await withStore(async (session) => {
     const list = listResources(session).resources;
-    assert.deepEqual(list.map((r) => r.name), ['archived-2026-old.md', 'bare.md', 'fm.md'], '按文件名排序；MEMORY.md 是索引不是笔记');
-    for (const resource of list) {
+    // 0.17.0 起 resources/list 里多了索引这一条具体资源（engramory://index），
+    // 笔记那部分的形状一个字没动 —— 所以先把它摘出去再逐字段验。
+    const index = list.find((r) => r.uri === INDEX_URI);
+    assert.deepEqual(index, INDEX_RESOURCE, '索引资源原样挂在 resources/list 里');
+    assert.equal(index.name, '记忆索引');
+    assert.equal(index.mimeType, 'text/markdown');
+    const notes = list.filter((r) => r.uri.startsWith('engramory://note/'));
+    assert.deepEqual(notes.map((r) => r.name), ['archived-2026-old.md', 'bare.md', 'fm.md'], '按文件名排序；MEMORY.md 是索引不是笔记');
+    for (const resource of notes) {
       assert.deepEqual(Object.keys(resource), ['uri', 'name', 'title', 'description', 'mimeType']);
       assert.equal(resource.uri, `engramory://note/${resource.name}`);
       assert.equal(resource.mimeType, 'text/markdown');
@@ -327,7 +360,9 @@ test('MCP：resources/list 字段齐全、不含 MEMORY.md、标题回退文件�
     assert.match(textOf(byAlias), /^1\. fm\.md /m, '只有 aliases 里出现过的词也该召回这篇');
   }, notes);
   await withStore(async (session) => {
-    assert.deepEqual(listResources(session), { resources: [] }, '空库就是空数组，不是 null');
+    // 空库：笔记资源一条都没有，但索引那条具体资源永远在（它不是「库里有啥」，
+    // 而是「去哪看库里有啥」），所以是 [INDEX_RESOURCE] 而不是空数组。
+    assert.deepEqual(listResources(session), { resources: [INDEX_RESOURCE] }, '空库只有索引这一条，不是 null');
   }, {});
 });
 
@@ -421,7 +456,7 @@ test('MCP：tools/call 的参数组合与默认值（缺参、非字符串、目
       const res = await callTool(session, params);
       assert.equal(res.isError, true);
       assert.match(textOf(res), /^没有这个工具：/);
-      assert.match(textOf(res), /engramory_search \/ engramory_read \/ engramory_status$/);
+      assert.match(textOf(res), /engramory_search \/ engramory_read \/ engramory_status \/ engramory_list \/ engramory_usage$/);
     }
     // status：连 arguments 都不给也要能跑（params.arguments ?? {}）
     const status = await callTool(session, { name: 'engramory_status' });
