@@ -527,3 +527,30 @@ test('截断判据：没数据时不编故事（没缩过 / 只有老行 / 顶�
   assert.match(truncationVerdict(noneCollapsed), /没有指针真的被缩/);
   for (const s of [summarizeUsage([]), noneCollapsed]) assert.doesNotMatch(truncationVerdict(s), /NaN|undefined/);
 });
+
+test('门控账：降权/够到抑制线/真拦下分别计数，老账本（没有 gate 字段）算「没数据」', () => {
+  const now = Date.now();
+  const row = (over) => ({ ts: now, kind: 'hit', ids: ['a.md'], scores: [2], injected: 1, budget: 480, spent: 100, ...over });
+  const summary = summarizeUsage([
+    // 三轮门控：一轮只降权、一轮够到抑制线、一轮真拦掉一条。
+    row({ gate: 'assist', demoted: ['a.md'] }),
+    row({ gate: 'assist', demoted: ['b.md'], suppressReady: ['b.md'] }),
+    row({ gate: 'enforce', ids: [], suppressed: ['c.md'], suppressReady: ['c.md'], spent: 0 }),
+    // 关档位的一轮（off 也写 gate 字段）与一行 0.15.x 的老账（没有这个字段）。
+    row({ gate: 'off' }),
+    { ts: now, kind: 'hit', ids: ['d.md'], scores: [1], injected: 1 },
+  ]);
+  assert.deepEqual(summary.gate.modes, { assist: 2, enforce: 1, off: 1 }, '档位分布要能看出「这一周在哪个档跑」');
+  assert.equal(summary.gate.rounds, 4, 'off 也算一轮（否则「开了没开」看不出来）');
+  assert.equal(summary.gate.demotedRounds, 2);
+  assert.equal(summary.gate.demotedPointers, 2);
+  assert.equal(summary.gate.readyRounds, 2);
+  assert.equal(summary.gate.readyPointers, 2);
+  assert.equal(summary.gate.suppressedRounds, 1);
+  assert.equal(summary.gate.suppressedPointers, 1);
+  // 没开过门控（或全是老账）时，rounds 必须是 0 而不是「假装 0 条被拦」——
+  // 读的一侧靠这个 0 区分「没开」与「开了但什么都没拦」。
+  const bare = summarizeUsage([{ ts: now, kind: 'hit', ids: ['a.md'], scores: [1], injected: 1 }]);
+  assert.equal(bare.gate.rounds, 0);
+  assert.deepEqual(bare.gate.modes, {});
+});

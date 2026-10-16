@@ -15,4 +15,12 @@
         storePath: ~/memory/engramory
         maxPointers: 4
         maxChars: 480
+        # 消费侧门控（0.16.0 起）：检索回答「像不像」，门控回答「值不值得占上下文」。
+        #   off     不干预（旧行为，留着对照）
+        #   shadow  只算不改，但把「本来会降权/拦掉谁」记进账本 —— 想知道会拦掉什么，先开这个
+        #   assist  把「总也用不上」「过期」的笔记降权（默认；只改排序，不删任何东西）
+        #   enforce 把证据确凿的移出这一轮注入（它的证据门槛更高：携带次数与观察天数两条都要够）
+        gate: assist
+        # `project-` 类笔记多久没更新算过期（天）。过期只降权、不拦：旧不等于没用。
+        gateStaleDays: 180
         nudge: true

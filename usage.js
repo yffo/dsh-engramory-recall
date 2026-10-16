@@ -142,6 +142,10 @@ export function summarizeUsage(lines, options = {}) {
   // 「为什么没注入」与「注进来的分有多高」——两者都是调参的依据，缺了就只能猜。
   const skipReasons = new Map();
   const emptyReasons = new Map();
+  // 消费侧门控的账（0.16.0 起落盘）：档位分布 + 每轮被降权/被拦的指针数。
+  // 只记「真的发生了什么」：`shadow` 档一分未改，它的数字是**观察值**（用来估算开 enforce 的后果）。
+  const gateModes = new Map();
+  const gate = { rounds: 0, demotedRounds: 0, demotedPointers: 0, readyRounds: 0, readyPointers: 0, suppressedRounds: 0, suppressedPointers: 0 };
   const topScores = [];
   const spreads = [];
   // 「这一轮是谁在问」：main（主对话）/ subagent（委派轮）/ unknown（0.13.7 之前的老行）。
@@ -158,6 +162,27 @@ export function summarizeUsage(lines, options = {}) {
     if (ts) {
       if (!stats.firstAt) stats.firstAt = ts;
       stats.lastAt = ts;
+    }
+    // 门控账：`gate` 字段每一轮都写（0.16.0 起），所以这里按「有没有这个字段」计，
+    // 不必区分 kind（拦掉一轮的 kind 是 empty，降权一轮是 hit）。
+    if (line?.gate) {
+      gate.rounds += 1;
+      bump(gateModes, String(line.gate));
+      const demoted = Array.isArray(line.demoted) ? line.demoted.length : 0;
+      const ready = Array.isArray(line.suppressReady) ? line.suppressReady.length : 0;
+      const dropped = Array.isArray(line.suppressed) ? line.suppressed.length : 0;
+      if (demoted) {
+        gate.demotedRounds += 1;
+        gate.demotedPointers += demoted;
+      }
+      if (ready) {
+        gate.readyRounds += 1;
+        gate.readyPointers += ready;
+      }
+      if (dropped) {
+        gate.suppressedRounds += 1;
+        gate.suppressedPointers += dropped;
+      }
     }
     if (kind === 'empty') {
       stats.zeroRounds += 1;
@@ -360,6 +385,9 @@ export function summarizeUsage(lines, options = {}) {
     // no-hits / below-min-score …）。设计性的跳过与真问题混在一起就看不出异常。
     skipReasons: toCounts(skipReasons),
     emptyReasons: toCounts(emptyReasons),
+    // 门控的现实：降权了多少轮/多少条、有多少条够到抑制线、enforce 档真拦了多少条。
+    // 老账本（0.15.x）没有 `gate` 字段 → `rounds: 0`，读的一侧必须能分清「没开」与「没数据」。
+    gate: { ...gate, modes: toCounts(gateModes) },
     // 「把 minScore 抬高会付出什么」——分数光有统计量没用，得能算成代价才可决策
     scoreCurve: minScoreCurve(lines, options),
     // 截断的代价：被缩成裸文件名的那些后来有没有被打开（0.13.15 起落盘 collapsedIds）
@@ -594,6 +622,7 @@ export const REASON_LABELS = {
   // 命中了、却连一个裸文件名都塞不进预算（注入头 + 下限 160 字都放不下）：
   // 它和「没命中」是两回事，混在一个码里就分不清该抬预算还是该抬门槛。
   'budget-too-small': '预算太小，一条都放不下',
+  suppressed: '这几条被门控拦下了（带进上下文很多次、一次都没被用上）',
   unspecified: '没记原因（早期日志）',
 };
 

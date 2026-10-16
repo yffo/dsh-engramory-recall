@@ -17,7 +17,7 @@
  * 或直接 `dsh plugin --profile desktop remove dsh-engramory-recall`。
  */
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { buildIndex, search, clip } from './bm25.js';
@@ -28,11 +28,12 @@ import { registerSkill, skillStatus } from './skill.js';
 import { appendAudit, readAudit, GUARD_EPOCH } from './audit.js';
 import {
   appendUsage, readUsage, summarizeUsage, usageVerdict, budgetVerdict, reasonVerdict, scoreCurveVerdict, truncationVerdict,
-  noteIdFromPath, pickInjected,
+  noteIdFromPath, pickInjected, USAGE_FILE,
 } from './usage.js';
 import { readDocs } from './store.js';
 import { describeSeam, semanticSearch } from './semantic.js';
-import { auditStore } from './doctor.js';
+import { auditStore, NOTE_KINDS } from './doctor.js';
+import { applyGate, gateReport, markSelfTouches, noteLedgerStats, GATE_DEFAULTS, normalizeGate } from './confidence.js';
 import { planArchive, applyArchive } from './archive.js';
 
 export const name = 'engramory-recall';
@@ -56,6 +57,15 @@ export const DEFAULTS = {
   maxPointers: 4,
   maxChars: 480,
   minScore: 0,
+  /**
+   * 消费侧门控档位（0.16.0 起）：检索只回答「像不像」，回答不了「值不值得占上下文」。
+   * `off` 不干预（旧行为，留着对照）/ `shadow` 只算不改（先看它想干什么）/
+   * `assist` 把「总也用不上」「过期」的笔记降权（默认，只改排序不删东西）/
+   * `enforce` 把证据确凿的移出这一轮注入。判据与阈值见 `confidence.js`。
+   */
+  gate: 'assist',
+  /** `project-` 类笔记（正在做的事）多久没更新算过期；只在 assist/enforce 档参与降权。 */
+  gateStaleDays: GATE_DEFAULTS.staleDays,
   nudge: true,
   /**
    * 召回落盘日志（`.engramory-recall.jsonl`）。开着才有「注入的指针后来被用上了吗」
@@ -312,6 +322,10 @@ const storePrefix = (storePath) => path.join(storePath, path.sep);
 export function apply(ctx, config = {}) {
   const settings = { ...DEFAULTS, ...(config ?? {}) };
   settings.storePath = normalizeStorePath(expandHome(settings.storePath));
+  // 档位在**入口**就归一：`applyGate` 内部也会归一（双保险），但账本与状态路由读的是
+  // `settings.gate` —— 不在这里收口，配置里写错一个词就会出现「行为是 assist、账本写 zzz」
+  // 这种账实不符，而账本正是这一期要立的东西。
+  settings.gate = normalizeGate(settings.gate);
   if (!settings.enabled) return;
 
   let indexCache = { docs: null, index: null };
@@ -417,6 +431,15 @@ export function apply(ctx, config = {}) {
         // 「整篇加起来多少字」（0.15.0 起落盘）：与 spent 相减就是这一轮**没进上下文**的字数。
         // 只在真的算出来（> 0）时写；没写 ≠ 0，读的一侧必须能分得清「省了 0 字」与「没这一项」。
         ...(Number.isFinite(entry.noteChars) && entry.noteChars > 0 ? { noteChars: entry.noteChars } : {}),
+        // 消费侧门控的账目（0.16.0 起）：这一轮门控是哪个档、把谁降权了、把谁移出了注入。
+        // `shadow` 档也会写这两项 —— 它们记的是「本来会怎样」，档位字段本身说明有没有真的执行；
+        // 不写的话，第一次开 `enforce` 时没人能回答「以前被我拦掉的那些，后来有没有被需要过」。
+        // 档位**每一轮都记**（哪怕 `off`）：这一项是「这一行是哪个档跑出来的」的唯一凭据，
+        // 省掉它就得靠「有没有别的字段」去猜，而猜错的代价是拿 enforce 的数据去解释 assist 的行为。
+        ...(entry.gate ? { gate: entry.gate } : {}),
+        ...(Array.isArray(entry.demoted) && entry.demoted.length ? { demoted: entry.demoted } : {}),
+        ...(Array.isArray(entry.suppressReady) && entry.suppressReady.length ? { suppressReady: entry.suppressReady } : {}),
+        ...(Array.isArray(entry.suppressed) && entry.suppressed.length ? { suppressed: entry.suppressed } : {}),
       });
     }
   };
@@ -440,6 +463,34 @@ export function apply(ctx, config = {}) {
     const recencyWeight = Number(settings.recencyWeight) || 0;
     indexCache = { docs, index: buildIndex(docs, { halfLifeDays, recencyWeight }) };
     return indexCache.index;
+  };
+
+  /**
+   * 消费侧门控的输入：账本（每篇笔记被携带/被用上的履历）+ 审计（用来识别自我触碰）
+   * + 库内笔记元数据（新鲜度只用 mtime，不再读文件）。
+   *
+   * 为什么要缓存：账本上限 512KB，而 pre-step 每轮都跑；按「账本文件大小 + mtime」做键、
+   * 15 秒 TTL —— 追加写入立刻改大小，所以新证据几乎立刻生效，同时不会每轮重读整个文件。
+   */
+  const GATE_TTL_MS = 15_000;
+  let gateCache = { key: '', at: 0, value: null };
+  const gateContextOf = (storePath, index) => {
+    let sig = 'no-ledger';
+    try {
+      sig = `${statSync(path.join(storePath, USAGE_FILE)).size}`;
+    } catch {
+      // 还没有账本：正常路径（库刚建好、或 usageLog 关着）
+    }
+    const key = `${storePath}|${sig}`;
+    if (gateCache.key === key && Date.now() - gateCache.at < GATE_TTL_MS) return gateCache.value;
+    const stats = noteLedgerStats(readUsage(storePath, 2000));
+    const touched = markSelfTouches(stats, readAudit(storePath, 500), { selfTouchMs: GATE_DEFAULTS.selfTouchMs });
+    const docs = new Map();
+    // 长笔记切桶：同一 id 有多条 doc，门控只需要元数据，留第一条就够。
+    for (const doc of index?.docs ?? []) if (doc?.id && !docs.has(doc.id)) docs.set(doc.id, doc);
+    const value = { stats, docs, now: Date.now(), touched };
+    gateCache = { key, at: Date.now(), value };
+    return value;
   };
 
   // 按需检索工具：自动召回没命中时，模型仍能在应用内搜记忆库（只读）。
@@ -831,12 +882,19 @@ export function apply(ctx, config = {}) {
       // ⚠️ 不能用降权后的结果算 key——轮换自己就会改掉它，去重等于永不生效
       // （2026-10-14 真实库探针实测到）。candidate 是未排序前的原始 top-N，与轮换无关。
       const dedupeKey = `${query}\u0000${scored.slice(0, maxPointers).map((hit) => hit.id).join(',')}`;
-      const hits = scored
+      const ranked = scored
         .map((hit) =>
           rotating && recentInjected.includes(hit.id) ? { ...hit, score: hit.score * rotationPenalty, rotated: true } : hit,
         )
-        .sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id)))
-        .slice(0, maxPointers);
+        .sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id)));
+      // 消费侧门控：在**预算分配之前**过一遍 —— 先把不值得占上下文的挪走或降权，
+      // 再把片段预算分给剩下的，否则被抑制的那条白白占掉一个片段额度。
+      // 档位语义与阈值判据全在 `confidence.js`（含「过期只降权、抑制要两条证据」的理由）。
+      const gated = applyGate(ranked, gateContextOf(storePath, index), {
+        mode: settings.gate,
+        staleDays: Number(settings.gateStaleDays) || GATE_DEFAULTS.staleDays,
+      });
+      const hits = gated.hits.slice(0, maxPointers);
       const wantsRemember = settings.nudge && REMEMBER_INTENT.test(query);
       // 沉淀提醒独立于召回命中：命中为 0 时才更需要它，否则长会话会一路空转到结束。
       const wantsSediment =
@@ -846,15 +904,27 @@ export function apply(ctx, config = {}) {
         turnCount - sedimentNudgedAt >= SEDIMENT_COOLDOWN;
       if (wantsSediment) sedimentNudgedAt = turnCount;
       if (!hits.length && !wantsRemember && !wantsSediment) {
-        // 三种「空」要分清：库里没东西、一条都不匹配、全被 minScore 拦掉。
+        // 四种「空」要分清：库里没东西、一条都不匹配、全被 minScore 拦掉、**被门控拦掉**。
         // `topScore` 是校准 minScore 的唯一依据 —— 只写「空」等于把门槛高低的责任推给猜。
+        // 门控那一支记**门控前**的最高分：它才是「差点就注入了」的那个分数。
+        const byGate = gated.suppressed.length > 0;
         recordRound({
           kind: 'empty',
           query: brief(query),
           hits: [],
-          reason: !index.docs.length ? 'index-empty' : !found.length ? 'no-hits' : 'below-min-score',
+          reason: byGate
+            ? 'suppressed'
+            : !index.docs.length
+              ? 'index-empty'
+              : !found.length
+                ? 'no-hits'
+                : 'below-min-score',
           minScore,
-          topScore: found[0] ? Number(found[0].score.toFixed(3)) : undefined,
+          topScore: Number(((byGate ? ranked[0]?.score : found[0]?.score) ?? 0).toFixed(3)) || undefined,
+          gate: gated.mode,
+          demoted: gated.demoted.map((d) => d.id),
+          suppressReady: gated.ready,
+          suppressed: gated.suppressed.map((d) => d.id),
         });
         return decision;
       }
@@ -879,16 +949,26 @@ export function apply(ctx, config = {}) {
         // 命中了、却一条都没塞进预算（文件名都放不下）：这是一次**真的没注入**，
         // 不能静默返回 —— 静默的话账本里这一轮等于不存在，「为什么这一轮模型没看到记忆」
         // 就永远查不出来（面板、尺子、灰度对比全靠账本这一行）。
+        //
+        // 两种「没注入」要分开记：**门控拦掉**（enforce 档把总也用不上的拦了）与
+        // **预算太小**（一条都放不下）。混成一个原因码，回头就会拿「预算抬一点」去治
+        // 一个其实是门控的毛病。
+        const byGate = hits.length === 0 && gated.suppressed.length > 0;
         recordRound({
           kind: 'skip',
           query: brief(query),
           hits: [],
-          reason: 'budget-too-small',
+          reason: byGate ? 'suppressed' : 'budget-too-small',
           budget,
           // `spent: 0` 不是凑数：宿主侧的落盘白名单要求「上限与用掉的量同时在场」才写这两项，
           // 少了它，这一轮在账本里就只剩一个原因码，「到底是预算配小了还是分数不够」看不出来。
           spent: 0,
-          topScore: Number((hits[0]?.score ?? 0).toFixed(3)),
+          // 拦掉时记**门控前**的最高分：它才是「差点就注入了」的那个分数。
+          topScore: Number(((byGate ? ranked[0]?.score : hits[0]?.score) ?? 0).toFixed(3)),
+          gate: gated.mode,
+          demoted: gated.demoted.map((d) => d.id),
+          suppressReady: gated.ready,
+          suppressed: gated.suppressed.map((d) => d.id),
         });
         return decision;
       }
@@ -959,6 +1039,12 @@ export function apply(ctx, config = {}) {
         topScore: Number((hits[0]?.score ?? 0).toFixed(3)),
         nudge: wantsRemember,
         sediment: wantsSediment,
+        // 门控账目：档位 + 三个 id 清单。`suppressReady` 是「证据已经够到抑制线」的那几条 ——
+        // 在 assist 档它们只是被降权，记下来才能回答「要是我开 enforce，会拦掉谁、拦对了吗」。
+        gate: gated.mode,
+        demoted: gated.demoted.map((d) => d.id),
+        suppressReady: gated.ready,
+        suppressed: gated.suppressed.map((d) => d.id),
       });
 
       const message = {
@@ -1231,6 +1317,19 @@ export function apply(ctx, config = {}) {
                   curve: scoreCurveVerdict(summary.scoreCurve),
                 },
               };
+            })(),
+            // 消费侧门控：档位、阈值、两份名单（总也用不上 / 过期）。
+            // 与召回路径共用同一个缓存上下文（15 秒 TTL），所以面板轮询不会把账本读成热点。
+            hygiene: (() => {
+              const gate = gateContextOf(settings.storePath, indexOf(settings.storePath));
+              // ⚠️ 这里必须把**上下文拆开传**：`gateReport(stats, docs, opts)` 的第一个参数是
+              // 统计表（Map），整包传进去会让 `stats instanceof Map` 为假 → 名单永远是空的，
+              // 而面板会一本正经地显示「没有需要留意的笔记」（一次真实发生过的静默失效）。
+              return gateReport(gate.stats, gate.docs, {
+                mode: settings.gate,
+                now: gate.now,
+                staleDays: Number(settings.gateStaleDays) || GATE_DEFAULTS.staleDays,
+              });
             })(),
             generatedAt: Date.now(),
           });

@@ -204,6 +204,7 @@ window.__ModuleLoader__.load({
       'no-hits': '一条都不匹配',
       'below-min-score': '被相关度门槛拦住',
       'budget-too-small': '预算太小，一条都放不下',
+  suppressed: '这几条被门控拦下了（一直没被用上）',
       unspecified: '没记原因（早期日志）',
     };
 

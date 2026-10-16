@@ -7,6 +7,13 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { tokenize } from './bm25.js';
+// 两项「记忆卫生」结论要用门控本人的判据与阈值，**不在这里另抄一份**：
+// 「这篇到底有没有被用上」只有账本知道，而账本的读法只有 `confidence.js` 一处定义。
+// 循环导入是安全的：两边都只在函数体内引用对方的绑定（doctor 的 `NOTE_KINDS` ↔ confidence 的判定函数），
+// 模块求值期间谁都不读对方的值。
+import { GATE_DEFAULTS, confidenceOf, freshness, markSelfTouches, noteLedgerStats } from './confidence.js';
+import { readUsage } from './usage.js';
+import { readAudit } from './audit.js';
 // ★ 「哪篇该归档」只能有一处定义，而且就是**归档器本人**。
 // 这里先后踩过两次同一个坑：① 自己抄了一份 `^##\s*第…批`，于是归档器已经认加粗行与
 // ### 深度了、体检还在报 32 批（真值是 46）；② 自己抄了一份 64KB 门槛，于是体检对一份
@@ -61,6 +68,10 @@ function jaccard(a, b) {
 export function auditStore(storePath, options = {}) {
   const now = options.now ?? Date.now();
   const staleDays = options.staleTodoDays ?? STALE_TODO_DAYS;
+  // 与上面的 `staleDays` **不是一回事**，所以另起一个名字：`staleTodoDays`（默认 30 天）量的是
+  // 「frontmatter.updated 里写着待办却没人动」，门控的 `staleDays`（默认 180 天）量的是
+  // 「project 笔记的文件多久没被写过」。两个判据、两个量级，共用一个数就会同时错两头。
+  const gateStaleDays = options.staleDays ?? GATE_DEFAULTS.staleDays;
   const dupThreshold = options.duplicateTopicThreshold ?? DUPLICATE_TOPIC_THRESHOLD;
   const findings = [];
   const add = (severity, code, message, files = []) => findings.push({ severity, code, message, files });
@@ -81,14 +92,19 @@ export function auditStore(storePath, options = {}) {
   const notes = [];
   for (const file of mdFiles.filter((f) => f !== INDEX_FILE)) {
     let text;
+    let mtimeMs = 0;
     try {
-      if (!statSync(join(storePath, file)).isFile()) continue;
+      // mtime 顺手从这次 `statSync` 里取走（下面判 `isFile()` 本来就要调它）——
+      // 「project 笔记多久没更新」要的就是这个数，不能再为它多跑一次 IO。
+      const st = statSync(join(storePath, file));
+      if (!st.isFile()) continue;
+      mtimeMs = st.mtimeMs;
       text = readFileSync(join(storePath, file), 'utf8');
     } catch {
       continue;
     }
     const { fields, body } = parseFrontmatter(text);
-    notes.push({ file, text, body, fields, bytes: Buffer.byteLength(text) });
+    notes.push({ file, text, body, fields, bytes: Buffer.byteLength(text), mtimeMs });
   }
 
   // ---- 索引 ↔ 文件 ----
@@ -135,6 +151,24 @@ export function auditStore(storePath, options = {}) {
     seen.add(p);
   }
 
+  // ---- 账本：两项「记忆卫生」结论的输入 ----
+  // 账本从哪来：注入给了就用注入的（测试要能造出任意履历），否则自己读库目录里的两份账本。
+  // 读取上限与 `index.js#gateContextOf` **逐字一致**（usage 2000 行 / audit 500 行）：
+  // 体检说的必须与门控真做的同一口径，否则同一篇笔记会出现「体检说它从没被用上、门控却在放行」。
+  //
+  // 为什么账本不存在（或为空）时**一项新结论都不出**：没有账本只说明这个库没在记账
+  // （老库、`usageLog` 关着、或刚建好），并不说明「库里没有问题」。此时报「这篇从没被用上」
+  // 是纯粹的瞎猜，而体检最不能做的事就是把「不知道」写成一条结论 —— 用户会当成「已检查过」。
+  // 所以两条结论统一挂在「有账本」这个前提上：没账本的库，体检输出与从前逐字相同。
+  const usageLines = Array.isArray(options.usageLines) ? options.usageLines : readUsage(storePath, 2000);
+  const auditLines = Array.isArray(options.auditLines) ? options.auditLines : readAudit(storePath, 500);
+  const hasLedger = usageLines.length > 0;
+  const ledgerStats = hasLedger ? noteLedgerStats(usageLines) : new Map();
+  // 自我触碰必须先扣掉：模型刚落盘一篇笔记、紧接着又读回来（同一个话题里很常见），
+  // 账本上照样是一次 `used`。把它算成「被用上」，等于让模型自己写的结论回头证明自己有用
+  // ——越写越像真的。扣掉之后仍然是 0 次，才敢说这篇「从没被用上」。
+  if (hasLedger) markSelfTouches(ledgerStats, auditLines, { selfTouchMs: options.selfTouchMs ?? GATE_DEFAULTS.selfTouchMs });
+
   // ---- 单篇自身 ----
   for (const n of notes) {
     const slug = n.file.replace(/\.md$/, '');
@@ -174,6 +208,41 @@ export function auditStore(storePath, options = {}) {
     const ageDays = Number.isFinite(updated) ? (now - updated) / 86400000 : Infinity;
     if (TODO_RE.test(n.body) && ageDays > staleDays) {
       add('info', 'stale-todo', `含待办字样但 ${Math.round(ageDays)} 天没更新（还活着吗）：${n.file}`, [n.file]);
+    }
+
+    // ---- 记忆卫生（账本类）----
+    // 只判有账本的库（理由见上面读账本处）。判据一律问 `confidence.js` 要 ——
+    // 体检不许自己修一套阈值，否则改阈值时「面板降权了谁」与「体检报了谁」迟早分叉。
+    if (hasLedger) {
+      // ① 「每轮都在占预算、却从没人用过」。判据是门控的 `tier === 'ignored'`：
+      //    携带次数够多（≥ minEvidence，样本不够时它返回 `unknown`，体检也就不说话）+ 一次没用上。
+      const stat = ledgerStats.get(n.file);
+      if (confidenceOf(stat ?? { carried: 0, used: 0 }).tier === 'ignored') {
+        const selfTouch = stat?.selfTouch ?? 0;
+        add(
+          'warn',
+          'never-used',
+          `被带进上下文 ${stat.carried} 次、一次都没被用上` +
+            // 「另有」而不是「其中」：`selfTouch` 数是**被扣掉的读事件**，包含注入后被读回
+            // 与模型自己搜出来打开这两条路，真实账本里出现过「携带 11 次、自我触碰 39 次」。
+            // 写成「其中 39 次」会造出一句自相矛盾的话，体检的可信度就是这么磨掉的。
+            (selfTouch > 0 ? `（另有 ${selfTouch} 次是写完自己马上读回，不算用上）` : '') +
+            '—— 它每轮都在占预算：改写 description 让它更容易被认出来，或合并进相关笔记',
+          [n.file],
+        );
+      }
+      // ② 「正在做的事」半年没动过。**只给 info，不给 warn**：一篇 project 笔记长期不更新，
+      //    可能恰恰是那件「还没做完、所以没人动」的事——它是待确认的提醒，不是过错。
+      //    warn 会让用户以为库坏了，而这条本身给不出「该删」的结论（过期只降权，见 confidence.js）。
+      const fresh = freshness({ id: n.file, mtimeMs: n.mtimeMs }, { now, staleDays: gateStaleDays });
+      // mtime 拿不到时 `freshness` 返回 stale=false —— 宁可漏报，也不拿「不知道」当「很旧」。
+      // 归档产物（`project-*-history.md`）要排除：它是冻结的派生文件，mtime 只会越来越旧，
+      // 但它既不是「正在做的事」、也没法「更新或归档」（归档器按设计不会再动它）。
+      // 不排除的话，半年之后每一份归档都会冒出一句「还活着吗」—— 正是 duplicate-topic
+      // 当年被归档产物刷屏（N 份归档报出 N²/2 条）的翻版，同一类机械噪声。
+      if (fresh.stale && !HISTORY_FILE_RE.test(n.file)) {
+        add('info', 'stale-project', `这份「正在做的事」已经 ${Math.round(fresh.ageDays)} 天没更新（还活着吗）：要么更新、要么归档`, [n.file]);
+      }
     }
   }
 

@@ -1129,3 +1129,130 @@ test('账本：命中了却一条都塞不进预算 → 记 budget-too-small，�
   assert.ok(row.budget >= 160, '记下当时的上限，才知道该不该抬');
   assert.ok(row.topScore > 0, '记下最高分，才知道是分数不够还是预算不够');
 });
+
+/**
+ * 造一份「总也用不上」的账本：同一篇笔记被携带 `carried` 次、从 `days` 天前开始，一次都没被读过。
+ * 门控的抑制判据要两条证据同时成立（携带够多 + 观察够久），所以这里两样都给足。
+ *
+ * 携带次数为什么是 40 而不是「刚好过线」：降权/抑制的门槛不写死，而是按**本库基础打开率**
+ * 算出来的（`confidence.js#gatePolicy`）。这批用例的账本样本量太小（携带总数低于
+ * `baseRateMinSamples`），会退回先验率 10% → 降权线 10 次、抑制线 30 次；40 次两头都过，
+ * 于是这些用例钉的是**档位语义**，不会被门槛算术的调整带红。
+ */
+function seedIgnoredLedger(dir, id, { carried = 40, days = 8 } = {}) {
+  const rows = [];
+  for (let i = 0; i < carried; i += 1) {
+    rows.push(JSON.stringify({
+      ts: Date.now() - (days - i * 0.1) * 86400000,
+      kind: 'hit',
+      query: '代理节点',
+      scope: 'main',
+      ids: [id],
+      scores: [3.2],
+      injected: 1,
+      budget: 480,
+      spent: 120,
+    }));
+  }
+  writeFileSync(join(dir, USAGE_FILE), `${rows.join('\n')}\n`, 'utf8');
+}
+
+test('门控 off 档：一行账都不多记，注入一个字节都不变', async () => {
+  const dir = tinyStore();
+  seedIgnoredLedger(dir, 'reference-proxy.md');
+  const { handlerOf } = captureCtx({ storePath: dir, minScore: 0, maxChars: 480, usageLog: true, gate: 'off' });
+  const out = await turn(handlerOf('agent/pre-step'), {}, 'm1');
+  assert.ok(out.messages.length > 1, 'off 档不该影响注入');
+  const row = lastRow(dir);
+  assert.equal(row.gate, 'off', '档位要落在账上');
+  assert.equal(row.demoted, undefined, 'off 档没有降权，就不该有 demoted 字段占地方');
+  assert.equal(row.suppressed, undefined);
+});
+
+test('门控 shadow 档：注入一字不改，但账本要留下观察值（够到抑制线的 id）', async () => {
+  const dir = tinyStore();
+  seedIgnoredLedger(dir, 'reference-proxy.md');
+  const { handlerOf } = captureCtx({ storePath: dir, minScore: 0, maxChars: 480, usageLog: true, gate: 'shadow' });
+  const out = await turn(handlerOf('agent/pre-step'), {}, 'm1');
+  assert.ok(out.messages.length > 1, 'shadow 只观察，不许改注入');
+  const row = lastRow(dir);
+  assert.equal(row.gate, 'shadow');
+  assert.deepEqual(row.suppressReady, ['reference-proxy.md'], '「开了 enforce 会拦谁」要能从账本里读出来');
+  assert.equal(row.suppressed, undefined, 'shadow 什么都没拦，就不许写 suppressed（那是「真拦了」的字段）');
+  assert.ok(row.scores[0] > 0, 'shadow 不动分数');
+});
+
+test('门控 assist 档：仍然注入，但降权（分数减半）—— 证据落地的方式由档位决定', async () => {
+  const dir = tinyStore();
+  seedIgnoredLedger(dir, 'reference-proxy.md');
+  const shadow = await (async () => {
+    const d = tinyStore();
+    seedIgnoredLedger(d, 'reference-proxy.md');
+    const { handlerOf } = captureCtx({ storePath: d, minScore: 0, maxChars: 480, usageLog: true, gate: 'shadow' });
+    await turn(handlerOf('agent/pre-step'), {}, 'm1');
+    return lastRow(d);
+  })();
+  const { handlerOf } = captureCtx({ storePath: dir, minScore: 0, maxChars: 480, usageLog: true, gate: 'assist' });
+  const out = await turn(handlerOf('agent/pre-step'), {}, 'm1');
+  assert.ok(out.messages.length > 1, 'assist 仍然让这条笔记看得见');
+  const row = lastRow(dir);
+  assert.equal(row.gate, 'assist');
+  assert.deepEqual(row.demoted, ['reference-proxy.md'], '降权要落账（带 reason 的细节在内存日志里）');
+  // 这条证据两半都够（携带 40 次已过抑制线、观察 8 天 ≥ 7），所以它同时出现在抑制预备名单里 ——
+  // assist 档只是**没有真的拦**，`suppressed` 必须空着。
+  assert.deepEqual(row.suppressReady, ['reference-proxy.md'], '证据够到抑制线就要如实写在预备名单里');
+  assert.equal(row.suppressed, undefined, 'assist 档不许写 suppressed（那是「真拦了」的字段）');
+  assert.ok(row.scores[0] < shadow.scores[0], '同一篇笔记，assist 档的分数必须比 shadow 档低（这就是降权）');
+  assert.ok(Math.abs(row.scores[0] - shadow.scores[0] / 2) < 1e-6, '默认降权系数是 0.5');
+});
+
+test('门控：证据只够一半（观察还不到 7 天）→ 只降权，不进抑制预备名单', async () => {
+  // 「观察够久」是抑制判据的另一半：刚带进来几天、还没被读过的笔记，不该被判死刑。
+  const dir = tinyStore();
+  seedIgnoredLedger(dir, 'reference-proxy.md', { carried: 13, days: 2 });
+  const { handlerOf } = captureCtx({ storePath: dir, minScore: 0, maxChars: 480, usageLog: true, gate: 'assist' });
+  await turn(handlerOf('agent/pre-step'), {}, 'm1');
+  const row = lastRow(dir);
+  assert.deepEqual(row.demoted, ['reference-proxy.md'], '证据少也够降权（8 次以上没被用上就该往后排）');
+  assert.equal(row.suppressReady, undefined, '观察期没到，不许进抑制预备名单');
+});
+
+test('门控 enforce 档：拦掉总也用不上的那条，并单独记 reason=suppressed', async () => {
+  const dir = tinyStore();
+  seedIgnoredLedger(dir, 'reference-proxy.md');
+  const { handlerOf } = captureCtx({ storePath: dir, minScore: 0, maxChars: 480, usageLog: true, gate: 'enforce' });
+  const out = await turn(handlerOf('agent/pre-step'), {}, 'm1');
+  assert.equal(out.messages.length, 1, 'enforce 档真的把它移出注入');
+  const row = lastRow(dir);
+  // 被拦掉之后命中集为空，走的是「这一轮没有东西可注入」那一支（`kind: 'empty'`），
+  // 但原因码必须是 `suppressed` —— 否则事后会拿「门槛太高」去治一个门控的问题。
+  assert.equal(row.kind, 'empty');
+  assert.equal(row.reason, 'suppressed', '要能区分「门控拦的」「门槛拦的」「压根没命中」');
+  assert.deepEqual(row.suppressed, ['reference-proxy.md']);
+  assert.deepEqual(row.suppressReady, ['reference-proxy.md']);
+  assert.equal(row.gate, 'enforce');
+  assert.ok(row.topScore > 0, '记门控前的最高分：它才是「差点就注入了」的那个分数');
+});
+
+test('门控档位在配置入口收口：写错一个词不许出现「行为 assist、账本写 zzz」', async () => {
+  const dir = tinyStore();
+  seedIgnoredLedger(dir, 'reference-proxy.md');
+  const { handlerOf } = captureCtx({ storePath: dir, minScore: 0, maxChars: 480, usageLog: true, gate: 'ENFORCE!' });
+  await turn(handlerOf('agent/pre-step'), {}, 'm1');
+  const row = lastRow(dir);
+  assert.equal(row.gate, 'assist', '认不出的档位回落默认档，并且账本要写归一后的值');
+  assert.equal(row.suppressed, undefined, '回落成 assist 就不许拦东西（认错档位比写错档位可怕得多）');
+});
+
+test('状态路由：面板能读到门控档位与两份名单（总也用不上 / 过期）', async () => {
+  const dir = tinyStore();
+  seedIgnoredLedger(dir, 'reference-proxy.md');
+  const { routes } = captureCtx({ storePath: dir, minScore: 0, maxChars: 480, usageLog: true, gate: 'assist' });
+  const body = await stateOf(routes);
+  assert.equal(body.hygiene.mode, 'assist', '档位要如实透出，面板才写得对');
+  assert.equal(body.hygiene.policy.staleDays, 180, '阈值也要透出：面板不该自己抄一份');
+  const ids = body.hygiene.ignored.map((n) => n.id);
+  assert.ok(ids.includes('reference-proxy.md'), '14 次携带、一次没读过 → 必须进「总也用不上」名单');
+  assert.equal(body.hygiene.counts.notes, 1);
+  assert.deepEqual(body.hygiene.stale, [], '刚建的笔记不该被判过期');
+});
