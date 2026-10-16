@@ -218,10 +218,17 @@ function nodesOfType(node, name, out = []) {
   return out;
 }
 async function renderWith(values) {
+  // 面板 2.0 的 MemoryView 有 11 个 useState 槽位：前 3 个来自 useRecallState
+  // （state / error / at），后 8 个是 tab / expanded / filter / busy / results / bulk /
+  // flash / kindFilter。老调用点只喂前 9 个，这里补上后两个的默认值（flash `''`、
+  // kindFilter `'all'`），免得每个调用点逐个改。
+  const slots = values.slice();
+  if (slots.length < 10) slots.push(''); // flash：没有提示条
+  if (slots.length < 11) slots.push('all'); // kindFilter：不筛类型
   // 桩与组件只建一次（bundle 只能 import 一次），每次渲染只换「预设值队列」：
   // 这样多次渲染复用同一个 factory 闭包，useState 仍然能拿到本轮想要的宿主 state。
   pending.length = 0;
-  pending.push(...values);
+  pending.push(...slots);
   recorded.length = 0;
   componentRef = await loadPanel();
   const tree = componentRef();
@@ -259,7 +266,7 @@ test('面板：使用情况页签把「被用上的比例」、第几条会被�
   assert.match(text, /跳过以寒暄为主/);
   assert.match(text, /曲线只能看形状/, '第四句判据（minScore 曲线）要照搬宿主的原话');
   // textsOf 用 ' | ' 拼文本，所以断言只取连续的那一段
-  assert.match(text, /谁在问：/);
+  assert.match(text, /谁在问（按提问的人拆开，与上面的总数同源）：/);
   assert.match(text, /你 4 轮 \/ 18 条 \/ 用上 8（44\.4%）/, '分母要按谁在问拆开');
   assert.match(text, /子代理 2 轮 \/ 6 条 \/ 用上 1（16\.7%）/);
   assert.doesNotMatch(text, /没记是谁/, '空桶不显示，免得面板上全是 0');
@@ -400,9 +407,24 @@ test('面板：usage 缺字段（半截数据）也不抛异常', async () => {
   assert.doesNotMatch(text, /NaN|undefined/, '半截数据不该渲染出 NaN/undefined');
 });
 
-/** 渲染指定页签：`useState` 的预设值按钩子序摆（第 4 个是 tab、第 5 是展开项、第 6 是过滤器）。 */
+/**
+ * 渲染指定页签：`useState` 的预设值按钩子序摆（第 4 个是 tab、第 5 是展开项、第 6 是过滤器、
+ * 第 7 是忙标志、第 8 是批处理结果、第 9 是批量状态、第 10 是提示条、第 11 是按类型筛）。
+ */
 async function renderTab(tab, state, extra = {}) {
-  return renderWith([state, null, Date.now(), tab, extra.expanded ?? -1, extra.filter ?? '', extra.busy ?? '', extra.results ?? {}, extra.bulk ?? null]);
+  return renderWith([
+    state,
+    null,
+    Date.now(),
+    tab,
+    extra.expanded ?? -1,
+    extra.filter ?? '',
+    extra.busy ?? '',
+    extra.results ?? {},
+    extra.bulk ?? null,
+    extra.flash ?? '',
+    extra.kindFilter ?? 'all',
+  ]);
 }
 
 const richLogEntry = () => ({
@@ -443,7 +465,7 @@ const richState = () => {
 test('面板：七个页签每一个都渲染得出内容（渲染期抛异常＝整页空白，只有人肉看得见）', async () => {
   const state = richState();
   const seen = {};
-  for (const tab of ['log', 'usage', 'notes', 'audit', 'writes', 'index', 'archive']) {
+  for (const tab of ['log', 'usage', 'notes', 'audit', 'writes', 'index', 'archive', 'help']) {
     seen[tab] = await renderTab(tab, state);
     assert.ok(seen[tab].length > 20, `${tab} 页签不该是空的`);
   }
@@ -525,9 +547,30 @@ function elementsOfType(node, type, out = []) {
 
 /** 页签那一排按钮的文案（按渲染顺序）。textsOf 会把 key 也抠出来，所以先摘掉 id 前缀。 */
 function tabLabels() {
-  return elementsOfType(lastTree, 'button')
-    .map((b) => textsOf(b).join('').replace(/^(log|usage|notes|audit|index|archive|writes)/, ''))
-    .filter((t) => /^(提醒记录|使用情况|笔记|自检|索引全文|归档|写入记录)/.test(t));
+  // 2.0 起页签按钮身上带了 className / aria-current，桩的 textsOf 会把属性值也算进文本，
+  // 「按文案摘 id 前缀」那套就失效了。改成锚 role="tablist" 那一排、只取按钮自己的
+  // 文字子节点 —— 位置与项数由结构定，不再靠文案猜。
+  const [bar] = elementsOfType(lastTree, 'div').filter((d) => d.props.role === 'tablist');
+  return elementsOfType(bar, 'button').map((b) => textsOf(b.children).join(''));
+}
+
+/**
+ * 位置曲线那张表的每一行（「第 N 条提醒」）。首屏那条 TrendStrip 的说明文字里也写着
+ * 「第 1 条…到第 N 条」，扫全页会把它的说明当成表格行 —— 所以只认表格行。
+ */
+function positionRows() {
+  return elementsOfType(lastTree, 'tr')
+    .map((r) => textsOf(r).join(' | '))
+    .filter((t) => /第 .+ 条/.test(t));
+}
+
+/** 首屏「现状行」的三个数（篇笔记 / 可检索片段 / 字节）—— 面板 2.0 把它们并成了一行小字。 */
+function summaryCells() {
+  const rows = elementsOfType(lastTree, 'div')
+    .map((d) => textsOf(d).join(' | '))
+    .filter((t) => /个可检索片段/.test(t));
+  const row = rows.sort((a, b) => a.length - b.length)[0] || '';
+  return row.split(' | ').filter((t) => t !== 'true' && t !== '·').join(' | ');
 }
 
 /** 归档页签上的按钮（文案 + disabled），用来钉住 busy 三态。 */
@@ -552,14 +595,18 @@ test('面板：usage 是空对象时只说「还没有提醒记录」，不摊�
   assert.match(text, /还没有提醒记录。账本落在记忆库的/);
   assert.match(text, /\.engramory-recall\.jsonl/);
   assert.match(text, /攒够 20 条再看这些比例更靠谱/);
-  assert.deepEqual(tabLabels(), ['提醒记录（0）', '使用情况', '笔记（1）', '自检', '索引全文', '归档', '写入记录（0）']);
+  assert.deepEqual(
+    tabLabels(),
+    ['提醒记录（0）', '用上了多少', '笔记（1）', '体检', '索引全文', '归档', '写入记录（0）', '说明'],
+    '页签的顺序与文案就是面板 2.0 的契约（含新增的「说明」）',
+  );
   assert.doesNotMatch(text, /给过的提醒|被用上的比例|第几条提醒|字数上限用掉了多少|为什么没提醒/, '没有指针时不该留下半张卡片');
   assert.doesNotMatch(text, /undefined|NaN/);
 });
 
 test('面板：usage 只有 pointers 时四张卡片都在，缺的字段各给人话', async () => {
   const text = await renderTab('usage', fakeState({ pointers: 5 }));
-  assert.deepEqual(tabLabels().slice(1, 2), ['使用情况（用上 0%）'], '页签上的百分比按 openRate 取整');
+  assert.deepEqual(tabLabels().slice(1, 2), ['用上了多少（0%）'], '页签上的百分比按 openRate 取整');
   assert.match(text, /给过的提醒/);
   assert.match(text, /5 条/);
   assert.match(text, /0 轮/, 'injectRounds 缺省按 0');
@@ -567,11 +614,12 @@ test('面板：usage 只有 pointers 时四张卡片都在，缺的字段各给�
   assert.match(text, /0\.0%/);
   assert.match(text, /0 条真的被读过/);
   assert.match(text, /提醒过的笔记/);
-  assert.match(text, /0 篇/);
-  assert.match(text, /每篇都至少被用上一次/);
+  // 面板 2.0 把这一格也按「不印假 0」处理了：账本没汇总篇数时印「—」并说明原因，
+  // 而不是拿 fmtCount 把「不知道」洗成「0 篇」。
+  assert.match(text, /提醒过的笔记 \| — \| 这份账本没汇总这个数/, '没汇总就印「—」，不印假 0 篇');
   assert.match(text, /多久才被用上/);
-  assert.match(text, /还没被用上过/);
-  assert.match(text, /还没有逐轮记录（这一节要重启一次 App 让新宿主开始写）。/);
+  assert.match(text, /还没有「被翻开」的记录可算（不是「没用上」/, '「没记录」与「没用上」必须分开说');
+  assert.match(text, /逐轮明细还没有（这一节要重启一次 App 让新宿主开始写）/);
   assert.match(text, /还没有带分数的提醒记录（早期日志没有 scores 字段）。/);
   assert.match(text, /第几条提醒会被用上/, '位置曲线那一节是说明书，没有数据也在');
   assert.doesNotMatch(text, /第 1 条/, 'positions 缺失时不该凭空造位置行');
@@ -631,18 +679,24 @@ test('面板：位置级曲线的行标签用桶自己的 position，不是过�
     pointers: 5,
     positions: [{ position: 1, injected: 0, opened: 0 }, { position: 2, injected: 4, opened: 1 }],
   }));
-  assert.match(text, /第 2 条/, '这一行的数据来自 position 2');
-  assert.match(text, /1\/4/);
-  assert.match(text, /25%/);
-  assert.doesNotMatch(text, /第 1 条/, 'position 1 那个桶 injected 为 0，不该出现');
+  // 2.0 起首屏也有一条 TrendStrip，它的说明文字里写着「第 1 条…到第 N 条」（那条曲线按
+  // 名次排序，本来就是第几条给出去的），所以这条断言只认表格行 —— 不然说明文字会把它搅浑。
+  const rows = positionRows();
+  assert.ok(rows.length, '位置曲线那张表应当有行');
+  const table = rows.join(' | ');
+  assert.match(table, /第 2 条/, '这一行的数据来自 position 2');
+  assert.match(table, /1\/4/);
+  assert.match(table, /25%/);
+  assert.ok(!rows.some((t) => /第 1 条/.test(t)), 'position 1 那个桶 injected 为 0，不该出现');
 
   // 密集分桶（真实宿主的常态）不受影响：两条都在，只是标签来源换了。
   const dense = await renderTab('usage', fakeState({
     pointers: 5,
     positions: [{ position: 1, injected: 2, opened: 1 }, { position: 2, injected: 4, opened: 1 }],
   }));
-  assert.match(dense, /第 1 条/);
-  assert.match(dense, /第 2 条/);
+  const denseRows = positionRows().join(' | ');
+  assert.match(denseRows, /第 1 条/);
+  assert.match(denseRows, /第 2 条/);
 });
 
 test('面板：scopes 只有「没记是谁」的桶时照样拆开谁在问；pointers 为 0 的桶一行都不出', async () => {
@@ -654,7 +708,7 @@ test('面板：scopes 只有「没记是谁」的桶时照样拆开谁在问；p
       unknown: { injectRounds: 1, pointers: 5, used: 2, openRate: 0.4 },
     },
   }));
-  assert.match(text, /谁在问：/);
+  assert.match(text, /谁在问（按提问的人拆开，与上面的总数同源）：/);
   assert.match(text, /子代理 2 轮 \/ 6 条 \/ 用上 1（16\.7%）/);
   assert.match(text, /没记是谁（旧记录） 1 轮 \/ 5 条 \/ 用上 2（40\.0%）/);
   assert.doesNotMatch(text, /你 \d+ 轮 \/ \d+ 条 \/ 用上/, 'pointers 为 0 的桶不算「有提问者」');
@@ -691,16 +745,28 @@ test('面板：scoreStats 缺失或 n === 0 时说「还没有带分数的提醒
 });
 
 test('面板：verdicts 缺某一句时只渲染有的那句，不留空行', async () => {
-  // 判据行 = 以「· 」打头那一行；textsOf 用 ' | ' 拼文本，所以锚在行首。
-  // 不能再数全页的「· 」：概览卡的说明、分位数那几行都用「· 」当分隔符。
-  const bullets = (text) => (text.match(/(?:^|\| )· /g) || []).length;
+  // 判据行 = 文本以「· 」打头的那种节点本身。不能再数全页子串：面板 2.0 的首屏把
+  // 「N 篇笔记 · N 个可检索片段 · 字节 · 索引余量」用一个个单独的「·」节点当分隔符，
+  // 旧的 `(?:^|\| )· ` 计数会把首屏那几个分隔符一起数进来（它们各自也是「行」）。
+  const bulletLines = () => {
+    const out = [];
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) { node.forEach(walk); return; }
+      const own = textsOf(node.children).join('');
+      if (own.startsWith('· ')) out.push(own);
+      walk(node.children);
+    };
+    walk(lastTree);
+    return out;
+  };
   const one = await renderTab('usage', fakeState({ pointers: 5, verdicts: { open: '只有这一句' } }));
   assert.match(one, /· 只有这一句/);
-  assert.equal(bullets(one), 1, '缺的四句不该变成四行空行');
+  assert.deepEqual(bulletLines(), ['· 只有这一句'], '缺的四句不该变成四行空行，也不该多出首屏的分隔符');
   const none = await renderTab('usage', fakeState({ pointers: 5, verdicts: {} }));
-  assert.equal(bullets(none), 0);
+  assert.deepEqual(bulletLines(), []);
   const nulled = await renderTab('usage', fakeState({ pointers: 5, verdicts: null }));
-  assert.equal(bullets(nulled), 0);
+  assert.deepEqual(bulletLines(), []);
 });
 
 test('面板：脏数字在显示层被净化成「—」（NaN / Infinity / 1e+21），有限数照抄', async () => {
@@ -721,7 +787,10 @@ test('面板：脏数字在显示层被净化成「—」（NaN / Infinity / 1e+
   assert.match(text, /-3 轮/, '有限的负数照抄，不洗成 0');
   assert.match(text, /-1 篇/);
   assert.match(text, /p90 — · n=-1/, 'openLag 的坏中位数印「—」，n 仍是有限数');
-  assert.match(text, /相关度分：中位 — · p10 -5 · p90 — · 首尾落差中位 —（共 2 轮）/);
+  // 面板 2.0 在这句尾巴上补了一句解释（「共 N 轮 —— 有分数可算的那几轮」），所以拆成两段断言：
+  // 前半段逐字钉住每个分位数，后半段只要注明轮数、别再夹带别的数值。
+  assert.match(text, /相关度分：中位 — · p10 -5 · p90 — · 首尾落差中位 —/, '坏分数一律印「—」，有限数照抄');
+  assert.match(text, /（共 2 轮[^）]*）/, '仍然写清一共几轮有分数可算');
   assert.match(text, /2\/3/);
   assert.match(text, /67%/);
 
@@ -776,7 +845,9 @@ test('面板：日志折叠只摘要前 4 条，展开列全部 6 条（含 § �
   assert.match(folded.text, /上面是前 4 条，一共 6 条 —— 点「展开全部」看全。/, '「提醒 6 条只列 4 条」必须说清是前 4 条，不能让人以为丢了数据');
   const buttons = elementsOfType(folded.node.type(folded.node.props), 'button');
   assert.equal(buttons.length, 1);
-  assert.equal(textsOf(buttons[0]).join(''), '展开全部 6 条', '按钮自己写清展开的是几条');
+  // 2.0 起这个按钮身上多了 className（'er-btn'），桩的 textsOf 会把属性值也算进文本 ——
+  // 所以只取按钮自己的文字子节点，断言仍然钉的是「文案自己写清展开的是几条」。
+  assert.equal(textsOf(buttons[0].children).join(''), '展开全部 6 条', '按钮自己写清展开的是几条');
   assert.equal(buttons[0].props.onClick, folded.node.props.onToggle, '折叠按钮要接上 MemoryView 给的 onToggle');
 
   const opened = await renderLogEntry(entry, true);
@@ -831,25 +902,33 @@ test('面板：多条日志时展开态只落在 expanded === 下标 的那一�
 });
 
 test('面板：统计卡把命中次数与字数累计出来，没有命中时显示「—」而不是 0', async () => {
+  // 面板 2.0 拆掉了旧的「概览统计卡」（原来那四张 Stat：笔记 / 本轮注入 / 给过提醒 / 写入保护）：
+  // 命中与字数改成每条日志自己写，写入保护的拦截数改由首屏第三问给、且数的是**写入审计**
+  // 而不是日志里的 deny 条数（这是口径修正，不是放宽）—— 断言跟着换到这两处活的地方。
   const state = fakeState(null);
   state.log = [
     { at: 1, kind: 'hit', query: 'a', chars: 100, hits: [] },
     { at: 2, kind: 'hit', query: 'b', chars: '50', hits: [] },
     { at: 3, kind: 'deny', query: 'c', hits: [] },
   ];
+  state.writeAudit = { epoch: 'guard-v1', entries: [{ at: 1, verdict: 'deny', reason: '会写坏库' }] };
   const text = await renderTab('log', state);
-  assert.match(text, /给过提醒/);
-  assert.match(text, /2 轮/);
-  assert.match(text, /共带出 150 字/, 'chars 是字符串也要按数字累加');
-  assert.match(text, /写入保护/);
-  assert.match(text, /1 次/);
-  assert.match(text, /挡下了会写坏库的改动/);
+  assert.match(text, /提醒记录（3）/, '页签上的条数就是得清的日志条数');
+  // 「共带出 N 字」那张旧统计卡没了（2.0 拆掉了概览卡）：字数改成每条日志写在自己行里，
+  // 而桩不递归函数组件，所以要手动渲染 LogEntry 体才看得见这两个数。
+  const hitA = await renderLogEntry(state.log[0]);
+  assert.match(hitA.text, /100 字/);
+  const hitB = await renderLogEntry(state.log[1]);
+  assert.match(hitB.text, /50 字/, 'chars 是字符串也要按数字写出来');
+  assert.match(text, /写入保护拦下过 1 次会写坏库的改动/);
+  assert.doesNotMatch(text, /undefined|NaN/);
 
   const none = await renderTab('log', fakeState(null));
-  assert.match(none, /最近这些轮都没提醒/);
-  assert.match(none, /还没拦过/);
+  assert.match(none, /提醒记录（0）/);
+  assert.match(none, /还没有记录：问答满一轮之后/);
+  assert.match(none, /写入保护还没拦过任何写入/, '没拦过就说「还没拦过」，不印假 0');
   assert.doesNotMatch(none, /0 次/);
-  assert.match(none, /—/);
+  assert.match(none, /—/, '该「不知道」的字段印破折号，不印 0');
 });
 
 test('面板：笔记列表为空时表头仍在，一行数据都不渲染', async () => {
@@ -1044,8 +1123,14 @@ test('面板：归档结果与批量汇总按成功/失败上色，文案原样�
     assert.ok(node, `应当找得到文案为「${want}」的结果行`);
     return node.props.style.color;
   };
-  assert.equal(colorOf('已归档 → M-history.md'), '#2e9e63');
-  assert.equal(colorOf('成功 0 篇，失败 1 篇：M.md'), '#c2803a');
+  // 面板 2.0 起状态色一律跟 currentColor 混一道（同一份色表要同时管深浅两套主题），
+  // 所以断言的是「这一行取的是哪个状态色的基色」，而不是那一整串 color-mix —— 混的比例
+  // 属于配色细节，可以调；但成功与失败必须是两个色，且各自绑在自己的语义色上。
+  const done = colorOf('已归档 → M-history.md');
+  const failed = colorOf('成功 0 篇，失败 1 篇：M.md');
+  assert.match(done, /#2e9e63/, '成功行用 hit 色');
+  assert.match(failed, /#c2803a/, '失败行用 note 色');
+  assert.notEqual(done, failed, '成功和失败不能是同一个颜色');
 });
 
 test('面板：positions / neverOpened / plan.historyFiles 不是数组时当空列表处理，不抛', async () => {
@@ -1063,7 +1148,10 @@ test('面板：positions / neverOpened / plan.historyFiles 不是数组时当空
 
   const neverOpened = await renderTab('usage', fakeState({ pointers: 5, neverOpened: 'xxx' }));
   assert.match(neverOpened, /提醒过的笔记/);
-  assert.match(neverOpened, /每篇都至少被用上一次/, '空清单按「都打开过」那句话回落');
+  assert.doesNotMatch(neverOpened, /篇一次都没被用上/, '不是数组就当空清单，不凭空造篇数');
+  // 空清单 + 账本给了 uniqueNotes → 回落成「每篇都至少被用上一次」
+  const allOpened = await renderTab('usage', fakeState({ pointers: 5, uniqueNotes: 2, neverOpened: 'xxx' }));
+  assert.match(allOpened, /提醒过的笔记 \| 2 篇 \| 每篇都至少被用上一次/, '空清单按「都打开过」那句话回落');
   assert.doesNotMatch(neverOpened, /提醒过，但从没被用上/, '不是数组就不渲染清单');
   assert.doesNotMatch(neverOpened, /undefined|NaN/);
 
@@ -1082,15 +1170,21 @@ test('面板：positions / neverOpened / historyFiles 数组里混了 null / 字
   // 光兜「不是数组」不够，元素是 null 时读 p.position / hf.file 照样抛。
   const usage = await renderTab('usage', fakeState({
     pointers: 5,
+    uniqueNotes: 1,
     positions: [null, 'oops', { position: 2, injected: 4, opened: 1 }],
     neverOpened: [null, 'oops', { id: 'b.md', injected: 3, lastAt: Date.now() }],
   }));
-  assert.match(usage, /第 2 条/);
-  assert.match(usage, /1\/4/);
-  assert.doesNotMatch(usage, /第 1 条/, 'null / 字符串不占行号');
+  // 同上：标签只认表格行 —— 首屏 TrendStrip 的说明里也有「第 N 条」。
+  const usageRows = positionRows();
+  assert.ok(usageRows.length, '位置曲线那张表应当有唯一一行');
+  assert.equal(usageRows.length, 1, '两个脏元素不该变成两行');
+  assert.match(usageRows.join(' | '), /第 2 条/);
+  assert.match(usageRows.join(' | '), /1\/4/);
+  assert.doesNotMatch(usageRows.join(' | '), /第 1 条/, 'null / 字符串不占行号');
   assert.match(usage, /提醒过，但从没被用上/);
   assert.match(usage, /b\.md/);
-  assert.match(usage, /1 篇一次都没被用上/, '折叠页签上的「一篇都没用上」也走人话');
+  assert.match(usage, /提醒过的笔记 \| 1 篇 \| 1 篇一次都没被用上/, '三个元素里两个是脏的，剩下的就是 1 篇');
+  assert.doesNotMatch(usage, /3 篇一次都没被用上/, '脏元素不占一篇');
   assert.doesNotMatch(usage, /undefined|NaN/);
 
   const state = fakeState(null);
@@ -1140,8 +1234,12 @@ test('面板：totals/index 半截时统计卡印「—」，整块缺失仍回�
   half.totals = { notes: 2 };
   half.index = { bytes: 20 };
   const text = await renderTab('log', half);
-  assert.match(text, /笔记 \| 2 \| —/, 'docs 缺了，hint 印 —');
-  assert.match(text, /索引 \| — \| 20 B/, 'lines 缺了，value 印 —');
+  // 面板 2.0 把这两格并进首屏「现状行」（`N 篇笔记 · M 个可检索片段 · 字节 · 索引 N／上限 200 行`）
+  assert.deepEqual(summaryCells().split(' | ').slice(0, 2), ['2 篇笔记', '— 个可检索片段'],
+    'notes 照抄，docs 缺了印「—」而不是 undefined / 0');
+  assert.match(text, /索引 —／上限 200 行/, 'lines 缺了印「—」');
+  const [idxMeter] = nodesOfType(lastTree, 'Meter');
+  assert.equal(idxMeter.props.value, null, '索引行数缺了就把「不知道」原样交给 Meter，不许换成 0');
   assert.doesNotMatch(text, /undefined|NaN/);
 
   const bare = fakeState(null);
@@ -1162,9 +1260,9 @@ test('面板：统计卡里的脏数字也净化成「—」（NaN / Infinity / 
   state.totals = { notes: NaN, docs: Infinity, bytes: NaN };
   state.index = { lines: 1e21, bytes: NaN };
   const text = await renderTab('log', state);
-  assert.match(text, /笔记 \| — \| — 个可检索片段/, '脏的 notes / docs 印「—」');
-  assert.match(text, /库大小 \| — /, '脏的 bytes 印「—」');
-  assert.match(text, /索引 \| — \| —/, '脏的 lines / bytes 印「—」');
+  assert.deepEqual(summaryCells().split(' | ').slice(0, 3), ['— 篇笔记', '— 个可检索片段', '—'],
+    '脏的 notes / docs / bytes 一律印「—」');
+  assert.match(text, /索引 —／上限 200 行/, '脏的 lines 印「—」');
   assert.doesNotMatch(text, /NaN|Infinity|1e\+21|undefined/);
 
   // 有限的负数不是脏数字：照抄，不洗成 0 也不吞掉。
@@ -1172,14 +1270,23 @@ test('面板：统计卡里的脏数字也净化成「—」（NaN / Infinity / 
   neg.totals = { notes: -2, docs: -1, bytes: -1 };
   neg.index = { lines: -3, bytes: -1 };
   const negText = await renderTab('log', neg);
-  assert.match(negText, /笔记 \| -2 \| -1 个可检索片段/);
+  assert.deepEqual(summaryCells().split(' | ').slice(0, 2), ['-2 篇笔记', '-1 个可检索片段'],
+    '有限负数照抄，不洗成 0 也不吞掉');
+  assert.match(negText, /-1 B/, '负字节照样带单位');
+  assert.match(negText, /索引 -3 行／上限 200 行/);
   assert.doesNotMatch(negText, /NaN|undefined/);
 
   // 「本轮注入」那张卡的字符数是拿日志累加出来的，脏的 chars 一样过净化。
   const logged = fakeState(null);
   logged.log = [{ at: Date.now(), kind: 'hit', query: 'q', injected: 1, chars: Infinity }];
   const loggedText = await renderTab('log', logged);
-  assert.match(loggedText, /给过提醒 \| 1 轮 \| 最近 1 轮里，共带出 — 字/);
+  assert.match(loggedText, /提醒记录（1）/, '脏 chars 的那条照样只算一条日志');
+  // 字数现在写在 LogEntry 体里（旧概览卡的「共带出 N 字」拆掉了）
+  const dirtyChars = await renderLogEntry({ at: 1, kind: 'hit', query: 'q', injected: 1, chars: Infinity });
+  // fmtNum 对不可信数字只给「—」，连单位都不跟（免得写成「— 字」像是真读到过）：
+  // 所以脏 chars 那一格正好就是行尾那一个「—」。
+  assert.equal(dirtyChars.text.split(' | ').pop(), '—', '脏的 chars 印「—」，不印 Infinity');
+  assert.doesNotMatch(dirtyChars.text, /Infinity|NaN/);
   assert.doesNotMatch(loggedText, /NaN|Infinity|undefined/);
 });
 
@@ -1191,11 +1298,18 @@ test('面板：库大小到 MB 档也要有单位（大库不能显示成 3400.0
 });
 
 test('面板：Stat 组件体自己把 label / value / hint 摆出来，hint 是假值就不留空节点', async () => {
+  // 面板 2.0 拆掉了旧概览统计卡：Stat 现在只活在「使用情况」页签
+  // （给过的提醒 / 被用上的比例 / 提醒过的笔记 / 多久才被用上），日志页签一张都没有。
   await renderTab('log', fakeState(null));
-  const [stat] = nodesOfType(lastTree, 'Stat');
-  assert.ok(stat, '统计卡应当是 Stat 组件');
-  assert.equal(textsOf(stat.type(stat.props)).join(' | '), '笔记 | 1 | 1 个可检索片段');
-  assert.equal(textsOf(stat.type({ label: '本轮注入', value: '—' })).join(' | '), '本轮注入 | —');
+  assert.equal(nodesOfType(lastTree, 'Stat').length, 0, '日志页签上不该再摆统计卡');
+  await renderTab('usage', fakeState({ pointers: 5 }));
+  const stats = nodesOfType(lastTree, 'Stat');
+  assert.equal(stats.length, 4, '使用情况页签就是这四张 Stat');
+  assert.deepEqual(stats.map((s) => s.props.label),
+    ['给过的提醒', '被用上的比例', '提醒过的笔记', '多久才被用上']);
+  assert.equal(textsOf(stats[0].type(stats[0].props)).join(' | '), '给过的提醒 | 5 条 | 分 0 轮给的');
+  assert.equal(textsOf(stats[0].type({ label: '本轮注入', value: '—' })).join(' | '), '本轮注入 | —',
+    'hint 是假值就不留空节点');
 });
 
 test('面板：点「执行归档」按契约打 POST（confirm:true），「全部执行」是一篇一篇串行', async () => {
@@ -1306,7 +1420,7 @@ test('面板：「全部执行」遇到网络错、宿主拒绝、响应不是 J
 /** 七个页签逐个渲染一遍（任一页签抛异常，用例就炸在这里），返回 { 页签: 文本 }。 */
 async function renderAllTabs(state) {
   const out = {};
-  for (const tab of ['log', 'usage', 'notes', 'audit', 'writes', 'index', 'archive']) out[tab] = await renderTab(tab, state);
+  for (const tab of ['log', 'usage', 'notes', 'audit', 'writes', 'index', 'archive', 'help']) out[tab] = await renderTab(tab, state);
   return out;
 }
 
@@ -1326,7 +1440,10 @@ test('面板：state.log 混进 null / 字符串时，跑在分发之前的统�
   // 活下来的那条原样交给 LogEntry，脏元素一个都不占位。
   const [kept] = nodesOfType(lastTree, 'LogEntry');
   assert.equal(kept.props.entry, state.log[2], '活下来的那条日志照常渲染（原对象交给 LogEntry）');
-  assert.match(text, /给过提醒 \| 1 轮/, '脏元素不参与累计');
+  // 首屏第一问那颗「看全部 N 轮」按钮是按活下来的条数算的 —— 它是 action 这个 prop
+  // 传进去的，桩的 textsOf 不递归 prop，所以直接读 Question 节点。
+  const [peek] = nodesOfType(lastTree, 'Question').filter((q) => q.props.title === '这一轮提醒了什么？');
+  assert.deepEqual(peek.props.action.children, ['看全部 1 轮'], '脏元素不参与累计');
   assert.match(text, /提醒记录（1）/, '页签计数只数得清的条目');
   assert.equal(nodesOfType(lastTree, 'LogEntry').length, 1, '脏元素不占一条日志');
   assert.doesNotMatch(text, /undefined|NaN/);
@@ -1362,7 +1479,7 @@ test('面板：audit.findings 混进 null / 字符串时，跑在分发之前的
   assert.match(text, /真问题/);
   assert.match(text, /MEMORY\.md/);
   assert.match(text, /1 篇笔记 · 结构错 1 · 告警 0 · 提示 0/);
-  assert.match(text, /自检（1）/, '严重性计数只数得清的 finding');
+  assert.match(text, /体检（1）/, '严重性计数只数得清的 finding（体检页签名带计数）');
   assert.equal(
     elementsOfType(lastTree, 'div').filter((n) => n.props.key === 'boom-0').length, 1,
     '活下来的 finding 排第 0 位（脏元素不占位）',
@@ -1461,7 +1578,7 @@ test('面板：audit.summary 半截（没有 bySeverity）时摘要行印 0，�
   const text = await renderTab('audit', state);
   assert.match(text, /3 篇笔记 · 结构错 0 · 告警 0 · 提示 0/, '缺的按计数规矩印 0，不是 undefined');
   assert.match(text, /✅ 没发现结构问题、失联路径或可疑重复。/);
-  assert.equal(tabLabels()[3], '自检', '一个已知严重性都没有就不写「自检（0）」');
+  assert.equal(tabLabels()[3], '体检', '一个已知严重性都没有就不写「体检（0）」');
   assert.doesNotMatch(text, /undefined|NaN/);
 });
 
@@ -1534,26 +1651,30 @@ test('面板：专业键名只当小字对照，正文里没有 maxPointers= 这
   assert.match(text, /自动归档 \| 关 \| autoArchive/);
 });
 
-test('面板：七个页签各自的人话标题与一句解释都在场', async () => {
+test('面板：八个页签各自的人话标题与一句解释都在场', async () => {
   const tabs = await renderAllTabs(richState());
   const heads = {
     log: '提醒记录',
-    usage: '使用情况',
+    usage: '用上了多少',
     notes: '笔记',
-    audit: '自检',
+    audit: '体检',
     writes: '写入记录',
     index: '索引全文',
     archive: '归档',
+    help: '面板上这些词，在说什么',
   };
   for (const [tab, head] of Object.entries(heads)) {
     assert.match(tabs[tab], new RegExp(`${head} \\| `), `${tab} 页签要有大写标题`);
   }
-  assert.match(tabs.log, /哪一轮带了什么线索进来、后来有没有被用上/);
+  assert.match(tabs.log, /没提醒的轮次也记/, '日志卡的解释换成了「这轮没给也是结论」');
   assert.match(tabs.usage, /给出去的提醒，后来有多少真的被用上/);
   assert.match(tabs.index, /每次提醒之前先读的那份小抄/);
-  assert.deepEqual(tabLabels().length, 7, '页签栏还是七项');
+  assert.match(tabs.help, /我要的功能，在哪个开关上/, '「说明」页签三张卡都要在');
+  assert.match(tabs.help, /这些数字从哪来/);
+  assert.deepEqual(tabLabels().length, 8, '页签栏是八项（新增「说明」）');
 
   // 卡片壳自己也渲一次（桩不递归函数组件，只能手动调）：标题 + 一句解释 + 内容三层都在。
+  await renderTab('archive', richState());
   const [card] = nodesOfType(lastTree, 'Card');
   assert.ok(card, '页签内容都装在 Card 里');
   assert.match(textsOf(card.type(card.props)).join(' | '), /归档 \| 把过长的旧章节整段搬去/, '卡片要有标题 + 一句解释');

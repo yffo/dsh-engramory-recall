@@ -42,9 +42,10 @@ Install it, keep talking normally, and three things happen:
 2. **It shows up only when it should, and never without a ceiling.** No hits, no tokens injected;
    on a hit, at most 4 pointers and 480 characters. Greetings like "continue" or "ok" pass
    straight through with zero retrieval.
-3. **You can see whether any of it was used.** A **Memory** tab appears next to the conversation:
-   why a turn was nudged or wasn't, whether a pointed-at note was later opened, which notes exist,
-   and how clean the store is.
+3. **You can see whether any of it was used.** A **Memory** tab appears next to the conversation.
+   It opens with **three answers**, not a wall of gauges — what the latest turn was nudged with
+   (and whether each note was ever opened since), how much of what it hands out actually gets used,
+   and whether the write guard had to block anything. Detail lives in eight tabs below.
 
 Three words used throughout: an **injection** is a nudge block appended to a turn, a **pointer** is
 one line of it (a note's filename plus the matched snippet from its body), and the **open rate** is
@@ -70,6 +71,7 @@ the share of injected pointers that were later read.
 |---|---|---|
 | 🧠💸 | Recall every turn, free when irrelevant | One retrieval at the start of each user turn; on a hit the model is told which notes look relevant. No hit means zero tokens injected, and greetings skip retrieval entirely |
 | 🎯 | It injects the sentence, not an echo of your question | Injected lines are picked from the body by IDF; titles and descriptions, which tend to parrot the question, are discounted. Foundation-sentence retention 39.6% → **85.4%** |
+| 🖼️ | One human-readable panel | The **Memory** tab: **three answers first** (what was nudged, how much was used, what got blocked), then eight detail tabs — read-only, refreshed every 3s, plus a glossary and a "which switch do I need?" list. A dashboard nobody can read is not a dashboard |
 | 🔒 | Data stays on this machine | Needs file read/write only, never network. No database, no index files, plain markdown you can read and diff |
 | 🎚️ | Hard ceilings | Per-turn characters, pointer count, and index size all have limits — and exceeding one is a **refusal**, not a silent truncation |
 | 🛡️🩺 | Write gate + doctor | Non-conforming filenames, missing frontmatter, or suspected real credentials are rejected at write time with an audit line; 14 static checks report orphans, index duplicates, broken paths, stale todos, and notes carried into context 20 times without ever being read |
@@ -99,7 +101,7 @@ Installing from a checkout works the same way, with a path instead of a package 
 
 **What you should see once it's installed:**
 
-- A **Memory** tab appears beside the conversation/trace tabs, opening on a **recall log** view.
+- A **Memory** tab appears beside the conversation/trace tabs: three answers up top, eight detail tabs below.
 - Say something related to a note in your store and that turn gains a "possibly relevant existing
   entries" block; say "continue" or "ok" and **nothing is added** — the design working, not a fault.
 
@@ -107,6 +109,30 @@ If instead nothing happens at all, check that the symlink under your profile's
 `node_modules/dsh-engramory-recall` points at a real directory: a broken link makes the host print
 one line (`skipping profile bundle`) and skip the plugin entirely without any other error. More
 details, plus a second install trap, in [docs/release.md](docs/release.md).
+
+## What the panel looks like
+
+![The Memory panel's first screen](docs/images/panel-first-screen.png)
+
+> An off-screen render of the real panel (1120px wide, light theme) — not a mockup; the dark theme follows the host.
+
+The first screen answers three questions before it shows any detail:
+
+1. **What was the latest turn nudged with?** — the notes, their relevance, and whether each one has
+   been **opened since** (the status dot comes from the same ledger the usage tab reads, not a guess).
+2. **How much of it gets used?** — the open rate plus a bar chart of "which pointer position gets
+   opened", with the median marked. It says out loud that this is a *proxy*: it proves a note was
+   opened, never that it was written into the answer.
+3. **Did anything get blocked?** — how many writes the guard rejected, how many doctor findings
+   need attention, and how much of the index cap is used (the cap comes from your config) with a
+   plain-language verdict.
+
+The eight tabs hold the detail: **recall log**, **usage**, **notes**, **doctor**, **index**,
+**archive**, **write audit** and **help** (glossary, "which switch do I need?", and where every
+number comes from). The panel only reads: the numbers come from local files — the ledger
+(`.engramory-recall.jsonl`), the write audit (`.engramory-audit.jsonl`), the index and the notes
+themselves. When that read-only route isn't available (Electron runs over `file://` + IPC), recall
+keeps working and the panel just stays on "reading the memory store…" plus "host route unavailable".
 
 ## Configuration
 
@@ -150,7 +176,7 @@ broken one prints only `skipping profile bundle` and fails silently), restart th
 **Q: Why wasn't I nudged this turn?**
 Three silences are all normal: **greeting / empty / shorter than 4 characters** ("continue", "ok",
 "好的") is passed through without retrieval; **retrieval ran and found nothing**; or **something
-was found but didn't clear `minScore`** (default `0`). To find out which, look at the recall log
+was found but didn't clear `minScore`** (default `0`). To find out which, look at the **recall log** tab
 in the Memory tab or at the reason breakdown from `npm run recall:stats` (`chitchat` / `too-short`
 / `duplicate` / `store-not-configured` / `index-empty` / `no-hits` / `below-min-score`). If the
 store genuinely has nothing relevant, it does not invent a hit.

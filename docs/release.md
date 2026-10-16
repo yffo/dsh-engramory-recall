@@ -30,7 +30,7 @@ dsh plugin --profile <profile> remove dsh-engramory-recall
 ## 测试与自检
 
 ```bash
-npm test        # 分词 / BM25 / 切桶 / 门控 / 闸门 / 索引闸门 / 技能注册 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由 / 注入路径总装 / 面板渲染（七个页签）/ 公开基准 harness / MCP 服务器（含 JSON-RPC 帧与 stdio 主循环）/ 脏数据 fuzz / 语义接缝（含 host-embed）
+npm test        # 分词 / BM25 / 切桶 / 门控 / 闸门 / 索引闸门 / 技能注册 / 体检 / 审计 / 沉淀提醒 / 归档 / 打包 / 路由 / 注入路径总装 / 面板渲染（八个页签 + 首屏三问）/ 公开基准 harness / MCP 服务器（含 JSON-RPC 帧与 stdio 主循环）/ 脏数据 fuzz / 语义接缝（含 host-embed）
 npm run check   # 接线自检：配置键认不认、库路径对不对、装的是哪一份、包清单漏没漏文件
 npm run probe   # 召回质量探针：3 组 query + 三道对照，跑在真实记忆库上
 npm run probe -- --save   # 把这次结果存成基线，之后每次跑自动比对

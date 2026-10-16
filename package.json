@@ -1,6 +1,6 @@
 {
   "name": "dsh-engramory-recall",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Local BM25 auto-recall, fail-closed write guard, static doctor, account-keeping ledger and a memory panel for a local markdown memory store (Format v1) — no network, no model, no daemon, no dependencies.",
   "keywords": [
     "dsh",
