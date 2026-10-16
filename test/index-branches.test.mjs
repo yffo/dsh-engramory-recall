@@ -1096,3 +1096,36 @@ test('归档口：库路径读不动时 planArchive 给空计划 → 404 而不�
   assert.equal(body.ok, false);
   assert.equal(body.reason, '没找到可归档计划：x.md', '读不动就等于没有计划，措辞要说得出来');
 });
+
+test('账本：有命中的那一轮也要记 topScore 与预算（否则「为什么只给半句」无从复算）', async () => {
+  const dir = tinyStore();
+  const { handlerOf } = captureCtx({ storePath: dir, minScore: 0, maxChars: 480, usageLog: true });
+  const out = await turn(handlerOf('agent/pre-step'), {}, 'm1');
+  assert.ok(out.messages.length > 1, '这一轮应该有注入');
+  const row = lastRow(dir);
+  assert.equal(row.kind, 'hit');
+  // 落盘的行是宿主侧的**投影**（`ids`/`scores` 一一对应、顺序就是注入顺序），
+  // 不是内存日志里的 `hits`；名次由 `ids` 的顺序表达，不另存一个 rank 字段。
+  assert.equal(row.injected, row.ids.length, 'injected 要等于真正列出去的条数');
+  assert.equal(row.ids.length, row.scores.length, 'ids 与 scores 一一对应');
+  assert.equal(typeof row.topScore, 'number');
+  assert.ok(row.topScore > 0, '有命中就该有正的最高分');
+  assert.ok(row.budget > 0 && row.spent > 0, '预算上限与花掉的量都要在账上');
+});
+
+test('账本：命中了却一条都塞不进预算 → 记 budget-too-small，不许静默返回', async () => {
+  // 造一个长到「连裸文件名都放不下」的 id：文件名 116 字符 + 注入头 80 + 预算下限 160，
+  // 只剩 80 字符给条目 → 裸形态也放不下。正文要真能命中查询，否则走的是「没命中」那一支。
+  const longName = `${'r'.repeat(116)}.md`;
+  const dir = store({
+    [longName]: `---\nname: ${'r'.repeat(116)}\ndescription: 代理节点的双端口\ntype: reference\n---\n\n# 长文件名\n\n代理节点双端口配置。\n`,
+  });
+  const { handlerOf } = captureCtx({ storePath: dir, minScore: 0, maxChars: 1, usageLog: true });
+  const out = await turn(handlerOf('agent/pre-step'), {}, 'm1');
+  assert.equal(out.messages.length, 1, '一条都放不下时不该注入任何东西');
+  const row = lastRow(dir);
+  assert.equal(row.kind, 'skip');
+  assert.equal(row.reason, 'budget-too-small', '要能看出「是预算太小，不是没命中」');
+  assert.ok(row.budget >= 160, '记下当时的上限，才知道该不该抬');
+  assert.ok(row.topScore > 0, '记下最高分，才知道是分数不够还是预算不够');
+});

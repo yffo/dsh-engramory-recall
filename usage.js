@@ -543,6 +543,9 @@ const REASON_LABELS = {
   'index-empty': '库里没有笔记',
   'no-hits': '一条都不匹配',
   'below-min-score': '被 minScore 拦住',
+  // 命中了、却连一个裸文件名都塞不进预算（注入头 + 下限 160 字都放不下）：
+  // 它和「没命中」是两回事，混在一个码里就分不清该抬预算还是该抬门槛。
+  'budget-too-small': '预算太小，一条都放不下',
   unspecified: '没记原因（早期日志）',
 };
 

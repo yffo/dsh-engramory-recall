@@ -865,7 +865,23 @@ export function apply(ctx, config = {}) {
           `[engramory 沉淀提醒] 本会话已进行 ${turnCount} 轮，记忆库还没有任何新增或更新。若这期间定下了决策、踩了坑、或摸清了偏好，按 Engramory 纪律落盘（一条一文件 + 索引一行）；只是当前状态（版本号、进度）就别记。没有值得记的就跳过。`,
         );
       }
-      if (!parts.length) return decision;
+      if (!parts.length) {
+        // 命中了、却一条都没塞进预算（文件名都放不下）：这是一次**真的没注入**，
+        // 不能静默返回 —— 静默的话账本里这一轮等于不存在，「为什么这一轮模型没看到记忆」
+        // 就永远查不出来（面板、尺子、灰度对比全靠账本这一行）。
+        recordRound({
+          kind: 'skip',
+          query: brief(query),
+          hits: [],
+          reason: 'budget-too-small',
+          budget,
+          // `spent: 0` 不是凑数：宿主侧的落盘白名单要求「上限与用掉的量同时在场」才写这两项，
+          // 少了它，这一轮在账本里就只剩一个原因码，「到底是预算配小了还是分数不够」看不出来。
+          spent: 0,
+          topScore: Number((hits[0]?.score ?? 0).toFixed(3)),
+        });
+        return decision;
+      }
 
       const text = parts.join('\n');
       // 注入去重（mnemon `src/host/lifecycle.ts:339-345`）：上一轮那份指针还在上下文里，别重复塞。
@@ -894,13 +910,16 @@ export function apply(ctx, config = {}) {
       recordRound({
         kind: lines.length ? 'hit' : 'sediment',
         query: brief(query),
-        hits: shown.map((hit) => ({
+        hits: shown.map((hit, rank) => ({
           id: hit.id,
           score: Number((hit.score ?? 0).toFixed(3)),
           section: hit.section ?? '',
           bytes: hit.bytes ?? 0,
           collapsed: hit.collapsed === true,
           rotated: hit.rotated === true,
+          // 名次落盘：预算现在是**按名次**分的（第一名分到的字数最多），
+          // 不记名次的话，「这条为什么只带进来半句」在账本里就无从复算。
+          rank,
         })),
         injected: shown.length,
         collapsed,
@@ -910,6 +929,9 @@ export function apply(ctx, config = {}) {
         budget,
         spent: used,
         chars: text.length,
+        // 本轮最高分：minScore 定得高不高，这是唯一能校准的依据（空轮走的是另一支，
+        // 那里早就记了 topScore —— 有命中的轮次同样要记，否则「拦掉了多少好线索」两头都看不见）。
+        topScore: Number((hits[0]?.score ?? 0).toFixed(3)),
         nudge: wantsRemember,
         sediment: wantsSediment,
       });

@@ -203,6 +203,7 @@ window.__ModuleLoader__.load({
       'index-empty': '库里没有笔记',
       'no-hits': '一条都不匹配',
       'below-min-score': '被相关度门槛拦住',
+      'budget-too-small': '预算太小，一条都放不下',
       unspecified: '没记原因（早期日志）',
     };
 
