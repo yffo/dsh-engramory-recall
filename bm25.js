@@ -581,16 +581,200 @@ export function buildIndex(docs, options = {}) {
   const totalLen = new Map();
   for (const doc of prepared) totalLen.set(doc.id, (totalLen.get(doc.id) ?? 0) + doc.len);
   for (const doc of prepared) doc.len = totalLen.get(doc.id) ?? doc.len;
+  // 文档频率：`search` 每轮现算的只是**本次查询**词项的 df，而片段挑选要在候选句子上
+  // 再用一次 idf —— 现算就等于每篇笔记重扫全库。建索引时顺手记一份全量，两个口径同源。
+  //
+  // ⚠️ 口径必须与下面的 `docCount` **一致**（同一篇笔记切出的多个桶只算一次）：df 按桶数、
+  // N 按笔记数时会出现 `df > N`，`log(1 + (N-df+0.5)/(df+0.5))` 直接变负 —— 命中越多分越低，
+  // 片段挑选会反过来躲开证据句（2026-10-16 在「同 id 多桶」的用例上撞到，当时返回的是文件名）。
+  const termsOfNote = new Map();
+  for (const doc of prepared) {
+    let terms = termsOfNote.get(doc.id);
+    if (!terms) termsOfNote.set(doc.id, (terms = new Set()));
+    for (const term of doc.tf.keys()) terms.add(term);
+  }
+  const docFreq = new Map();
+  for (const terms of termsOfNote.values()) for (const term of terms) docFreq.set(term, (docFreq.get(term) ?? 0) + 1);
   // 平均长度按「笔记」而不是「桶」统计：否则碎桶会把基准拉低，反而放松对长文的惩罚。
   const sum = [...totalLen.values()].reduce((n, v) => n + v, 0);
-  return { docs: prepared, avgLen: sum / (totalLen.size || 1) || 1 };
+  return {
+    docs: prepared,
+    avgLen: sum / (totalLen.size || 1) || 1,
+    // `docCount` 按**笔记**数（不是桶数）：idf 的分母必须是「多少篇里有这个词」。
+    docCount: totalLen.size,
+    docFreq,
+  };
+}
+
+/**
+ * 「挑哪句话当片段」的标题/描述折扣：标题与描述是在**复述提问**，不是证据。
+ *
+ * 病根（2026-10-16 地基句尺子定位）：查询里的口语词（「飞书」「连不上」）天然同时命中
+ * 标题/描述和正文，于是按「命中几个词」排队的旧规则让**回声**压过了**正文里那句带
+ * 决定性罕见词的话** —— 96 题里 47 题是这么丢的。注入行要带的是证据，不是回声。
+ *
+ * 打折而不是禁用：标题命中确实是「这篇讲什么」的强信号，只是不该赢过正文证据。
+ * 0.6 与原型一致（原型在 tune 半上扫过 0.4/0.5/0.6/0.8，0.6 最好且不是尖峰）。
+ */
+const SNIPPET_TITLE_DISCOUNT = 0.6;
+/** 片段（句子 + 邻句）的硬上限。截断本身交给渲染层（`render.js` 的 `clip`）。 */
+const SNIPPET_MAX = 240;
+/**
+ * 短于这个字数的句子被认为「缺上下文」，触发邻句扩展。
+ * 40 是原型扫出来的平台：再低则大量单句证据没机会带上线索，再高则长句也去拼邻句、
+ * 平均注入行白涨字符（而预算是有限的）。
+ */
+const SNIPPET_NEIGHBOR_BELOW = 40;
+
+/**
+ * 句末标点：中英句号/问号/叹号/分号。换行也当句末（markdown 的短行列表就是这么排的）。
+ * 用逐字符扫描而不是正则 split：位置要留着（见 `documentSentences` —— 邻句必须按**原文
+ * 位置**拼，不能各自 trim 再拼，那样会把原文的换行吃掉，逐字口径就保不住地基了）。
+ */
+const SENTENCE_BREAKS = new Set(['。', '！', '？', '!', '?', '；', ';']);
+
+/** 空白串：`trim` 与「切点是空白吗」共用，免得两处口径漂开。 */
+const isSpace = (ch) => ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+
+/**
+ * 按换行 + 句末标点把一段文本切成句子，返回 `{start, end}` 位置（不含前后空白）。
+ * 空句不产出；`#` 开头的行与 `---` 的过滤在 `documentSentences` 里做（那里才知道是正文）。
+ */
+function splitSentences(text) {
+  const spans = [];
+  const s = String(text ?? '');
+  let start = -1;
+  let end = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    const brk = SENTENCE_BREAKS.has(ch) || ch === '\n';
+    if (isSpace(ch)) {
+      if (start >= 0) end = i;
+      continue;
+    }
+    if (start < 0) start = i;
+    if (brk) {
+      spans.push({ start, end: i + 1 });
+      start = -1;
+    } else {
+      end = i + 1;
+    }
+  }
+  if (start >= 0) spans.push({ start, end });
+  return spans;
+}
+
+/** 一条笔记的候选句：标题、描述、正文按行切完再按句切，按字段顺序排（并列时取靠前的）。 */
+function documentSentences(doc) {
+  // 每个字段各带一份原文：邻句扩展要按**原文位置**取窗口，所以句子得知道自己的源串与
+  // 句列表。`kind` 是源串的标签，邻句只允许在**同一个源串内**合并 —— 跨字段（标题接正文）
+  // 拼出来的东西不是任何原文的连续片段，逐字口径会立刻判它「不是地基句」。
+  const sources = [
+    { kind: 'title', text: String(doc.title ?? '') },
+    { kind: 'description', text: String(doc.description ?? '') },
+  ];
+  // 正文先按换行切「行」，再在行内切句：`#` 开头/`---`/空白行整行丢掉 ——
+  // 小标题是回声、分隔线是噪声，两者都不该冒充「正文里的证据」。
+  const body = String(doc.body ?? '').split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('---');
+    })
+    .join('\n');
+  if (body) sources.push({ kind: 'body', text: body });
+  // 字段顺序 = 并列时的优先顺序：靠前的字段赢。
+  for (const source of sources) {
+    source.spans = splitSentences(source.text).map((span) => ({ start: span.start, end: span.end }));
+  }
+  // 全局句序（跨字段）才是「前一句/后一句」的判据；`source` 不同则不合并（见上）。
+  const candidates = [];
+  for (const source of sources) {
+    for (const span of source.spans) {
+      candidates.push({ kind: source.kind, text: source.text.slice(span.start, span.end), ...span, source });
+    }
+  }
+  return candidates;
+}
+
+/**
+ * 挑一句当片段（新默认口径）：**IDF 加权 + 句子级 + 邻句扩展**。
+ *
+ * 与 `bestLine` 的区别不是「更聪明」，而是换了被优化的量：旧规则数「命中几个词」，
+ * 于是满库都是的口语词和真罕见的证据词各算一分；这里按 `idf(term)` 求和，罕见词自然重。
+ */
+function pickSentence(doc, matched, options = {}) {
+  const wanted = new Set(matched);
+  const idf = options.idf ?? (() => 0);
+  const scored = [];
+  for (const candidate of documentSentences(doc)) {
+    const terms = new Set(tokenize(candidate.text));
+    let score = 0;
+    for (const term of wanted) if (terms.has(term)) score += idf(term);
+    if (score <= 0) continue; // 一个 matched 词都没命中的行不参与
+    if (candidate.kind !== 'body') score *= SNIPPET_TITLE_DISCOUNT;
+    scored.push({ candidate, score });
+  }
+  if (!scored.length) return clip(doc.title || doc.id, SNIPPET_MAX);
+  scored.sort((a, b) => b.score - a.score); // 稳定排序：同分保持文档顺序（靠前的先）
+  const { candidate } = scored[0];
+  // 长句直接给，但**硬上限仍然是 240**：一整段几百字挤掉后面几条指针的预算，
+  // 还不如给一句带省略号的证据。上限之内一个字都不裁，裁剪归渲染层。
+  if (options.neighbor !== true || candidate.text.trim().length >= SNIPPET_NEIGHBOR_BELOW) {
+    return clip(candidate.text, SNIPPET_MAX);
+  }
+  return withNeighbor(candidate, wanted);
+}
+
+/**
+ * 邻句扩展：短句单独进上下文时读者看不到它指什么，把**命中同一个词**的前/后一句一起带上。
+ * 只扩一句，且拼完不超 `SNIPPET_MAX` —— 预算是有限的，扩一句是补上下文，不是捞全文。
+ *
+ * 拼接走**原文窗口**（`[前.start, 后.end)`）而不是 `前 + ' ' + 后`：原文两句之间可能是
+ * 换行或缩进，凭记忆拼一个空格会改掉正文字面，逐字口径的尺子立刻判「地基丢了」。
+ * 空白由渲染层的 `clip` 折叠。
+ */
+function withNeighbor(candidate, wanted) {
+  const source = candidate.source;
+  const spans = source?.spans ?? [];
+  const at = spans.findIndex((span) => span.start === candidate.start && span.end === candidate.end);
+  if (at < 0) return candidate.text;
+  for (const index of [at - 1, at + 1]) {
+    const other = spans[index];
+    if (!other) continue;
+    const text = source.text.slice(other.start, other.end);
+    const terms = new Set(tokenize(text));
+    let hit = false;
+    for (const term of wanted) if (terms.has(term)) hit = true;
+    if (!hit) continue;
+    const from = Math.min(candidate.start, other.start);
+    const to = Math.max(candidate.end, other.end);
+    if (to - from > SNIPPET_MAX) continue; // 拼完超上限就不拼，宁可只给那一句
+    return source.text.slice(from, to);
+  }
+  return candidate.text;
+}
+
+/** 片段的 idf 口径：与打分同一个公式，`df` 取 `buildIndex` 记下的全量表（见 buildIndex 末尾）。 */
+function makeIdf(docFreq, docCount) {
+  return (term) => {
+    const df = docFreq.get(term) ?? 0;
+    return Math.log(1 + (docCount - df + 0.5) / (df + 0.5));
+  };
 }
 
 /**
  * 召回：返回按分排序的命中（score > 0 才返回）。
+ *
+ * @param {{snippet?: 'idf'|'count', neighbor?: boolean}} [options]
+ *   `snippet: 'count'` 是 2026-10-16 之前的行为（命中词最多的那一行、预先 clip 到 72），
+ *   留着做对照与回退；`neighbor: true` 才开启邻句扩展（默认关：2026-10-16 实测它
+ *   在合成题集与真实库上都不涨指标，只多花约 11 字/条，所以不默认付这笔钱）。三个参数的老调用方
+ *   什么都不传，拿到的就是新默认。
  * @returns {Array<{id, score, snippet, matched}>}
  */
-export function search(index, query, limit = 5) {
+export function search(index, query, limit = 5, options = {}) {
+  const mode = options?.snippet === 'count' ? 'count' : 'idf';
+  const neighbor = options?.neighbor === true;
   // 命中同义键时，这个键自身的字面碎片降权（见 BRIDGED_FRAGMENT_WEIGHT）。
   const bridged = matchedSynonymKeys(query);
   const fragments = new Set();
@@ -618,6 +802,13 @@ export function search(index, query, limit = 5) {
     for (const doc of docs) if (doc.tf.has(term)) n += 1;
     df.set(term, n);
   }
+  // 片段挑选那把 idf：索引里有全量表就用它；手搓的索引（测试里直接拼 `{docs, avgLen}` 那种）
+  // 退回本次查询自己算出来的那份 —— 宁可口径窄一点，也不能因为缺字段就挑不出句子。
+  const idf = makeIdf(index.docFreq ?? df, index.docCount ?? docs.length);
+  const snippetOptions = { idf, neighbor };
+  const pickSnippet = (doc, matched) => (
+    mode === 'count' ? bestLine(doc, matched) : pickSentence(doc, matched, snippetOptions)
+  );
   const hits = [];
   // IDF 选词（抄 hindsight `engine/search/bm25_term_selection.py`，与灵枢 `cn_recall_grams`
   // 的 cap 同源）：长查询里塞满 "at"/"step"/"worker" 这类满库都是的词，它们对**每个**候选
@@ -655,7 +846,7 @@ export function search(index, query, limit = 5) {
     score *= doc.boost ?? 1;
     // 整句子串命中：加在乘性调整之后，是纯粹的加法微调，不参与 BM25 的饱和曲线。
     if (usePhrase && score > 0 && doc.plain.includes(needle)) score += PHRASE_BONUS;
-    if (score > 0) hits.push({ id: doc.id, section: doc.section, score, snippet: bestLine(doc, matched), matched });
+    if (score > 0) hits.push({ id: doc.id, section: doc.section, score, snippet: pickSnippet(doc, matched), matched });
   }
   hits.sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id)));
   // 长笔记切桶后同一 id 会有多条命中，只留分最高的那一桶。否则 267KB 的巨兽靠几十个桶
@@ -670,7 +861,11 @@ export function search(index, query, limit = 5) {
     .slice(0, limit);
 }
 
-/** 挑一行当片段：命中查询词项最多的那一行（并列时取更靠前的）。 */
+/**
+ * 旧口径挑一行当片段：命中查询词项最多的那一行（并列时取更靠前的），并预先 clip 到 72。
+ * 只在 `options.snippet === 'count'` 时走这条路 —— 留它是为了能逐字节复现 2026-10-16 之前
+ * 的注入文本（对照与回退都靠它）。新默认见 `pickSentence`。
+ */
 function bestLine(doc, matched) {
   const wanted = new Set(matched);
   const candidates = [doc.title, doc.description, ...String(doc.body ?? '').split('\n')]
