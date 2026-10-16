@@ -6,6 +6,8 @@
  * 门槛该多高」这类问题只能靠离线卷子猜，猜完还不知道对不对。这里把分母与分子都补上：
  *
  *   inject 行（kind = hit / sediment，`ids` 按**显示顺序**）—— 本轮注入了哪几条；
+ *   hint   行（kind = hint，0.21.0 起）—— pull 档只推了一句提示、**没有**注入指针
+ *          （`ids` 为空、`wouldInject` = 本来会注入几条）；它不是 inject 行，`hintRounds` 单记；
  *   used   行 —— 注入过的那条后来被 read/edit 打开（`lagMs` = 距注入多久）；
  *   opened 行 —— 没被注入过、也被主动打开的笔记（对照组：不注入也会看的有多少）。
  *
@@ -113,6 +115,10 @@ export function summarizeUsage(lines, options = {}) {
   const stats = {
     injectRounds: 0, pointers: 0, zeroRounds: 0, dedupeRounds: 0, sedimentRounds: 0, denyRounds: 0,
     skipRounds: 0, emptyRounds: 0,
+    // pull 档「只推了一句提示」的轮次（0.21.0）：**不进 `injectRounds` / `pointers`** ——
+    // 那两个数代表「注入了指针」，是打开率的分母。提示一句话没有被翻开的东西，
+    // 混进分母只会让打开率凭空变好看。
+    hintRounds: 0,
     used: 0, coldOpens: 0, firstAt: 0, lastAt: 0,
     // 预算压力：collapsed = 被缩成裸文件名的那几条，dropped = 因预算整条没列出的条数
     collapsed: 0, collapsedRounds: 0, dropped: 0, droppedRounds: 0, truncatedRounds: 0,
@@ -129,7 +135,9 @@ export function summarizeUsage(lines, options = {}) {
   const savedPerRound = [];
   // 「这一轮到底带没带记忆」的完整分母：宿主问过的每一轮都算进来。
   // 「本轮没注入任何记忆」本身就是结论（设计性的安静 vs 真出问题），必须看得见。
-  const coverageRounds = { hit: 0, skip: 0, empty: 0, sediment: 0 };
+  // `hint`（0.21.0）是 pull 档的安静轮：它**不是** `hit`（没注入指针），也算「问过一轮」，
+  // 单开一格 —— 既有键一个都没改名。
+  const coverageRounds = { hit: 0, skip: 0, empty: 0, sediment: 0, hint: 0 };
   // 「缩成裸文件名的是哪几条」（0.13.15 起落盘）：截断的代价只能靠它算 ——
   // 只记「缩了几条」的话，没法知道被缩的那几条后来有没有被打开。
   const truncatedRounds = [];
@@ -198,6 +206,13 @@ export function summarizeUsage(lines, options = {}) {
     else if (kind === 'sediment') {
       stats.sedimentRounds += 1;
       coverageRounds.sediment += 1;
+    }
+    // pull 档的提示（0.21.0）：只记「有过这么一轮 + 本来会有几条」，**不碰**下面的
+    // `ids.length` 分支 —— hint 行的 ids 是空数组，天然进不了 injectRounds / pointers，
+    // 这也是这一档不改打开率分母的结构性保证（不是靠人记着别写）。
+    else if (kind === 'hint') {
+      stats.hintRounds += 1;
+      coverageRounds.hint += 1;
     }
     else if (kind === 'deny' || kind === 'deny-error') stats.denyRounds += 1;
 
@@ -328,8 +343,10 @@ export function summarizeUsage(lines, options = {}) {
   const sizes = [...roundSizes].sort((a, b) => a - b);
   const lagSorted = [...lags].sort((a, b) => a - b);
   const q = (arr, p) => (arr.length ? arr[Math.min(arr.length - 1, Math.floor(p * (arr.length - 1)))] : 0);
+  // hint 轮也是「宿主问过的一轮」：不进分母的话，pull 档跑得越多 injectedShare 越虚高
+  // （分母只数了 push 那几轮）。它只影响「问了多少轮」，不影响打开率的分母。
   const coverageTotal =
-    coverageRounds.hit + coverageRounds.skip + coverageRounds.empty + coverageRounds.sediment;
+    coverageRounds.hit + coverageRounds.skip + coverageRounds.empty + coverageRounds.sediment + coverageRounds.hint;
   return {
     ...stats,
     // 上下文代价：注入了多少字 / 这些笔记整篇多少字 / 差就是没进上下文的量。

@@ -470,3 +470,137 @@ npm run bench:foundation -- --check      # CI 对账，地板在 bench/foundatio
 **搬机制最容易犯的错**是把机制搬过来、却没搬它依赖的不变量。dsh-mnemon 没有跨轮轮换，
 所以它的「渲染文本不变」是真的不变；加上轮换之后，同一个写法就成了永远不触发的死代码。
 抄之前先问它凭什么成立、那个前提这里有没有。
+
+## 召回评测（recall:eval）
+
+> ⚠️ **真题集不入库**（`.gitignore` 里的 `bench/eval-tasks/` 与 `bench/eval-results/`）：53 道题是从
+> **私人记忆库反向构题**出来的，题面与答案里含真实路径、称呼与项目史 —— 与「记忆库绝不入库」同一条纪律。
+> 因此新克隆的机器上，守题集纪律的那几条用例会自动 skip；`--dry` 与 `--answerer none` 需要本地题集才能跑。
+> 要自己建一套：格式见下（`{version, tasks:[{id,kind,prompt,expect,forbid,source}]}`），照 `test/recall-eval.test.mjs`
+> 里的合成夹具写三五个文件即可，`--tasks <目录>` 指过去。
+
+
+前面四把尺子量的都是**召回层**：命中有没有排上来、分数够不够、注入省不省。
+它们回答不了那个真正的问题 —— **记忆有没有让回答变好**。打开率 2.4%（131 轮 / 655 条指针里
+16 条后来被打开）只能证明「指针后来被打开了」，不能证明「打开之后答对了」。
+
+`bench/recall-eval.mjs` 就是补这一环：**题集 + 判分器 + 三档对照**。题在 `bench/eval-tasks/*.tasks.json`。
+
+```bash
+node bench/recall-eval.mjs --dry                      # 只算注入成本，不判分（先看这个）
+node bench/recall-eval.mjs --mode none --mode pull --mode push   # 三档对照
+node bench/recall-eval.mjs --mode push --answerer cmd --cmd 'claude -p'   # 真拿模型答
+node bench/recall-eval.mjs --json                     # 只吐 JSON，CI 用
+```
+
+### 三个臂是什么
+
+| 臂 | 模型看到什么 | 量的是 |
+|---|---|---|
+| `none` | 什么都不注入 | **地板**：没有记忆时能答对多少。任何一道题在这里答对，就说明题面泄题了 |
+| `push` | 现状：每轮注入若干条指针（走的就是插件自己的 `store.js` + `bm25.js` + `render.js`，**没有第二套召回**） | 现状值多少钱 |
+| `pull` | 只有一行「记忆库里有 N 条可能相关的线索，需要时用 engramory_search 自己查」（59 字 + 库路径，平均 89 字 / 23 token） | 显式召回的自助上限：不给指针、只给入口；**这句由插件本体的 `pullHintText()` 生成**（0.21.0 收口，评测器不再自写文案） |
+
+三档都真跑。`none` 档压根不读库（报表里那行会写明「本档不读库」），所以它最快 —— 但它是另两档的
+基线，**不许省**：没有它，`push` 的通过率就只是一串不知道好坏的绝对数。
+
+### 判分规则（规则优先）
+
+题集格式是 §11 冻结的：
+
+```json
+{ "version": 1, "tasks": [
+  { "id": "corr-overflow-value", "kind": "correction",
+    "prompt": "用户问的一句人话（不含答案）",
+    "expect": ["overflow: clip|overflow-clip", "滚动容器"],
+    "forbid": ["overflow: hidden"],
+    "source": "reference-css-scroll-timeline-gotchas.md#坑1" } ] }
+```
+
+四条规则，按顺序判：
+
+1. **`expect` 里每一项是一个「关键词组」**，用 `|` 分隔候选写法；**组内任一命中即算该项命中**。
+   （§11 原文写的是「组内全中」，实现按「任一命中」—— 中文同义写法太多，全中会把正确答案判死。
+   代价是判据略松，所以每项都要求能逐字追到某篇笔记，宁可多写几个组、不要把一整句话塞进一项。）
+2. **`expect` 全中才算 hit**；缺哪项就记在 `missedExpect` 里。
+3. **`forbid` 命中即该题失败**（§11 冻结），不看 expect 中没中。
+4. 匹配前做**归一化**：`NFKC` → 转小写 → 空白折成一个空格 → 去首尾。所以全角冒号 `gate： off`
+   和半角 `gate: off` 算同一个，换行和缩进不影响命中。
+5. 字段缺失 / 为 `null` / 类型不对：**跳过这一题并记进报告**（`invalid`），或者按「判不了」计数
+   （`judged: false`），**不抛**。
+
+`forbid` 里**只能装字面量**（路径、配置键值、版本号、专名），不能装自然语言主张：中文否定句
+包含肯定子串（「不建议开启 X」里有「建议开启 X」），禁「答案的否定式」会误伤正确答案。
+真库笔记里凡是用旧值解释根因的（`overflow: hidden` 是成因、`--lightningcss-light` 是降级症状），
+`forbid` 一律留空 —— 正确答案有权引用旧值来解释。
+
+**已知误伤**：`forbid` 命中即失败，所以「`~/当前工作区`（当天从更早的目录迁出）」
+这种**答对了但顺带提旧值**的回答会被判失败。报表里这类题单独记一行 `⚠ …「判据全中但踩了禁令」`，
+别把它跟「答错」混着看。
+
+### 每题记什么
+
+```json
+{ "id": "...", "kind": "preference|fact-recall|correction|procedure",
+  "pass": true, "hitExpect": [...], "missedExpect": [...], "hitsForbid": [...],
+  "injectedChars": 436, "injectedTokens": 109, "elapsedMs": 21,
+  "recallMs": 19, "answererCalls": 1,
+  "hitSource": true, "sourceRank": 1, "forbidConflict": false }
+```
+
+- `injectedTokens = Math.ceil(injectedChars / 4)` —— **粗估，不是分词**。中文一字一 token 上下，
+  英文约四字符一 token，这个口径偏保守（高估中文、低估英文）。要精确分词得引依赖，不值当；
+  换口径就整列一起换，别混着比。
+- `elapsedMs` 是端到端（含回答器），`recallMs` 只算召回，两个别混。
+- `answererCalls`：`--answerer none` 时是 0（一次模型都没调）。
+- `hitSource`：**答案所在的那篇笔记，有没有出现在注入的指针里**（`sourceRank` 是排第几位）。
+  这是不调模型也能免费量的一档 —— 指针里没有那篇笔记，模型再强也无从答起。`none`/`pull` 档记
+  `null`＝**未测**，不是 `false`（把「没测」印成 0 是最容易犯的错）。
+
+落盘默认写 `bench/eval-results/<mode>-<answerer>-<时间戳>.json`（目录不存在会建），
+`--dry` 默认不落盘（要留就显式给 `--out`）。**没跑过的臂在报表里印「未跑」，不印 0**。
+显式给了 `--out` 又同时跑多档时，会按档拆成 `<名字>-<档>.json` —— 一个路径装两档的结果，
+后一档会静静盖掉前一档，读的人就拿着 `none` 的数当 `push` 的数了。
+
+### 怎么读那张表
+
+表是横轴分档、纵轴分类。三件事按顺序看：
+
+1. **`none` 档不是 0 就有问题** —— 那是泄题，去改题面，别改判分器。
+2. **`push` vs `none` 的差**：这才是「记忆值多少钱」。差小就如实写差小；别拿 `hitSource` 冒充它。
+3. **注入成本那一列**：`push` 每轮 439 字 / 110 token 是**指针**的钱；照着指针去读笔记是另一笔钱
+   （实测平均读进 4.9 万字）。指针省的是「不知道读哪一篇」，不是「不用读」。
+
+本次实测（53 题，答案集 = 照着注入的指针把整篇笔记读进来的确定性替身，**不是模型**）：
+
+| 臂 | 通过 | 平均注入 |
+|---|---|---|
+| none | 0.0% (0/53) | 0 字 |
+| pull | 17.0% (9/53) ⚠️ | 89 字 / 23 token |
+
+> ⚠️ pull 那一行的**通过率是旧文案（28 字「读 MEMORY.md」）下测的**：0.21.0 起 pull 注入的是
+> 插件本体那句「需要时用 engramory_search 自己查」，语义不同（旧句像指路，新句像交还主动权），
+> 重跑之前不要拿它与 push 横向比较。成本列（89 字）已是新文案的实测值。
+| push | 81.1% (43/53) | 440 字 |
+
+只读 MEMORY.md 索引就能答对 9 题（17%）—— 索引的钩子写得够具体时，本身就是廉价答案；
+`push` 再把 34 题从「答不了」推到「答案就在眼前」。同一批题 `push` 档的召回命中率是 86.8%（46/53，
+判据是答案所在笔记有没有进指针），比通过率高 5.7 个点：**那 7 题是指针没指到，不是笔记里没有**。
+
+### 怎么加题
+
+1. 往 `bench/eval-tasks/<类>.tasks.json` 的 `tasks` 里加一条，`kind` 必须是四类之一：
+   `preference`（偏好遵守）/ `fact-recall`（跨会话事实）/ `correction`（用户改过的事实必须用新的）/
+   `procedure`（上次踩过的坑、流程复用）。
+2. **`prompt` 写成用户真会问的一句话**，可以有指代（「上次那个索引上限到底怎么算的？」），
+   但**不许含答案** —— 含了这题就只能测出题面。
+3. **`expect` 每一项都要能逐字追到某篇真笔记**，`source` 写文件名（要的话加 `#小节`）。
+   当前 53 题的 source 全部指向 `~/memory/engramory/` 里的真文件。
+4. **`correction` 类**：从真笔记里找「原来 X → 后来改成 Y」，`expect` 放 Y，`forbid` 放 X。
+5. 自查三步（前两步都是自动化）：`node --test test/recall-eval.test.mjs` 会拒绝「prompt 含 expect」
+   「expect 追不到 source 笔记」「forbid 装了中文主张」的题；然后
+   `node bench/recall-eval.mjs --mode none --answerer file --answers <克制答案集>`
+   —— **每道新题在 `none` 档都必须失败**，答对了就是泄题。
+
+`bench/eval-tasks/restrained-answers.json` 就是那份「克制答案集」：每条都是通用但业务正常的回答
+（不含任何真库事实），用来给 `none` 档当地板夹具。

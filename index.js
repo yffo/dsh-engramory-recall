@@ -58,6 +58,21 @@ export const DEFAULTS = {
   maxChars: 480,
   minScore: 0,
   /**
+   * 注入策略（0.21.0）：命中之后，往上下文里放什么。
+   *
+   * `push`（默认）= 现有行为：把 top-N 指针整份推过去，模型什么都不用做。
+   * `hybrid` = 只推 1 条。**这是先定死的一条简单规则**（「少推一点」的下界样本），
+   *            等 7.1 的判分器给出数据再调 —— 它不是校准过的「超高置信档」，
+   *            别拿它当阈值证据用。
+   * `pull` = 一条指针都不推，只推一行「库里有 N 条可能相关的线索，需要时自己用
+   *          engramory_search 查」。**一条都不匹配时保持沉默**：本来就没有的东西，
+   *          变成一行提示只是给每一轮都加噪音（这一期的目的恰恰是少占上下文）。
+   *
+   * 默认为什么还是 `push`：三档在同一题集上的对照表还没跑出来（差异化计划 7.4），
+   * 默认档由数据决定、不拍脑袋 —— 这一版只把机制做出来。
+   */
+  recallMode: 'push',
+  /**
    * 消费侧门控档位（0.16.0 起）：检索只回答「像不像」，回答不了「值不值得占上下文」。
    * `off` 不干预（旧行为，留着对照）/ `shadow` 只算不改（先看它想干什么）/
    * `assist` 把「总也用不上」「过期」的笔记降权（默认，只改排序不删东西）/
@@ -324,6 +339,33 @@ const normalizeStorePath = (value) => {
 };
 
 /**
+ * 归一注入策略档位（0.21.0）：只认逐字匹配的三个值，其余一律回 **默认档 `push`**。
+ *
+ * 为什么必须归一：`recallMode` 决定「这一轮往上下文里放多少字」，配置里写错一个词
+ * 就会悄悄改变每轮的成本。`null` / 数字 / 对象 / 带空格的 `'pull '` 都当配置错误处理 ——
+ * 退回默认档（现有行为），绝不抛：召回路径上抛一次，那一轮就整个没有记忆。
+ *
+ * ⚠️ 刻意**不做 trim / toLowerCase**（`normalizeGate` 是做的）：这里宁可把 `'Pull'`、
+ * `'pull '` 判成错误写法退回 push，让账本里的 `mode` 一眼看出「我配的那档没生效」，
+ * 也不猜用户想选哪一档。默认档就是现有行为，猜错方向的代价不对称。
+ */
+const normalizeRecallMode = (value) => (value === 'push' || value === 'hybrid' || value === 'pull' ? value : 'push');
+
+/**
+ * pull 档那一行提示的**唯一**生成处（0.21.0）。
+ *
+ * 为什么独立成函数并导出：`bench/recall-eval.mjs` 的三臂对照里也有一个 pull 臂。
+ * 如果它自己另写一句文案，那张表量到的 pull 成本就不是插件真跑 pull 的成本 ——
+ * 两边会各说各话（0.21.0 收口时正是这么发现的）。所以：**要让别人量，就得让它量真的这一句。**
+ *
+ * 长度红线：正文 ≤ 80 字（不含路径），且只在这一档「本来会有命中」时才非空 ——
+ * 「库里有 0 条线索」纯属噪音，而这一档存在的理由恰恰是少占上下文。
+ */
+export const pullHintText = (count, storePath) =>
+  `[engramory] 记忆库里有 ${count} 条可能相关的线索，需要时用 engramory_search 自己查（库：${storePath}）。`;
+
+
+/**
  * 「库内」判定用的前缀。`storePath` 已经归一（不带尾分隔符），这里只补回**缺失的那一个**：
  * `path.join` 而不是字符串拼接 —— 库就是根（`/`、`C:\`）时 `storePath + path.sep` 会拼成
  * `//`，与尾斜杠那个坑同源（`path.join('/', '/')` 仍是 `/`）。
@@ -343,6 +385,9 @@ export function apply(ctx, config = {}) {
   // `settings.gate` —— 不在这里收口，配置里写错一个词就会出现「行为是 assist、账本写 zzz」
   // 这种账实不符，而账本正是这一期要立的东西。
   settings.gate = normalizeGate(settings.gate);
+  // 注入策略同样在**入口**收口：非法值退回 `push`（默认档 = 现有行为），
+  // 账本里写的 `mode` 必须与实际跑的那一档是同一个值。
+  settings.recallMode = normalizeRecallMode(settings.recallMode);
   if (!settings.enabled) return;
 
   let indexCache = { docs: null, index: null };
@@ -424,6 +469,11 @@ export function apply(ctx, config = {}) {
         kind: entry.kind,
         query: entry.query,
         reason: entry.reason,
+        // 注入策略档位（0.21.0 起**每一轮都记**）：这一行是哪个档跑出来的，必须有唯一凭据 ——
+        // 与下面 `gate` 同一条纪律。省掉它就只能靠「有没有别的字段」猜，
+        // 而猜错的代价是拿 pull 档的安静去解释 push 档的行为。
+        // push 档的老行因此只多这一个字段，其余一字不动。
+        ...(entry.mode ? { mode: entry.mode } : {}),
         // 提问者身份（main / subagent）：打开率的分母必须能按这个拆开
         ...(entry.scope ? { scope: entry.scope, depth: entry.depth ?? 0 } : {}),
         ids: (entry.hits ?? []).map((hit) => hit.id).filter(Boolean),
@@ -433,6 +483,12 @@ export function apply(ctx, config = {}) {
         minScore: entry.minScore,
         topScore: entry.topScore,
         injected: entry.injected,
+        // pull 档「本来会注入几条」（0.21.0）：那一档不推指针，只有这个数能说明
+        // 「这一轮其实有货，是被策略按住没推」—— 三档对照缺了它就只剩感觉。
+        ...(Number.isFinite(entry.wouldInject) ? { wouldInject: entry.wouldInject } : {}),
+        // 提示正文的字数（0.21.0）：**只给 `hint` 行写**。push 的 hit 行从 0.15.0 起
+        // 就没写 chars，补上等于改掉老行的结构、让读的一侧要重算口径 —— 别顺手加。
+        ...(entry.kind === 'hint' && Number.isFinite(entry.chars) ? { chars: entry.chars } : {}),
         collapsed: entry.collapsed,
         dropped: entry.dropped,
         // 「缩的是哪几条」也要落盘：光有塌缩条数答不了「截断有没有代价」——
@@ -844,7 +900,10 @@ export function apply(ctx, config = {}) {
         Number(roundAgent?.options?.subagentDepth) || 0,
       );
       const scope = depth > 0 ? 'subagent' : 'main';
-      const recordRound = (entry) => record({ ...entry, scope, depth });
+      // 每一轮都带 `mode`（0.21.0 起）：这一行是哪个注入策略跑出来的，必须有唯一凭据 ——
+      // 否则 pull 档的账会和 push 的混在一起解读（同上面 `gate` 字段的理由）。
+      // `push` 行因此比 0.20.0 多这一个字段，其余字段一字不动。
+      const recordRound = (entry) => record({ ...entry, scope, depth, mode: settings.recallMode });
       // 同一个 message id 又被喂进来 = 宿主把同一轮重复交给 pre-step：不重复注入。
       // ⚠️ 但**必须记账**：以前这里直接 `return decision`，这一轮在台账里一行都没有 ——
       // 既不进分母，也统计不到原因码，账本对不上。现在与下面「同一 query 跨轮被去重」
@@ -883,6 +942,9 @@ export function apply(ctx, config = {}) {
       }
 
       const maxPointers = Math.max(1, Number(settings.maxPointers) || 4);
+      // 注入策略档位（0.21.0）：入口已归一（非法值 → `push`），这里只读一次 ——
+      // 同一轮里检索、注入、账本必须用同一个档位，否则账本上的 `mode` 会撒谎。
+      const recallMode = settings.recallMode;
       // 跨轮轮换去重：最近注入过的条目降权。候选池必须先放大，否则「降权」只是让召回位
       // 空着，而不是把机会让给别的笔记（mneme 的候选池同样按 maxItems × (N+1) 扩容）。
       const rotating = rotationPenalty < 1 && recentInjected.length > 0;
@@ -911,7 +973,18 @@ export function apply(ctx, config = {}) {
         mode: settings.gate,
         staleDays: Number(settings.gateStaleDays) || GATE_DEFAULTS.staleDays,
       });
-      const hits = gated.hits.slice(0, maxPointers);
+      // 注入策略（0.21.0）：命中集先按 push 的老规矩切好，再由档位决定**这一轮往上下文里放什么**。
+      // 先算出 push 的结果（`pushHits`）是有意的：pull / hybrid 的账本要能回答
+      // 「本来会注入几条」（`wouldInject`）—— 拿不到这个数，三档之间就没法逐轮对照。
+      const pushHits = gated.hits.slice(0, maxPointers);
+      // `hybrid` 只推 1 条。**这是先定死的一条简单规则**（「少推一点」的下界样本），
+      // 等 7.1 的判分器给出数据再调 —— 它不是校准出来的阈值，别拿它当档位证据用。
+      const hits = recallMode === 'push' ? pushHits : recallMode === 'hybrid' ? pushHits.slice(0, 1) : [];
+      // `pull`：一条指针都不推，只推这一行提示。**本来就没有的不许变成提示** ——
+      // `pushHits` 为空（没命中 / 全被 minScore 或门控拦掉）时保持沉默：那种时候加一句
+      // 「库里有 0 条线索」纯属噪音，而这一档存在的理由恰恰是少占上下文。
+      // 长度红线：提示正文 ≤ 80 字（不含路径），不写进指针正文 —— 它就是「指针的替身」。
+      const pullHint = recallMode === 'pull' && pushHits.length ? pullHintText(pushHits.length, storePath) : '';
       const wantsRemember = settings.nudge && REMEMBER_INTENT.test(query);
       // 沉淀提醒独立于召回命中：命中为 0 时才更需要它，否则长会话会一路空转到结束。
       const wantsSediment =
@@ -920,7 +993,9 @@ export function apply(ctx, config = {}) {
         storeWrites === 0 &&
         turnCount - sedimentNudgedAt >= SEDIMENT_COOLDOWN;
       if (wantsSediment) sedimentNudgedAt = turnCount;
-      if (!hits.length && !wantsRemember && !wantsSediment) {
+      // ⚠️ `!pullHint` 是 pull 档的空轮判据：那一档 `hits` 恒为空，但「本来有命中」时
+      // 要推提示 —— 少了这一项，pull 档会在唯一该说话的时候保持沉默。
+      if (!hits.length && !wantsRemember && !wantsSediment && !pullHint) {
         // 四种「空」要分清：库里没东西、一条都不匹配、全被 minScore 拦掉、**被门控拦掉**。
         // `topScore` 是校准 minScore 的唯一依据 —— 只写「空」等于把门槛高低的责任推给猜。
         // 门控那一支记**门控前**的最高分：它才是「差点就注入了」的那个分数。
@@ -951,6 +1026,9 @@ export function apply(ctx, config = {}) {
         maxChars: settings.maxChars,
       });
       const parts = lines.length ? [header, ...lines] : [];
+      // pull 档的提示在这里落进 parts（那一档 `lines` 恒为空，parts 也是从空数组起）：
+      // 排在指针之后、顺带问一句之前 —— pull 档它就是这一轮唯一和召回有关的内容。
+      if (pullHint) parts.push(pullHint);
       if (wantsRemember) {
         const nudge =
           '[提示] 这句话里有「长期记住」的意图。若它是 settled 事实（决策 / 偏好 / 踩坑与解法），按 Engramory 纪律落盘：一条一文件 + 索引加一行；只是当前状态（版本号、进度）就不要记。';
@@ -1028,7 +1106,25 @@ export function apply(ctx, config = {}) {
         return sum;
       })();
 
-      recordRound({
+      // pull 档的账本行**换一种 kind**（`hint`，0.21.0）：`hit` 在 usage.js 里代表
+      // 「注入了指针」，是打开率的分母；提示一句话不是指针，混进去分母就脏了。
+      // 字段按「这一轮真的发生了什么」写：hits/ids 为空、injected 为 0、chars 是提示的字数、
+      // `wouldInject` 是**本来会注入几条**。不写 budget/spent/topScore —— 这一轮没分配预算、
+      // 也没有指针分数，拿 header 长度或 0 去凑，账本就开始撒谎了。
+      const hintRound = {
+        kind: 'hint',
+        query: brief(query),
+        hits: [],
+        injected: 0,
+        chars: pullHint.length,
+        wouldInject: pushHits.length,
+        nudge: wantsRemember,
+        sediment: wantsSediment,
+      };
+      // `pullHint` 非空时 `lines` 必然为空（pull 档压根不透传指针）；这里仍显式带上
+      // `!lines.length`：将来若有人改主意让 pull 也推指针，账本不会被写成 `hint`。
+      const hintOnly = Boolean(pullHint) && !lines.length;
+      recordRound(hintOnly ? hintRound : {
         kind: lines.length ? 'hit' : 'sediment',
         query: brief(query),
         hits: shown.map((hit, rank) => ({
@@ -1074,9 +1170,13 @@ export function apply(ctx, config = {}) {
         source: {
           kind: `plugin:${PRODUCER}`,
           form: 'notice',
+          // pull 档（0.21.0）：这一轮没有指针，只有一句提示 —— 摘要照实说，
+          // 不能落进「沉淀提醒」那一支（那是另一件事，会让会话里看着像问了要不要记）。
           summary: lines.length
             ? `engramory 召回 ${lines.length} 条${wantsRemember ? ' + 记忆提示' : ''}`
-            : 'engramory 沉淀提醒',
+            : pullHint
+              ? `engramory 提示：库里有 ${pushHits.length} 条可能相关的线索`
+              : 'engramory 沉淀提醒',
         },
       };
       return { ...decision, messages: [...decision.messages, message] };

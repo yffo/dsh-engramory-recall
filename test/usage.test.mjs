@@ -130,6 +130,33 @@ test('召回汇总：打开率、位置级曲线、从未被打开', () => {
   assert.equal(late.positions[1].opened, 1);
 });
 
+test('召回汇总：pull 的 hint 行单算一轮，不进打开率分母（0.21.0）', () => {
+  const t = 1_700_000_000_000;
+  const lines = [
+    { ts: t, kind: 'hit', ids: ['a.md', 'b.md'], injected: 2, scores: [3, 2], mode: 'push' },
+    { ts: t + 10, kind: 'used', id: 'a.md', via: 'read', lagMs: 10 },
+    // pull 档的一轮：没有指针，只有一句提示
+    { ts: t + 20, kind: 'hint', ids: [], injected: 0, chars: 59, wouldInject: 3, mode: 'pull' },
+    { ts: t + 30, kind: 'hint', ids: [], injected: 0, chars: 61, wouldInject: 1, mode: 'pull' },
+  ];
+  const summary = summarizeUsage(lines);
+  assert.equal(summary.hintRounds, 2, 'hint 轮自成一桶');
+  assert.equal(summary.coverage.byKind.hint, 2);
+  assert.equal(summary.injectRounds, 1, 'hint 不是注入轮 —— 混进来等于把「没推指针」记成「推了」');
+  assert.equal(summary.pointers, 2, 'hint 没有指针可数');
+  assert.equal(summary.used, 1);
+  assert.equal(summary.openRate, 0.5, '分母仍是那 2 条真指针（提示一行没有被翻开的东西）');
+  // hint 轮也是「宿主问过的一轮」：不进分母，pull 跑得越多 injectedShare 越虚高
+  assert.equal(summary.coverage.rounds, 3);
+  assert.equal(summary.coverage.injected, 1);
+  assert.equal(summary.coverage.zeroInjected, 2);
+  assert.equal(summary.coverage.injectedShare, 1 / 3);
+  // 既有键一个都没改名
+  for (const key of ['hit', 'skip', 'empty', 'sediment', 'hint']) {
+    assert.equal(typeof summary.coverage.byKind[key], 'number', `coverageRounds.${key} 必须还在`);
+  }
+});
+
 test('召回汇总：预算压力与打开延迟（窗口调宽了、字跟没跟上）', () => {
   const t = 1_700_000_000_000;
   const summary = summarizeUsage([

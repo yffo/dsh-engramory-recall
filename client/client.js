@@ -263,13 +263,17 @@ window.__ModuleLoader__.load({
         : kind === 'deny' ? '拦下一个写入'
           : kind === 'deny-error' ? '写入保护出错'
             : kind === 'sediment' ? '问了句要不要记'
-              : kind === 'archive-auto' ? '自动归档' : '没找到线索');
+              : kind === 'archive-auto' ? '自动归档'
+                // pull 档（0.21.0）：这一轮一条指针都没给，只留了一句「自己去查」的话。
+                : kind === 'hint' ? '只提示了一句：让它自己去查' : '没找到线索');
 
     /** 轮次的语气：绿 = 好事（提醒被带进去了）……与 TONE 同一套语义。 */
     const entryTone = (kind) => (kind === 'hit' ? 'hit'
       : kind === 'skip' ? 'skip'
         : kind === 'deny' ? 'deny'
-          : (kind === 'sediment' || kind === 'archive-auto') ? 'sediment' : 'note');
+          // `hint`（0.21.0）走蓝色（= 建议）：它是「库里可能有你要的东西」的提示，
+          // 既不是命中（绿的语义是「指针被带进去了」，这一档恰恰没有指针），也不是没说话。
+          : (kind === 'sediment' || kind === 'archive-auto' || kind === 'hint') ? 'sediment' : 'note');
 
     /** 轮询宿主状态；失败不清空已有数据，只把错误挂出来（面板不该因一次抖动变白）。 */
     function useRecallState() {
@@ -1422,6 +1426,7 @@ window.__ModuleLoader__.load({
             rowsOf([
               ['不想让它提醒', 'enabled: false（彻底关掉），或 maxPointers: 0'],
               ['嫌提醒太多 / 太少', 'maxPointers（每次几条）、maxChars（总共多少字）'],
+              ['嫌每轮塞进来的线索太多', 'recallMode：push（默认，照旧推最多 maxPointers 条）· hybrid（只推最靠前的 1 条）· pull（一条指针都不推，只留一句「库里有 N 条线索」，要细节时模型自己调 engramory_search 去查）—— 默认档等对照数据出来再定，现在还没换'],
               ['总混进不相关的东西', 'minScore 抬一档 —— 抬到哪一档、抬了会丢掉几条「曾被用上过」，在「用上了多少」页签的代价曲线里逐档列着'],
               ['不要每轮都问「要不要记一笔」', 'nudge: false'],
               ['不许它自己改记忆库', 'guardWrites 保持 true（关掉它是把保护拆了，不是配置项）'],

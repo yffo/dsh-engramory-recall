@@ -27,3 +27,9 @@ scripts/.probe-baseline.json
 bench/.tmp/
 bench/.bench-result.json
 bench/.*.json
+
+# ⚠️ 评测题集、夹具与跑分产物绝不入库：题集是从私人记忆库**反向构题**出来的，
+#    里面含真实路径、称呼与项目史（与「记忆库绝不入库」同一条纪律）。
+#    可公开复现的那套在 bench/eval-sample/ —— 新克隆的人跑那一套。
+bench/eval-tasks/
+bench/eval-results/

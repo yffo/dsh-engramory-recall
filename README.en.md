@@ -157,6 +157,7 @@ not listed here (query budget, rotation demotion, dedup, semantic switches, …)
 | Key | Default | What it does |
 |---|---|---|
 | `maxPointers` | `4` | Max pointers injected per turn. Measured: 4→5 buys 1.7 points, 4→6 buys none |
+| `recallMode` | `push` | What goes into context once something matches: `push` injects up to `maxPointers` pointers (unchanged) / `hybrid` injects only the top 1 / `pull` injects **no pointers at all**, just one line saying "the store has N possibly related leads — run `engramory_search` yourself if you need them". In `pull`, a turn with no match stays silent. The default will be decided by the 7.1 scorer's comparison data — **not switched yet** |
 | `maxChars` | `480` | Hard character ceiling for pointer text. When something doesn't fit it collapses to filename-only, never a silent drop |
 | `gate` | `assist` | Consumption-side gate. `off` does nothing / `shadow` records only / `assist` demotes (default) / `enforce` drops well-evidenced notes from injection |
 | `nudge` | `true` | "Remember this long-term" intent hint; also fires once in a long session that has written nothing (`sedimentMinTurns`, default 12 turns) |
