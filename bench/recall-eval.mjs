@@ -56,6 +56,17 @@ const root = resolve(here, '..');
 
 /** 三个对照臂。`push` = 现状（每轮注入指针），`none` = 不注入任何记忆，`pull` = 只给一行「记忆可用」。 */
 export const ARMS = ['none', 'push', 'pull'];
+/**
+ * 第四个臂（0.22.0 起）：`hybrid` 只推最靠前的 1 条。
+ *
+ * **为什么不并进 `ARMS`**：`ARMS` 钉住的不只是三个名字，还有它们的顺序与语义 ——
+ * 报表里「没跑的档也占一个位置」的占位清单、`arms[].ran:false` 的读法、以及 0.21.0
+ * 之前那些结果文件的可比性，全都以「三档」为前提。往 `ARMS` 里塞一项会让老结果读起来变形。
+ * 所以 `hybrid` 由 `--mode hybrid` 显式点名，**跑过才在报表里占位**。
+ */
+export const OPTIONAL_ARMS = ['hybrid'];
+/** 四臂的规范顺序（报表并排时的列序）。 */
+export const ALL_ARMS = ['none', 'push', 'hybrid', 'pull'];
 /** 题集的四类（§11 冻结）。分不开类就没法回答「哪一类记忆最有用」。 */
 export const KINDS = ['preference', 'fact-recall', 'correction', 'procedure'];
 export const ANSWERERS = ['none', 'cmd', 'file'];
@@ -274,7 +285,7 @@ function msSince(started) {
  * 否则「记忆有没有用」就会跟「换个问法/换个模型」混在一起。
  */
 export function buildContext(arm, task, corpus, settings = DEFAULTS, storePath = DEFAULT_STORE) {
-  if (arm === 'none') return { text: '', hits: [], recallMs: 0, dropped: 0, collapsed: 0 };
+  if (arm === 'none') return { text: '', hits: [], wouldInject: 0, recallMs: 0, dropped: 0, collapsed: 0 };
   const started = process.hrtime.bigint();
   // 单轮评测没有「上一轮注入过谁」，所以候选池就是 maxPointers（插件里的 3 倍扩容是给轮换用的）。
   const limit = Math.max(1, Number(settings.maxPointers) || DEFAULTS.maxPointers);
@@ -291,14 +302,19 @@ export function buildContext(arm, task, corpus, settings = DEFAULTS, storePath =
     const text = hits.length ? pullHintText(hits.length, storePath) : '';
     return { text, hits: [], wouldInject: hits.length, recallMs: msSince(started), dropped: 0, collapsed: 0 };
   }
-  const rendered = renderPointers(hits, { maxChars: settings.maxChars });
+  // `hybrid`：先按 push 的老规矩切出 `maxPointers` 条，再只留最靠前的那一条 ——
+  // 与 `index.js` 的 `pushHits.slice(0, 1)` 同一个式子。`wouldInject` 记着「本来有几条」，
+  // 否则 hybrid 与 push 的成本差就没法解释成「少推了几条」。
+  const injected = arm === 'hybrid' ? hits.slice(0, 1) : hits;
+  const rendered = renderPointers(injected, { maxChars: settings.maxChars });
   // 与 `index.js` 的注入分支逐字对齐：一条都没列出来时**连头部都不发**（那里是
   // `const parts = lines.length ? [header, ...lines] : []`）—— 只发一句「有记忆可用」的
   // 空头部，等于每轮白花十几个 token 说废话。
   const text = rendered.lines.length ? [rendered.header, ...rendered.lines].join('\n') : '';
   return {
     text,
-    hits: hits.map((hit) => hit.id),
+    hits: injected.map((hit) => hit.id),
+    wouldInject: hits.length,
     recallMs: msSince(started),
     dropped: rendered.dropped,
     collapsed: rendered.collapsed,
@@ -389,13 +405,19 @@ export function runArm(arm, tasks, options = {}) {
       answererCalls: answer.calls,
       answererError: answer.error,
       hits: built.hits,
-      // 「答案那篇笔记被注入了吗」——这是 push 档唯一能免费量到的因果环节：
+      // 「答案那篇笔记被注入了吗」——这是 push / hybrid 唯一能免费量到的因果环节：
       // 题集的 source 就是答案所在的笔记，注入里没有它，模型再强也无从答起。
       // none/pull 档不产生命中，记 null 而不是 false：没跑 ≠ 没命中。
+      // hybrid 也算：它只推 1 条，于是这一项顺带成了**它的 top-1 精度**（push 算的是 top-N），
+      // 两个数不能并排比大小，只能各自跟自己的通过率比。
       // 两边都要归一化：题集 source 写作 `reference-x.md#小节`，而召回命中的 id 恰好带 `.md`，
       // 只归一化一边会让「明明注入了答案那一篇」也判成没命中。
-      hitSource: arm === 'push' ? built.hits.map(stemOf).includes(stemOf(task.source)) : null,
-      sourceRank: arm === 'push' ? built.hits.map(stemOf).indexOf(stemOf(task.source)) + 1 || null : null,
+      hitSource: arm === 'push' || arm === 'hybrid'
+        ? built.hits.map(stemOf).includes(stemOf(task.source))
+        : null,
+      sourceRank: arm === 'push' || arm === 'hybrid'
+        ? built.hits.map(stemOf).indexOf(stemOf(task.source)) + 1 || null
+        : null,
       dropped: built.dropped,
       collapsed: built.collapsed,
       dry,
@@ -683,17 +705,19 @@ function reportOf(bundle, arm) {
   };
 }
 
-/** dry 模式下把三档的成本并到一行一题上：单看一档的注入字数，判断不出它贵不贵。 */
+/** dry 模式下把各档的成本并到一行一题上：单看一档的注入字数，判断不出它贵不贵。 */
 function dryRowsOf(tasks, perArm) {
   return tasks.map((task) => {
     const cost = {};
     let hits = [];
     let hitSource = null;
     let sourceRank = null;
-    for (const arm of ARMS) {
+    for (const arm of ALL_ARMS) {
       const row = perArm.get(arm)?.rows.find((entry) => entry.id === task.id);
       if (!row) continue;
       cost[arm] = { chars: row.injectedChars, tokens: row.injectedTokens, recallMs: row.recallMs };
+      // 「详细列」（注入了谁+命中出处）以 push 为基准：它是唯一一个把多档并排比的列，
+      // 换成 hybrid 会把「按 top-N 注入」这件事从表里抹掉。
       if (arm === 'push') {
         hits = row.hits ?? [];
         hitSource = row.hitSource;
@@ -716,9 +740,11 @@ export async function main(argv = process.argv.slice(2)) {
   // `--dry` 默认把三档都算一遍：这个模式下不调回答器、成本极低，而「三档各花多少」
   // 只有并排看才有意义（单独一档的注入字数是没法判断贵不贵的）。
   const modes = opts.modes.length ? opts.modes : (opts.dry ? ARMS : ['push']);
-  const badMode = modes.find((mode) => !ARMS.includes(mode));
+  // `hybrid` 是显式点名的第四臂（见 `OPTIONAL_ARMS` 的理由）：`--mode hybrid` 走这里，
+  // 但默认清单（`--dry` 的三档、单档的 push）**一个字都不动** —— 老结果的列没变。
+  const badMode = modes.find((mode) => !ALL_ARMS.includes(mode));
   if (badMode) {
-    console.error(`--mode 只认 ${ARMS.join(' / ')}，收到 ${badMode}`);
+    console.error(`--mode 只认 ${ALL_ARMS.join(' / ')}，收到 ${badMode}`);
     console.error(USAGE);
     return 2;
   }
@@ -769,9 +795,12 @@ export async function main(argv = process.argv.slice(2)) {
     ...(opts.chars ? { maxChars: Number(opts.chars) } : {}),
   };
   const storePath = resolve(String(opts.store ?? DEFAULT_STORE).replace(/^~(?=\/|$)/, homedir()));
-  // pull 与 push 都要读库：pull 得先知道「本来会不会有命中」，才知道该不该开口（0.21.0 起
-  // 与插件本体同款语义）。只有 none 不读 —— 「没碰过记忆库」这句话必须仍然是真话。
-  const corpus = modes.some((mode) => mode === 'push' || mode === 'pull') ? prepareCorpus(storePath, settings) : null;
+  // pull / push / hybrid 都要读库：pull 得先知道「本来会不会有命中」，才知道该不该开口（0.21.0 起
+  // 与插件本体同款语义）；hybrid 只推 1 条，但它推的那一条同样来自检索。只有 none 不读 ——
+  // 「没碰过记忆库」这句话必须仍然是真话。
+  const corpus = modes.some((mode) => mode === 'push' || mode === 'pull' || mode === 'hybrid')
+    ? prepareCorpus(storePath, settings)
+    : null;
   if (corpus && !corpus.docs.length) console.error(`警告：库 ${storePath} 里一篇笔记都没读到，push 档只能注入 0 条`);
 
   const tasks = {
@@ -799,8 +828,12 @@ export async function main(argv = process.argv.slice(2)) {
   }
   // 没跑的档也占一个位置（`ran: false`）：报表里必须看得见「这档没跑」，
   // 只印跑过的档会让人把「没跑」脑补成「跑了但 0 分」。
-  const armsAll = ARMS.map((arm) => runs.find((run) => run.arm === arm) ?? { arm, ran: false });
-  armsAll.sort((a, b) => ARMS.indexOf(a.arm) - ARMS.indexOf(b.arm));
+  // 历史三臂永远在列（顺序不变）；`hybrid` 只在真跑过时才插进来 —— 没点名它的那些结果文件
+  // 与 0.21.0 之前逐字同形，读起来不会多出一个永远的 `ran: false` 列。
+  const ranArms = new Set(runs.map((run) => run.arm));
+  const armsAll = ALL_ARMS
+    .filter((arm) => ARMS.includes(arm) || ranArms.has(arm))
+    .map((arm) => runs.find((run) => run.arm === arm) ?? { arm, ran: false });
 
   const bundle = {
     answerer,

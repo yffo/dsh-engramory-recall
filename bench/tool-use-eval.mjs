@@ -10,20 +10,21 @@
  * 所以本文件补的正是那一环：**模型真的调用检索的比例**。
  *
  * 保真度声明（决定了结论能推到哪一步）：
- *   1. 三个臂都给同一个工具、同一份工具说明 —— 真实宿主里 `engramory_search` 一直注册着，
+ *   1. 每个臂都给同一个工具、同一份工具说明 —— 真实宿主里 `engramory_search` 一直注册着，
  *      `recallMode` 只改「这一轮往上下文里塞什么」，不改模型看得见哪些工具。
  *      于是 `none` 臂就是**对照组**：没有那行提示时模型的自然调用率。
  *   2. 臂间唯一变量仍然是 `buildContext()`（直接复用判分器的函数），
- *      与三臂对照表量的是同一个东西。
+ *      与三臂对照表量的是同一个东西。`hybrid`（只推最靠前 1 条）也走这条路径，
+ *      与插件 `index.js` 的 `pushHits.slice(0, 1)` 同语义。
  *   3. 工具实现照抄 `index.js` 的 execute：`search()` → `{file, score, snippet≤240}`，
  *      note 文案一致；`limit` 默认 5、夹在 1..20。
  *   4. 工具调用走**文本 JSON 协议**（不是各家模型的 function-calling 模板）：
  *      模板格式因模型而异，会把这个实验变成「谁的原生 tool 模板更顺」的比赛，
- *      而这里要量的是「模型想不想查」。协议在系统提示里写死，三臂逐字相同。
+ *      而这里要量的是「模型想不想查」。协议在系统提示里写死，四臂逐字相同。
  *
  * 用法：
- *   node bench/tool-use-eval.mjs --mode none,push,pull --out bench/eval-results/tool-use.json
- *   可选 --limit N（先跑前 N 题）/ --max-calls 3 / --base-url / --model
+ *   node bench/tool-use-eval.mjs --mode none,push,hybrid,pull --out bench/eval-results/tool-use.json
+ *   可选 --limit N（先跑前 N 题）/ --max-calls 3 / --max-tokens N / --base-url / --model
  */
 
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -34,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 import { clip, search } from '../bm25.js';
 import { DEFAULTS } from '../index.js';
 import {
+  ALL_ARMS,
   DEFAULT_RESULTS_DIR,
   DEFAULT_STORE,
   DEFAULT_TASKS_DIR,
@@ -47,13 +49,21 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
 
-const ARMS = ['none', 'push', 'pull'];
+/**
+ * 本装置认得四臂。
+ *
+ * 与 `bench/recall-eval.mjs` 的差别是**故意的**：那边的 `ARMS` 被测试逐字钉死成三档
+ * （老结果文件的列不能变），所以 `hybrid` 在那边是「显式点名才跑」。这边没有任何测试
+ * 钉 `ARMS`，于是让它当正式的一臂：不点名时四臂全跑 —— 这个装置本来就只有人工显式调用，
+ * 默认少一臂只会让下一次量 hybrid 的人再踩一次「忘了加臂」。
+ */
+const ARMS = ALL_ARMS;
 
 /** 工具条数上限：给小模型一个硬闸，免得它在「再查一次」里转圈。 */
 const DEFAULT_MAX_CALLS = 3;
 
 /**
- * 三臂逐字相同的系统提示。
+ * 四臂逐字相同的系统提示。
  *
  * 「线索里没有就说明缺什么、不要编」这一句是**故意的**：不写它，模型会用通用工程常识
  * 把分数蒙上去，臂间差值就不可信了（`none` 臂尤其容易被蒙高）。
@@ -415,6 +425,9 @@ export async function main(argv = process.argv.slice(2)) {
     store: opts.store,
     tasks: tasks.length,
     maxCalls: opts.maxCalls,
+    // 预算必须落盘：qwen 那轮就是被 400 的预算吃空的（reasoning_content 占满、
+    // content 为空），事后看不出用了多少 token 预算的结果文件，等于没法归因。
+    maxTokens: opts.maxTokens,
     arms: arms.map(({ rows, ...rest }) => rest),
     rows: arms.flatMap((a) => a.rows),
   }, null, 2)}\n`);
